@@ -151,9 +151,9 @@ class SpiderSimulation:
     ) -> tuple[EpisodeStats, List[Dict[str, object]]]:
         """
         Run a single simulation episode and collect aggregated episode statistics and an optional per-tick trace.
-        
+
         When trace capture is enabled, each trace item records tick metadata, environment state, rewards, action/result flags, and bus messages. When debug_trace is enabled, trace items additionally include serialized observations, per-module reflex diagnostics (logits, overrides, scales), decision logits, and detailed predator internal state.
-        
+
         Parameters:
             episode_index (int): Episode index used to derive the episode RNG seed and identify trace items.
             training (bool): Enable learning updates during the episode.
@@ -163,10 +163,23 @@ class SpiderSimulation:
             scenario_name (str | None): Optional scenario identifier; when provided the scenario may override the map template and max steps for the episode.
             debug_trace (bool): When True and capture_trace is enabled, include expanded diagnostic fields in each trace item.
             policy_mode (str): Inference path passed to `SpiderBrain.act()`. `"normal"` uses the learned action-center/motor path; `"reflex_only"` uses only the post-reflex proposal path.
-        
+
         Returns:
             tuple[EpisodeStats, List[Dict[str, object]]]: Aggregated episode statistics and the per-tick trace list (empty when capture_trace is False).
         """
+        # Validate policy_mode and brain compatibility before any state mutations
+        if policy_mode not in {"normal", "reflex_only"}:
+            raise ValueError(
+                "policy_mode inválido. Use 'normal' ou 'reflex_only'."
+            )
+        if policy_mode == "reflex_only" and not self.brain.config.is_modular:
+            raise ValueError(
+                "policy_mode='reflex_only' requer a arquitetura modular."
+            )
+        if policy_mode == "reflex_only" and not self.brain.config.enable_reflexes:
+            raise ValueError(
+                "policy_mode='reflex_only' requer reflexos habilitados."
+            )
         if training and policy_mode != "normal":
             raise ValueError(
                 "run_episode() só suporta training=True com policy_mode='normal'."
@@ -1435,15 +1448,31 @@ class SpiderSimulation:
         return annotated
 
     @staticmethod
+    def _safe_float(value: object) -> float:
+        """
+        Safely convert a value to float, returning 0.0 for invalid inputs.
+
+        Parameters:
+            value: Any value to attempt conversion to float.
+
+        Returns:
+            float: The converted float value, or 0.0 if conversion fails.
+        """
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0
+
+    @staticmethod
     def _condition_compact_summary(
         payload: Dict[str, object] | None,
     ) -> Dict[str, float]:
         """
         Extract a compact numeric summary of scenario/episode success rates and mean reward from a behavior-suite payload.
-        
+
         Parameters:
             payload (Dict[str, object] | None): A behavior-suite payload (expected to contain a top-level "summary" mapping) or None.
-        
+
         Returns:
             Dict[str, float]: A mapping with keys `"scenario_success_rate"`, `"episode_success_rate"`, and `"mean_reward"`, each cast to float. Missing or malformed input yields zeros for all three fields.
         """
@@ -1461,8 +1490,12 @@ class SpiderSimulation:
                 "mean_reward": 0.0,
             }
         return {
-            "scenario_success_rate": float(summary.get("scenario_success_rate", 0.0)),
-            "episode_success_rate": float(summary.get("episode_success_rate", 0.0)),
+            "scenario_success_rate": SpiderSimulation._safe_float(
+                summary.get("scenario_success_rate", 0.0)
+            ),
+            "episode_success_rate": SpiderSimulation._safe_float(
+                summary.get("episode_success_rate", 0.0)
+            ),
             "mean_reward": SpiderSimulation._condition_mean_reward(payload),
         }
 
@@ -1496,11 +1529,11 @@ class SpiderSimulation:
     ) -> Dict[str, object]:
         """
         Compute numeric deltas for each learning-evidence condition relative to a reference condition.
-        
+
         Calculates deltas for overall suite summary fields (`scenario_success_rate`, `episode_success_rate`, `mean_reward`)
-        and per-scenario `success_rate`. All numeric deltas are (condition − reference) and rounded to 6 decimal places.
+        and per-scenario `success_rate`. All numeric deltas are (condition - reference) and rounded to 6 decimal places.
         Conditions marked as skipped (or missing a `summary`) are represented with `{"skipped": True, "reason": <str>}`.
-        
+
         Parameters:
             conditions (Dict[str, Dict[str, object]]): Mapping from condition name to its evaluation payload. Each payload
                 is expected to contain a `summary` dict with top-level metrics and a `suite` dict keyed by scenario name.
