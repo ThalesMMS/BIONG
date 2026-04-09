@@ -150,6 +150,20 @@ class OperationalProfileFromSummaryTest(unittest.TestCase):
         self.assertAlmostEqual(profile.perception["night_vision_range_penalty"], 2.0)
         self.assertAlmostEqual(profile.reward["predator_threat_smell_threshold"], 0.01)
 
+    def test_from_summary_missing_percept_trace_ttl_raises_value_error(self) -> None:
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        del summary["perception"]["percept_trace_ttl"]
+        with self.assertRaises(ValueError) as ctx:
+            OperationalProfile.from_summary(summary)
+        self.assertIn("percept_trace_ttl", str(ctx.exception))
+
+    def test_from_summary_missing_percept_trace_decay_raises_value_error(self) -> None:
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        del summary["perception"]["percept_trace_decay"]
+        with self.assertRaises(ValueError) as ctx:
+            OperationalProfile.from_summary(summary)
+        self.assertIn("percept_trace_decay", str(ctx.exception))
+
 
 class OperationalProfileDefaultKeysTest(unittest.TestCase):
     def test_all_brain_modules_in_aux_weights(self) -> None:
@@ -165,6 +179,11 @@ class OperationalProfileDefaultKeysTest(unittest.TestCase):
         self.assertEqual(set(DEFAULT_OPERATIONAL_PROFILE.brain_reflex_thresholds.keys()), expected_modules)
 
     def test_required_perception_keys_present(self) -> None:
+        """
+        Verify the default operational profile's perception mapping contains exactly the required keys.
+        
+        Asserts that DEFAULT_OPERATIONAL_PROFILE.perception.keys() matches the expected set of perception configuration keys, including the newly required "percept_trace_ttl" and "percept_trace_decay".
+        """
         required = {
             "night_vision_range_penalty",
             "night_vision_min_range",
@@ -184,6 +203,8 @@ class OperationalProfileDefaultKeysTest(unittest.TestCase):
             "lizard_detection_inside_penalty",
             "lizard_detection_threshold",
             "predator_motion_bonus",
+            "percept_trace_ttl",
+            "percept_trace_decay",
         }
         self.assertEqual(set(DEFAULT_OPERATIONAL_PROFILE.perception.keys()), required)
 

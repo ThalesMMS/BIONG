@@ -61,6 +61,14 @@ class ValidateExactKeysTest(unittest.TestCase):
 
 class ObservationViewTest(unittest.TestCase):
     def _make_visual(self) -> VisualObservation:
+        """
+        Create a representative VisualObservation instance populated with deterministic example values for use in tests.
+        
+        The returned observation models a scenario with visible food (with certainty and a nonzero displacement), no visible shelter or predator, a defined heading vector, nonzero food trace strength, and day/night indicators set to daytime. Other numeric fields are set to zero where no stimulus is present.
+        
+        Returns:
+            VisualObservation: A test-ready VisualObservation populated with sample float values.
+        """
         return VisualObservation(
             food_visible=1.0,
             food_certainty=0.8,
@@ -77,6 +85,12 @@ class ObservationViewTest(unittest.TestCase):
             predator_occluded=0.0,
             predator_dx=0.0,
             predator_dy=0.0,
+            heading_dx=1.0,
+            heading_dy=0.0,
+            food_trace_strength=0.3,
+            shelter_trace_strength=0.0,
+            predator_trace_strength=0.0,
+            predator_motion_salience=0.0,
             day=1.0,
             night=0.0,
         )
@@ -86,7 +100,7 @@ class ObservationViewTest(unittest.TestCase):
         self.assertIsInstance(names, tuple)
         self.assertEqual(names[0], "food_visible")
         self.assertEqual(names[-1], "night")
-        self.assertEqual(len(names), 17)
+        self.assertEqual(len(names), 23)
 
     def test_as_mapping_returns_float_values(self) -> None:
         view = self._make_visual()
@@ -127,13 +141,13 @@ class ObservationViewTest(unittest.TestCase):
         self.assertEqual(len(SensoryObservation.field_names()), 12)
 
     def test_hunger_observation_field_count(self) -> None:
-        self.assertEqual(len(HungerObservation.field_names()), 13)
+        self.assertEqual(len(HungerObservation.field_names()), 16)
 
     def test_sleep_observation_field_count(self) -> None:
-        self.assertEqual(len(SleepObservation.field_names()), 16)
+        self.assertEqual(len(SleepObservation.field_names()), 19)
 
     def test_alert_observation_field_count(self) -> None:
-        self.assertEqual(len(AlertObservation.field_names()), 19)
+        self.assertEqual(len(AlertObservation.field_names()), 23)
 
     def test_action_context_observation_field_count(self) -> None:
         """
@@ -464,6 +478,93 @@ class ObservationContractTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unexpected_signal"):
             interface.vector_from_mapping(mapping)
+
+
+class SignalDescriptionRegressionTest(unittest.TestCase):
+    """Regression tests for interface signal descriptions translated in this PR."""
+
+    def test_all_signal_descriptions_are_non_empty(self) -> None:
+        for interface in ALL_INTERFACES:
+            for signal in interface.inputs:
+                self.assertTrue(
+                    signal.description.strip(),
+                    f"Signal {signal.name!r} in {interface.name!r} has empty description",
+                )
+
+    def test_all_signal_descriptions_are_strings(self) -> None:
+        for interface in ALL_INTERFACES:
+            for signal in interface.inputs:
+                self.assertIsInstance(
+                    signal.description,
+                    str,
+                    f"Signal {signal.name!r} in {interface.name!r} description is not a string",
+                )
+
+    def test_visual_cortex_signal_descriptions_are_in_english(self) -> None:
+        # Spot-check a few well-known signals to confirm the Portuguese descriptions
+        # were replaced with English ones in this PR.
+        visual_iface = next(i for i in ALL_INTERFACES if i.name == "visual_cortex")
+        by_name = {s.name: s.description for s in visual_iface.inputs}
+        # These descriptions must not contain Portuguese keywords from the old text
+        for signal_name, description in by_name.items():
+            self.assertNotIn(
+                "se há",
+                description.lower(),
+                f"Signal {signal_name!r} still has Portuguese text: {description!r}",
+            )
+            self.assertNotIn(
+                "durante o",
+                description.lower(),
+                f"Signal {signal_name!r} still has Portuguese text: {description!r}",
+            )
+
+    def test_sensory_cortex_signal_descriptions_are_in_english(self) -> None:
+        sensory_iface = next(i for i in ALL_INTERFACES if i.name == "sensory_cortex")
+        by_name = {s.name: s.description for s in sensory_iface.inputs}
+        for signal_name, description in by_name.items():
+            self.assertNotIn(
+                "causada",
+                description.lower(),
+                f"Signal {signal_name!r} still has Portuguese text: {description!r}",
+            )
+
+    def test_signal_descriptions_do_not_contain_portuguese_common_words(self) -> None:
+        portuguese_markers = [
+            "está",
+            "aranha",
+            "predador",
+            "abrigo",
+            "comida",
+            "direção",
+            "distância",
+            "visível",
+            "intensidade",
+            "memória",
+        ]
+        for interface in ALL_INTERFACES:
+            for signal in interface.inputs:
+                desc_lower = signal.description.lower()
+                for marker in portuguese_markers:
+                    self.assertNotIn(
+                        marker,
+                        desc_lower,
+                        f"Signal {signal.name!r} in {interface.name!r} still has Portuguese "
+                        f"word {marker!r}: {signal.description!r}",
+                    )
+
+    def test_fingerprint_matches_current_registry(self) -> None:
+        # Regression: ensure the fingerprint in docs/interfaces.md matches the actual registry.
+        # This catches future description changes that update the registry but not the docs.
+        docs_path = Path(__file__).parent.parent / "docs" / "interfaces.md"
+        if not docs_path.exists():
+            self.skipTest("docs/interfaces.md not found")
+        content = docs_path.read_text(encoding="utf-8")
+        expected_fingerprint = interface_registry_fingerprint()
+        self.assertIn(
+            expected_fingerprint,
+            content,
+            "docs/interfaces.md fingerprint does not match the current registry fingerprint",
+        )
 
 
 if __name__ == "__main__":

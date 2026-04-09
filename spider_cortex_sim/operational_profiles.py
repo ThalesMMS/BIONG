@@ -98,47 +98,53 @@ class OperationalProfile:
     @classmethod
     def from_summary(cls, summary: Mapping[str, object]) -> "OperationalProfile":
         """
-        Construct an OperationalProfile from a summary mapping.
+        Create an OperationalProfile from a summary mapping.
+        
+        Validates that `summary` contains the top-level keys "name", "version", "brain", "perception",
+        and "reward". Ensures "name" is a `str`, "version" is `int` or coercible to `int`, and that
+        "brain", "perception", and "reward" are mappings. The "brain" mapping must include the keys
+        "aux_weights", "reflex_logit_strengths", and "reflex_thresholds", each a mapping. The
+        "perception" mapping must include "percept_trace_ttl" and "percept_trace_decay". On success,
+        returns a canonicalized OperationalProfile instance.
         
         Parameters:
-            summary (Mapping[str, object]): Mapping with keys "name", "version", "perception", "reward"
-                and a "brain" mapping that contains "aux_weights", "reflex_logit_strengths",
-                and "reflex_thresholds".
+            summary (Mapping[str, object]): Mapping with the required structure described above.
         
         Returns:
-            OperationalProfile: A new OperationalProfile instance built from the provided summary.
+            OperationalProfile: An instance constructed from the validated summary.
         
         Raises:
-            ValueError: If required keys are missing or any required section has an invalid type.
+            ValueError: If required keys are missing or any required section has an invalid type or
+            cannot be coerced (e.g., `version` not coercible to `int`).
         """
         required_top_level = ("name", "version", "brain", "perception", "reward")
         missing_top_level = [key for key in required_top_level if key not in summary]
         if missing_top_level:
             raise ValueError(
-                "Resumo de perfil operacional inválido: faltando chaves obrigatórias "
+                "Invalid operational profile summary: missing required keys "
                 f"{missing_top_level}."
             )
 
         name = summary["name"]
         if not isinstance(name, str):
-            raise ValueError("Resumo de perfil operacional inválido: 'name' deve ser str.")
+            raise ValueError("Invalid operational profile summary: 'name' must be str.")
 
         try:
             version = int(summary["version"])
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                "Resumo de perfil operacional inválido: 'version' deve ser int ou conversível para int."
+                "Invalid operational profile summary: 'version' must be int or coercible to int."
             ) from exc
 
         brain = summary["brain"]
         if not isinstance(brain, Mapping):
-            raise ValueError("Resumo de perfil operacional inválido: bloco 'brain' deve ser Mapping.")
+            raise ValueError("Invalid operational profile summary: 'brain' block must be a Mapping.")
 
         required_brain = ("aux_weights", "reflex_logit_strengths", "reflex_thresholds")
         missing_brain = [key for key in required_brain if key not in brain]
         if missing_brain:
             raise ValueError(
-                "Resumo de perfil operacional inválido: bloco 'brain' faltando chaves obrigatórias "
+                "Invalid operational profile summary: 'brain' block is missing required keys "
                 f"{missing_brain}."
             )
 
@@ -148,19 +154,26 @@ class OperationalProfile:
         perception = summary["perception"]
         reward = summary["reward"]
         if not isinstance(aux_weights, Mapping):
-            raise ValueError("Resumo de perfil operacional inválido: 'brain.aux_weights' deve ser Mapping.")
+            raise ValueError("Invalid operational profile summary: 'brain.aux_weights' must be a Mapping.")
         if not isinstance(reflex_logit_strengths, Mapping):
             raise ValueError(
-                "Resumo de perfil operacional inválido: 'brain.reflex_logit_strengths' deve ser Mapping."
+                "Invalid operational profile summary: 'brain.reflex_logit_strengths' must be a Mapping."
             )
         if not isinstance(reflex_thresholds, Mapping):
             raise ValueError(
-                "Resumo de perfil operacional inválido: 'brain.reflex_thresholds' deve ser Mapping."
+                "Invalid operational profile summary: 'brain.reflex_thresholds' must be a Mapping."
             )
         if not isinstance(perception, Mapping):
-            raise ValueError("Resumo de perfil operacional inválido: 'perception' deve ser Mapping.")
+            raise ValueError("Invalid operational profile summary: 'perception' must be a Mapping.")
         if not isinstance(reward, Mapping):
-            raise ValueError("Resumo de perfil operacional inválido: 'reward' deve ser Mapping.")
+            raise ValueError("Invalid operational profile summary: 'reward' must be a Mapping.")
+        required_perception = ("percept_trace_ttl", "percept_trace_decay")
+        missing_perception = [key for key in required_perception if key not in perception]
+        if missing_perception:
+            raise ValueError(
+                "Invalid operational profile summary: 'perception' block is missing required keys "
+                f"{missing_perception}."
+            )
 
         return cls(
             name=name,
@@ -264,6 +277,8 @@ DEFAULT_OPERATIONAL_PROFILE = OperationalProfile(
         "lizard_detection_inside_penalty": 0.08,
         "lizard_detection_threshold": 0.45,
         "predator_motion_bonus": 0.10,
+        "percept_trace_ttl": 4.0,
+        "percept_trace_decay": 0.65,
     },
     reward={
         "predator_threat_contact_threshold": 0.0,
@@ -306,13 +321,12 @@ def resolve_operational_profile(
     profile: str | OperationalProfile | None,
 ) -> OperationalProfile:
     """
-    Resolve an operational profile given a profile name, an OperationalProfile instance, or None.
+    Resolve an OperationalProfile from a profile name, an existing instance, or None.
     
-    Parameters:
-        profile: A profile name, an OperationalProfile instance, or `None`. If `None`, the default profile is used. If an `OperationalProfile` is provided, it is returned unchanged. If a string is provided it is treated as a lookup key in the profiles registry.
+    If `profile` is `None`, the default operational profile is returned. If `profile` is an `OperationalProfile` instance, it is returned unchanged. If `profile` is a string, it is treated as a registry key and the corresponding profile is returned.
     
     Returns:
-        The resolved OperationalProfile. If `profile` is `None`, the default profile is returned.
+        The resolved OperationalProfile.
     
     Raises:
         ValueError: If `profile` is a string that does not match any registered profile name.
@@ -326,5 +340,5 @@ def resolve_operational_profile(
     except KeyError as exc:
         available = ", ".join(sorted(OPERATIONAL_PROFILES))
         raise ValueError(
-            f"Perfil operacional inválido: {profile!r}. Disponíveis: {available}"
+            f"Invalid operational profile: {profile!r}. Available: {available}"
         ) from exc

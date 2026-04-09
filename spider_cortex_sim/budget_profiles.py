@@ -270,7 +270,7 @@ def resolve_budget_profile(profile: str | BudgetProfile | None) -> BudgetProfile
     except KeyError as exc:
         available = ", ".join(sorted(BUDGET_PROFILES))
         raise ValueError(
-            f"Perfil de orçamento inválido: {profile!r}. Disponíveis: {available}"
+            f"Invalid budget profile: {profile!r}. Available: {available}"
         ) from exc
 
 
@@ -301,22 +301,22 @@ def resolve_budget(
     ablation_seeds: Sequence[int] | None,
 ) -> ResolvedBudget:
     """
-    Resolve a budget profile into a fully specified ResolvedBudget, applying any explicit parameter overrides.
+    Resolve a budget profile into a fully specified ResolvedBudget, applying any explicit overrides.
     
-    If `profile` is a name or BudgetProfile it is used as the base; any non-None numeric parameters override the base values. If `behavior_seeds` or `ablation_seeds` are provided they replace the base `comparison_seeds`; otherwise each defaults to the base profile's `comparison_seeds`. The returned `overrides` dict contains only the parameters that were explicitly supplied to this call.
+    Uses `profile` (name or BudgetProfile) as the base and replaces any base numeric fields or seed sets with the non-None arguments supplied to this call. If `behavior_seeds` or `ablation_seeds` are not provided, each defaults to the base profile's `comparison_seeds`. The returned `overrides` dictionary contains only parameters that were explicitly supplied.
     
     Parameters:
-        profile: Profile name, a BudgetProfile instance, or None (defaults to the custom profile).
-        episodes: If provided, overrides the number of training episodes.
-        eval_episodes: If provided, overrides the number of evaluation episodes.
-        max_steps: If provided, overrides the maximum steps per episode.
-        scenario_episodes: If provided, overrides the number of episodes per scenario.
-        checkpoint_interval: If provided, overrides the checkpoint interval.
-        behavior_seeds: If provided, a sequence of integers to use as behavior seeds instead of the profile's comparison_seeds.
-        ablation_seeds: If provided, a sequence of integers to use as ablation seeds instead of the profile's comparison_seeds.
+        profile: Profile name, a BudgetProfile instance, or None to use the custom profile.
+        episodes: If provided, override for the number of training episodes.
+        eval_episodes: If provided, override for the number of evaluation episodes.
+        max_steps: If provided, override for the maximum steps per episode.
+        scenario_episodes: If provided, override for the number of episodes per scenario.
+        checkpoint_interval: If provided, override for how often to checkpoint.
+        behavior_seeds: If provided, sequence of integers to use as behavior seeds instead of the profile's comparison_seeds.
+        ablation_seeds: If provided, sequence of integers to use as ablation seeds instead of the profile's comparison_seeds.
     
     Returns:
-        ResolvedBudget: A dataclass with all budget fields resolved to concrete values and tuples for seed sets; its `overrides` field is a dict of the explicitly supplied override values.
+        ResolvedBudget: A dataclass with all budget fields resolved to concrete values; seed sets are tuples and `overrides` is a dict of the explicitly supplied override values.
     """
     base = resolve_budget_profile(profile)
     explicit_behavior_seeds = _normalize_seed_sequence(behavior_seeds)
@@ -336,19 +336,19 @@ def resolve_budget(
     )
 
     if resolved_episodes < 0:
-        raise ValueError("episodes deve ser >= 0.")
+        raise ValueError("episodes must be >= 0.")
     if resolved_eval_episodes < 0:
-        raise ValueError("eval_episodes deve ser >= 0.")
+        raise ValueError("eval_episodes must be >= 0.")
     if resolved_max_steps <= 0:
-        raise ValueError("max_steps deve ser > 0.")
+        raise ValueError("max_steps must be > 0.")
     if resolved_scenario_episodes <= 0:
-        raise ValueError("scenario_episodes deve ser > 0.")
+        raise ValueError("scenario_episodes must be > 0.")
     if resolved_checkpoint_interval < 1:
-        raise ValueError("checkpoint_interval deve ser >= 1.")
+        raise ValueError("checkpoint_interval must be >= 1.")
     if explicit_behavior_seeds is not None and not explicit_behavior_seeds:
-        raise ValueError("behavior_seeds não pode ser vazio.")
+        raise ValueError("behavior_seeds cannot be empty.")
     if explicit_ablation_seeds is not None and not explicit_ablation_seeds:
-        raise ValueError("ablation_seeds não pode ser vazio.")
+        raise ValueError("ablation_seeds cannot be empty.")
 
     overrides: dict[str, object] = {}
     if episodes is not None:

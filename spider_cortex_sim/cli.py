@@ -16,7 +16,7 @@ from .maps import MAP_TEMPLATE_NAMES
 from .noise import canonical_noise_profile_names
 from .operational_profiles import canonical_operational_profile_names
 from .scenarios import SCENARIO_NAMES
-from .simulation import SpiderSimulation
+from .simulation import CURRICULUM_PROFILE_NAMES, SpiderSimulation
 from .world import REWARD_PROFILES
 
 
@@ -38,6 +38,12 @@ def _default_behavior_evaluation() -> dict[str, object]:
             "regressions": [],
         },
     }
+
+
+def _ensure_behavior_evaluation(summary: dict[str, object]) -> None:
+    """Initialise the behavior_evaluation key in summary if absent."""
+    if "behavior_evaluation" not in summary:
+        summary["behavior_evaluation"] = _default_behavior_evaluation()
 
 
 def _default_checkpointing_summary(
@@ -81,6 +87,39 @@ def _default_checkpointing_summary(
     }
 
 
+def _build_compare_training_kwargs(
+    args: argparse.Namespace,
+    budget,
+) -> dict[str, object]:
+    """Collect shared runtime kwargs for training-regime comparisons."""
+    return {
+        "width": args.width,
+        "height": args.height,
+        "food_count": args.food_count,
+        "day_length": args.day_length,
+        "night_length": args.night_length,
+        "max_steps": budget.max_steps,
+        "episodes": budget.episodes,
+        "evaluation_episodes": budget.eval_episodes,
+        "gamma": args.gamma,
+        "module_lr": args.module_lr,
+        "motor_lr": args.motor_lr,
+        "module_dropout": args.module_dropout,
+        "reward_profile": args.reward_profile,
+        "map_template": args.map_template,
+        "operational_profile": args.operational_profile,
+        "noise_profile": args.noise_profile,
+        "budget_profile": args.budget_profile,
+        "seeds": tuple(budget.behavior_seeds),
+        "episodes_per_scenario": budget.scenario_episodes,
+        "checkpoint_selection": args.checkpoint_selection,
+        "checkpoint_metric": args.checkpoint_metric,
+        "checkpoint_interval": budget.checkpoint_interval,
+        "checkpoint_dir": args.checkpoint_dir,
+        "curriculum_profile": args.curriculum_profile,
+    }
+
+
 def _parse_module_reflex_scales(values: list[str] | None) -> dict[str, float]:
     """
     Parse per-module reflex scale specifications of the form "module=scale" into a mapping.
@@ -98,19 +137,19 @@ def _parse_module_reflex_scales(values: list[str] | None) -> dict[str, float]:
     for raw in values or []:
         if "=" not in raw:
             raise ValueError(
-                "--module-reflex-scale deve usar o formato module=scale."
+                "--module-reflex-scale must use the format module=scale."
             )
         module_name, scale_text = raw.split("=", 1)
         module_name = module_name.strip()
         if not module_name:
             raise ValueError(
-                "--module-reflex-scale requer um nome de módulo antes de '='."
+                "--module-reflex-scale requires a module name before '='."
             )
         try:
             scale = float(scale_text)
         except ValueError as exc:
             raise ValueError(
-                f"Escala reflexa inválida para o módulo {module_name!r}: {scale_text!r}."
+                f"Invalid reflex scale for module {module_name!r}: {scale_text!r}."
             ) from exc
         parsed[module_name] = scale
     return parsed
@@ -126,243 +165,249 @@ def build_parser() -> argparse.ArgumentParser:
         argparse.ArgumentParser: Configured parser for the SpiderSimulation command-line interface.
     """
     parser = argparse.ArgumentParser(
-        description="Treinamento online por recompensa de módulos corticais independentes para uma aranha simulada."
+        description="Online reward-based training for independent cortical modules in a simulated spider."
     )
-    parser.add_argument("--episodes", type=int, default=None, help="Número de episódios de treinamento.")
-    parser.add_argument("--eval-episodes", type=int, default=None, help="Número de episódios de avaliação greedy.")
-    parser.add_argument("--max-steps", type=int, default=None, help="Número máximo de passos por episódio.")
-    parser.add_argument("--width", type=int, default=12, help="Largura do mundo.")
-    parser.add_argument("--height", type=int, default=12, help="Altura do mundo.")
-    parser.add_argument("--food-count", type=int, default=4, help="Quantidade de fontes de comida ativas.")
-    parser.add_argument("--day-length", type=int, default=18, help="Duração do dia em ticks.")
-    parser.add_argument("--night-length", type=int, default=12, help="Duração da noite em ticks.")
-    parser.add_argument("--seed", type=int, default=7, help="Seed principal.")
+    parser.add_argument("--episodes", type=int, default=None, help="Number of training episodes.")
+    parser.add_argument("--eval-episodes", type=int, default=None, help="Number of greedy evaluation episodes.")
+    parser.add_argument(
+        "--curriculum-profile",
+        choices=list(CURRICULUM_PROFILE_NAMES),
+        default="none",
+        help="Optional curriculum profile for organizing training into reproducible phases.",
+    )
+    parser.add_argument("--max-steps", type=int, default=None, help="Maximum number of steps per episode.")
+    parser.add_argument("--width", type=int, default=12, help="World width.")
+    parser.add_argument("--height", type=int, default=12, help="World height.")
+    parser.add_argument("--food-count", type=int, default=4, help="Number of active food sources.")
+    parser.add_argument("--day-length", type=int, default=18, help="Day length in ticks.")
+    parser.add_argument("--night-length", type=int, default=12, help="Night length in ticks.")
+    parser.add_argument("--seed", type=int, default=7, help="Primary seed.")
     parser.add_argument(
         "--reward-profile",
         choices=sorted(REWARD_PROFILES.keys()),
         default="classic",
-        help="Perfil de recompensa do mundo.",
+        help="World reward profile.",
     )
     parser.add_argument(
         "--map-template",
         choices=list(MAP_TEMPLATE_NAMES),
         default="central_burrow",
-        help="Template espacial do mundo.",
+        help="World map template.",
     )
     parser.add_argument(
         "--budget-profile",
         choices=list(canonical_budget_profile_names()),
         default=None,
-        help="Perfil reproduzível de orçamento para treino/benchmark.",
+        help="Reproducible budget profile for training and benchmarking.",
     )
     parser.add_argument(
         "--operational-profile",
         choices=list(canonical_operational_profile_names()),
         default="default_v1",
-        help="Perfil operacional versionado para reflexos, percepção e heurísticas de reward.",
+        help="Versioned operational profile for reflexes, perception, and reward heuristics.",
     )
     parser.add_argument(
         "--noise-profile",
         choices=list(canonical_noise_profile_names()),
         default="none",
-        help="Perfil explícito de ruído/estocasticidade experimental.",
+        help="Explicit experimental noise or stochasticity profile.",
     )
-    parser.add_argument("--module-lr", type=float, default=0.010, help="Learning rate dos módulos especializados.")
-    parser.add_argument("--motor-lr", type=float, default=0.012, help="Learning rate do córtex motor/critico.")
-    parser.add_argument("--module-dropout", type=float, default=0.05, help="Probabilidade de dropout por módulo durante treino.")
-    parser.add_argument("--reflex-scale", type=float, default=1.0, help="Escala global de reflexos para a arquitetura modular.")
+    parser.add_argument("--module-lr", type=float, default=0.010, help="Learning rate for the specialized modules.")
+    parser.add_argument("--motor-lr", type=float, default=0.012, help="Learning rate for the motor or critic cortex.")
+    parser.add_argument("--module-dropout", type=float, default=0.05, help="Per-module dropout probability during training.")
+    parser.add_argument("--reflex-scale", type=float, default=1.0, help="Global reflex scale for the modular architecture.")
     parser.add_argument(
         "--module-reflex-scale",
         action="append",
         default=None,
-        help="Override por módulo no formato module=scale. Pode ser usado múltiplas vezes.",
+        help="Per-module override in module=scale format. Can be used multiple times.",
     )
     parser.add_argument(
         "--reflex-anneal-final-scale",
         type=float,
         default=None,
-        help="Escala reflexa final para annealing linear ao longo do treino.",
+        help="Final reflex scale for linear annealing during training.",
     )
-    parser.add_argument("--gamma", type=float, default=0.96, help="Fator de desconto do TD online.")
-    parser.add_argument("--summary", type=Path, default=None, help="Arquivo JSON para gravar resumo.")
-    parser.add_argument("--trace", type=Path, default=None, help="Arquivo JSONL para gravar um trace de avaliação.")
+    parser.add_argument("--gamma", type=float, default=0.96, help="Online TD discount factor.")
+    parser.add_argument("--summary", type=Path, default=None, help="JSON file path for writing the summary.")
+    parser.add_argument("--trace", type=Path, default=None, help="JSONL file path for writing an evaluation trace.")
     parser.add_argument(
         "--render-eval",
         action="store_true",
-        help="Renderiza em ASCII o último episódio de avaliação após o treinamento.",
+        help="Render the final evaluation episode in ASCII after training.",
     )
     parser.add_argument(
         "--gui",
         action="store_true",
-        help="Abre interface gráfica Pygame para visualizar a simulação.",
+        help="Open the Pygame graphical interface to visualize the simulation.",
     )
     parser.add_argument(
         "--save-brain",
         type=Path,
         default=None,
-        help="Diretório para salvar os pesos do cérebro após o treinamento.",
+        help="Directory where brain weights should be saved after training.",
     )
     parser.add_argument(
         "--load-brain",
         type=Path,
         default=None,
-        help="Diretório de onde carregar pesos do cérebro antes do treinamento.",
+        help="Directory from which brain weights should be loaded before training.",
     )
     parser.add_argument(
         "--load-modules",
         nargs="+",
         default=None,
-        help="Lista de módulos específicos a carregar (ex: visual_cortex hunger_center). "
-             "Requer --load-brain.",
+        help="List of specific modules to load (for example: visual_cortex hunger_center). "
+             "Requires --load-brain.",
     )
     parser.add_argument(
         "--scenario",
         action="append",
         choices=list(SCENARIO_NAMES),
         default=None,
-        help="Executa um cenário determinístico de avaliação. Pode ser usado múltiplas vezes.",
+        help="Run a deterministic evaluation scenario. Can be used multiple times.",
     )
     parser.add_argument(
         "--scenario-suite",
         action="store_true",
-        help="Executa a suíte completa de cenários determinísticos.",
+        help="Run the full deterministic scenario suite.",
     )
     parser.add_argument(
         "--behavior-scenario",
         action="append",
         choices=list(SCENARIO_NAMES),
         default=None,
-        help="Executa scorecards da avaliação comportamental para um cenário específico. Pode ser usado múltiplas vezes.",
+        help="Run behavioral evaluation scorecards for a specific scenario. Can be used multiple times.",
     )
     parser.add_argument(
         "--behavior-suite",
         action="store_true",
-        help="Executa a suíte completa de avaliação comportamental.",
+        help="Run the full behavioral evaluation suite.",
     )
     parser.add_argument(
         "--behavior-seeds",
         nargs="+",
         type=int,
         default=None,
-        help="Seeds explícitas para comparação comportamental reproduzível.",
+        help="Explicit seeds for reproducible behavioral comparisons.",
     )
     parser.add_argument(
         "--behavior-compare-profiles",
         action="store_true",
-        help="Compara a suíte comportamental entre perfis de recompensa.",
+        help="Compare the behavioral suite across reward profiles.",
     )
     parser.add_argument(
         "--behavior-compare-maps",
         action="store_true",
-        help="Compara a suíte comportamental entre templates de mapa.",
+        help="Compare the behavioral suite across map templates.",
     )
     parser.add_argument(
         "--behavior-csv",
         type=Path,
         default=None,
-        help="Arquivo CSV para exportar resultados flat da avaliação comportamental.",
+        help="CSV file path for exporting flat behavioral evaluation results.",
     )
     parser.add_argument(
         "--scenario-episodes",
         type=int,
         default=None,
-        help="Número de repetições por cenário.",
+        help="Number of repetitions per scenario.",
     )
     parser.add_argument(
         "--checkpoint-selection",
         choices=list(CHECKPOINT_SELECTION_NAMES),
         default="none",
-        help="Seleciona automaticamente o melhor checkpoint para workflows comportamentais.",
+        help="Automatically select the best checkpoint for behavioral workflows.",
     )
     parser.add_argument(
         "--checkpoint-metric",
         choices=list(CHECKPOINT_METRIC_NAMES),
         default="scenario_success_rate",
-        help="Métrica usada para escolher o melhor checkpoint.",
+        help="Metric used to choose the best checkpoint.",
     )
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
         default=None,
-        help="Diretório opcional para persistir os checkpoints best/last.",
+        help="Optional directory for persisting the best and last checkpoints.",
     )
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
         default=None,
-        help="Intervalo de episódios entre checkpoints intermediários.",
+        help="Episode interval between intermediate checkpoints.",
     )
     parser.add_argument(
         "--ablation-suite",
         action="store_true",
-        help="Compara a suíte comportamental entre variantes de arquitetura/ablação.",
+        help="Compare the behavioral suite across architecture and ablation variants.",
     )
     parser.add_argument(
         "--ablation-variant",
         action="append",
         choices=list(canonical_ablation_variant_names()),
         default=None,
-        help="Seleciona uma variante de ablação específica. Pode ser usado múltiplas vezes.",
+        help="Select a specific ablation variant. Can be used multiple times.",
     )
     parser.add_argument(
         "--ablation-seeds",
         nargs="+",
         type=int,
         default=None,
-        help="Seeds explícitas para a suíte de ablações reproduzível.",
+        help="Explicit seeds for the reproducible ablation suite.",
     )
     parser.add_argument(
         "--learning-evidence",
         action="store_true",
-        help="Compara checkpoint treinado contra controles para medir evidência de aprendizado.",
+        help="Compare the trained checkpoint against controls to measure evidence of learning.",
     )
     parser.add_argument(
         "--learning-evidence-long-budget-profile",
         choices=list(canonical_budget_profile_names()),
         default="report",
-        help="Perfil de orçamento longo usado pela condição trained_long_budget.",
+        help="Long-budget profile used by the trained_long_budget condition.",
     )
     parser.add_argument(
         "--compare-profiles",
         action="store_true",
-        help="Executa comparação agregada entre perfis de recompensa usando seeds fixas.",
+        help="Run an aggregated comparison across reward profiles using fixed seeds.",
     )
     parser.add_argument(
         "--compare-maps",
         action="store_true",
-        help="Executa comparação agregada entre templates de mapa usando seeds fixas.",
+        help="Run an aggregated comparison across map templates using fixed seeds.",
     )
     parser.add_argument(
         "--full-summary",
         action="store_true",
-        help="Imprime o summary JSON completo em vez do resumo curto padrão.",
+        help="Print the full JSON summary instead of the default short summary.",
     )
     parser.add_argument(
         "--debug-trace",
         action="store_true",
-        help="Enriquece o trace com observações derivadas, memória e estado interno do predador.",
+        help="Enrich the trace with derived observations, memory, and the predator's internal state.",
     )
     return parser
 
 
 def main() -> None:
     """
-    Parse CLI arguments and execute the requested SpiderSimulation workflow.
+    Parse CLI arguments and run the requested SpiderSimulation workflows.
     
-    Runs either the GUI or a headless simulation that may perform training, evaluation, behavior-suite runs, configuration comparisons, and ablation analyses; saves summary/trace/behavior CSV and brain files when requested and prints a condensed or full JSON report to stdout.
+    Builds and validates the CLI, resolves runtime budget and brain configuration, then either launches the GUI or executes headless workflows (training/evaluation, deterministic scenario evaluations, behavior and configuration comparisons, ablation analyses, learning-evidence comparisons, and curriculum comparisons). Manages checkpoint-selection metadata, optionally persists summary/trace/behavior-CSV/brain files, and prints either a condensed or full JSON report to stdout.
     """
     parser = build_parser()
     args = parser.parse_args()
 
     if args.load_modules and not args.load_brain:
-        parser.error("--load-modules requer --load-brain.")
+        parser.error("--load-modules requires --load-brain.")
     if not math.isfinite(float(args.reflex_scale)):
-        parser.error("--reflex-scale deve ser finito.")
+        parser.error("--reflex-scale must be finite.")
     if (
         args.reflex_anneal_final_scale is not None
         and not math.isfinite(float(args.reflex_anneal_final_scale))
     ):
-        parser.error("--reflex-anneal-final-scale deve ser finito.")
+        parser.error("--reflex-anneal-final-scale must be finite.")
 
     budget = resolve_budget(
         profile=args.budget_profile,
@@ -397,7 +442,7 @@ def main() -> None:
         custom_reflex_config_requested or args.reflex_anneal_final_scale is not None
     ):
         parser.error(
-            "As flags de reflexo personalizadas não são suportadas com "
+            "Custom reflex flags are not supported with "
             + ", ".join(unsupported_reflex_workflows)
             + "."
         )
@@ -465,7 +510,7 @@ def main() -> None:
     )
     if args.load_brain:
         loaded = sim.brain.load(args.load_brain, modules=args.load_modules)
-        print(f"Módulos carregados: {loaded}")
+        print(f"Loaded modules: {loaded}")
 
     behavior_rows = []
     ablation_active = bool(args.ablation_suite or args.ablation_variant)
@@ -523,7 +568,7 @@ def main() -> None:
     )
     if args.reflex_anneal_final_scale is not None and not should_train_or_eval:
         parser.error(
-            "--reflex-anneal-final-scale requer um workflow com treino ou avaliação do cérebro base."
+            "--reflex-anneal-final-scale requires a workflow that trains or evaluates the base brain."
         )
     if should_train_or_eval:
         checkpoint_selection_run = primary_checkpoint_selection != "none"
@@ -540,6 +585,7 @@ def main() -> None:
             checkpoint_scenario_names=requested_scenarios or list(SCENARIO_NAMES),
             selection_scenario_episodes=budget.selection_scenario_episodes,
             reflex_anneal_final_scale=args.reflex_anneal_final_scale,
+            curriculum_profile=args.curriculum_profile,
         )
     else:
         sim._set_runtime_budget(
@@ -622,9 +668,12 @@ def main() -> None:
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
         )
-        if "behavior_evaluation" not in summary:
-            summary["behavior_evaluation"] = _default_behavior_evaluation()
+        _ensure_behavior_evaluation(summary)
         summary["behavior_evaluation"]["comparisons"] = behavior_comparisons
+        if "reward_audit" in behavior_comparisons:
+            summary["behavior_evaluation"]["shaping_audit"] = behavior_comparisons[
+                "reward_audit"
+            ]
         behavior_rows.extend(comparison_rows)
 
     if ablation_active:
@@ -656,8 +705,7 @@ def main() -> None:
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
         )
-        if "behavior_evaluation" not in summary:
-            summary["behavior_evaluation"] = _default_behavior_evaluation()
+        _ensure_behavior_evaluation(summary)
         summary["behavior_evaluation"]["ablations"] = ablation_payload
         behavior_rows.extend(ablation_rows)
 
@@ -691,10 +739,24 @@ def main() -> None:
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
         )
-        if "behavior_evaluation" not in summary:
-            summary["behavior_evaluation"] = _default_behavior_evaluation()
+        _ensure_behavior_evaluation(summary)
         summary["behavior_evaluation"]["learning_evidence"] = learning_evidence_payload
         behavior_rows.extend(learning_evidence_rows)
+
+    if (
+        args.curriculum_profile != "none"
+        and not ablation_active
+        and not learning_evidence_active
+        and (budget.episodes > 0 or budget.eval_episodes > 0)
+    ):
+        compare_training_kwargs = _build_compare_training_kwargs(args, budget)
+        curriculum_payload, curriculum_rows = SpiderSimulation.compare_training_regimes(
+            names=requested_scenarios or None,
+            **compare_training_kwargs,
+        )
+        _ensure_behavior_evaluation(summary)
+        summary["behavior_evaluation"]["curriculum_comparison"] = curriculum_payload
+        behavior_rows.extend(curriculum_rows)
 
     if (
         checkpoint_selection_run
@@ -716,7 +778,7 @@ def main() -> None:
         SpiderSimulation.save_behavior_csv(behavior_rows, args.behavior_csv)
     if args.save_brain:
         sim.brain.save(args.save_brain)
-        print(f"Cérebro salvo em: {args.save_brain}")
+        print(f"Brain saved to: {args.save_brain}")
 
     if args.full_summary:
         print(json.dumps(summary, indent=2, ensure_ascii=False))
@@ -727,6 +789,7 @@ def main() -> None:
         "map_template": summary["config"]["world"]["map_template"],
         "budget_profile": summary["config"]["budget"]["profile"],
         "benchmark_strength": summary["config"]["budget"]["benchmark_strength"],
+        "training_regime": summary["config"]["training_regime"],
         "operational_profile": summary["config"]["operational_profile"]["name"],
         "noise_profile": summary["config"]["noise_profile"]["name"],
         "training_mean_reward_last_window": summary["training_last_window"]["mean_reward"],
@@ -781,6 +844,24 @@ def main() -> None:
                 for name, data in summary["comparisons"]["map_templates"].items()
             },
         }
+    if "reward_audit" in summary:
+        reward_audit = summary.get("reward_audit", {})
+        observation_signals = reward_audit.get("observation_signals", {})
+        memory_signals = reward_audit.get("memory_signals", {})
+        printable["reward_audit"] = {
+            "current_profile": reward_audit.get("current_profile"),
+            "minimal_profile": reward_audit.get("minimal_profile"),
+            "high_risk_observation_signals": sorted(
+                name
+                for name, data in observation_signals.items()
+                if isinstance(data, dict) and data.get("risk") == "high"
+            ),
+            "high_risk_memory_signals": sorted(
+                name
+                for name, data in memory_signals.items()
+                if isinstance(data, dict) and data.get("risk") == "high"
+            ),
+        }
     if "behavior_evaluation" in summary:
         printable["behavior_evaluation"] = {
             "scenario_success_rate": summary["behavior_evaluation"]["summary"]["scenario_success_rate"],
@@ -813,6 +894,15 @@ def main() -> None:
                     for name, data in summary["behavior_evaluation"]["comparisons"]["map_templates"].items()
                 },
             }
+        if "shaping_audit" in summary["behavior_evaluation"]:
+            shaping = summary.get("behavior_evaluation", {}).get("shaping_audit", {})
+            printable["behavior_evaluation"]["shaping_audit"] = {
+                "minimal_profile": shaping.get("minimal_profile"),
+                "deltas_vs_minimal": shaping.get(
+                    "comparison",
+                    {},
+                ).get("deltas_vs_minimal", {}),
+            }
         if "ablations" in summary["behavior_evaluation"]:
             printable["behavior_evaluation"]["ablations"] = {
                 "reference_variant": summary["behavior_evaluation"]["ablations"]["reference_variant"],
@@ -826,6 +916,19 @@ def main() -> None:
                     for name, data in summary["behavior_evaluation"]["ablations"]["variants"].items()
                 },
                 "deltas_vs_reference": summary["behavior_evaluation"]["ablations"]["deltas_vs_reference"],
+            }
+        if "curriculum_comparison" in summary["behavior_evaluation"]:
+            printable["behavior_evaluation"]["curriculum_comparison"] = {
+                "curriculum_profile": summary["behavior_evaluation"]["curriculum_comparison"]["curriculum_profile"],
+                "reference_regime": summary["behavior_evaluation"]["curriculum_comparison"]["reference_regime"],
+                "focus_scenarios": summary["behavior_evaluation"]["curriculum_comparison"]["focus_scenarios"],
+                "regimes": {
+                    name: {
+                        "scenario_success_rate": data["summary"]["scenario_success_rate"],
+                        "episode_success_rate": data["summary"]["episode_success_rate"],
+                    }
+                    for name, data in summary["behavior_evaluation"]["curriculum_comparison"]["regimes"].items()
+                },
             }
         if "learning_evidence" in summary["behavior_evaluation"]:
             printable["behavior_evaluation"]["learning_evidence"] = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Iterable
 
@@ -25,15 +26,112 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class PerceivedTarget:
+    """Perception summary for a single candidate target.
+
+    Visible percepts must carry a concrete grid `position`. Non-visible or
+    no-target percepts may keep `position=None`.
+    """
+
     visible: float
     certainty: float
     occluded: float
     dx: float
     dy: float
     dist: int
+    position: tuple[int, int] | None = None
+
+    def __post_init__(self) -> None:
+        if float(self.visible) > 0.0 and self.position is None:
+            raise ValueError("Visible PerceivedTarget requires position.")
 
 
 NO_TARGET_DISTANCE = 10**9
+
+
+def predator_motion_salience(
+    world: "SpiderWorld",
+    *,
+    predator_view: PerceivedTarget | None = None,
+) -> float:
+    """
+    Return the explicit motion salience currently contributed by the predator.
+    """
+    perceived = (
+        predator_view is not None
+        and (predator_view.visible > 0.0 or predator_view.occluded > 0.0)
+    )
+    return (
+        float(world.operational_profile.perception["predator_motion_bonus"])
+        if perceived and world.lizard.mode in {"CHASE", "INVESTIGATE"}
+        else 0.0
+    )
+
+
+OBSERVATION_LEAKAGE_AUDIT = {
+    "predator_visible_and_direction": {
+        "classification": "direct_perception",
+        "risk": "low",
+        "modules": ["visual", "alert", "action_context", "motor_context"],
+        "source": "spider_cortex_sim.perception.predator_visible_to_spider",
+        "notes": "Derived from line of sight, certainty, and relative direction, so it is a direct ecological signal.",
+    },
+    "food_and_predator_smell_gradients": {
+        "classification": "direct_perception",
+        "risk": "low",
+        "modules": ["sensory", "hunger", "alert"],
+        "source": "spider_cortex_sim.perception.smell_gradient",
+        "notes": "These are local sensory signals with explicit noise and no direct access to the optimal path.",
+    },
+    "predator_dist": {
+        "classification": "privileged_world_signal",
+        "risk": "high",
+        "modules": ["alert", "action_context", "motor_context"],
+        "source": "spider_cortex_sim.perception.observe_world",
+        "evidence": "predator_dist_real = world.manhattan(world.spider_pos(), world.lizard_pos())",
+        "notes": "Uses the lizard's real position even when useful detection should depend on vision, smell, or memory.",
+    },
+    "home_vector": {
+        "classification": "world_derived_navigation_hint",
+        "risk": "high",
+        "modules": ["sleep", "alert"],
+        "source": "spider_cortex_sim.perception.observe_world",
+        "evidence": "shelter_target = world.safest_shelter_target(); home_dx/home_dy/home_dist = world._relative(shelter_target)",
+        "notes": "Provides a ready-made direction toward safe shelter, which greatly shortens the navigation problem.",
+    },
+    "predator_memory_vector": {
+        "classification": "world_owned_memory",
+        "risk": "medium",
+        "modules": ["alert"],
+        "source": "spider_cortex_sim.memory.refresh_memory + spider_cortex_sim.memory.memory_vector",
+        "notes": "Plausible as explicit memory, but the update remains world-owned rather than learned.",
+    },
+    "shelter_memory_vector": {
+        "classification": "world_owned_memory",
+        "risk": "high",
+        "modules": ["sleep"],
+        "source": "spider_cortex_sim.memory.refresh_memory + spider_cortex_sim.memory.memory_vector",
+        "notes": "Inherits the target from safest_shelter_target and therefore can act as a persistent privileged waypoint.",
+    },
+    "escape_memory_vector": {
+        "classification": "world_owned_memory",
+        "risk": "medium",
+        "modules": ["alert"],
+        "source": "spider_cortex_sim.memory.refresh_memory + spider_cortex_sim.memory.memory_vector",
+        "notes": "The escape route is derived from the world's last movement, without uncertainty or agent-driven selection.",
+    },
+}
+
+
+def observation_leakage_audit() -> dict[str, dict[str, object]]:
+    """
+    Return a deep-copied audit catalog describing perception-side observation leakage candidates.
+    
+    The catalog maps leakage identifiers to metadata describing the leakage class, risk level, implicated modules, source identifiers, and evidence or notes; the returned mapping is a deep copy to prevent callers from mutating the module-level catalog.
+    
+    Returns:
+        audit (dict[str, dict[str, object]]): A mapping from leakage keys to metadata dictionaries. Each metadata dictionary includes fields such as classification, risk, modules, sources, and notes.
+    """
+    return deepcopy(OBSERVATION_LEAKAGE_AUDIT)
 
 
 def _clip_signed(value: float) -> float:
@@ -47,6 +145,26 @@ def _clip_signed(value: float) -> float:
         float: The input constrained to be between -1.0 and 1.0.
     """
     return float(np.clip(value, -1.0, 1.0))
+
+
+def _heading_allows_target(
+    world: "SpiderWorld",
+    source: tuple[int, int],
+    target: tuple[int, int],
+) -> bool:
+    """
+    Check whether a target falls inside the spider's forward-facing 180 degree FOV.
+    """
+    if source != world.spider_pos():
+        return True
+    heading = (int(world.state.heading_dx), int(world.state.heading_dy))
+    if heading == (0, 0):
+        return True
+    rel_x = int(target[0] - source[0])
+    rel_y = int(target[1] - source[1])
+    if rel_x == 0 and rel_y == 0:
+        return True
+    return (heading[0] * rel_x + heading[1] * rel_y) >= 0
 
 
 def _apply_visual_noise(world: "SpiderWorld", target: PerceivedTarget) -> PerceivedTarget:
@@ -111,6 +229,7 @@ def _apply_visual_noise(world: "SpiderWorld", target: PerceivedTarget) -> Percei
         dx=dx,
         dy=dy,
         dist=int(target.dist),
+        position=target.position,
     )
 
 
@@ -312,6 +431,7 @@ def visible_object(
     radius: int,
     origin: tuple[int, int] | None = None,
     motion_bonus: float = 0.0,
+    apply_noise: bool = True,
 ) -> PerceivedTarget:
     """
     Selects the nearest candidate within the Manhattan `radius` and returns its perceived metrics from the `origin` perspective.
@@ -329,6 +449,7 @@ def visible_object(
             occluded: `1.0` if the returned target was occluded, `0.0` otherwise.
             dx, dy: Relative direction components from `origin` to the selected target; set to `0.0` when no visible target is reported.
             dist: Manhattan distance to the selected target, or `NO_TARGET_DISTANCE` when no candidate is found.
+            position: Exact selected grid cell, or `None` when no candidate is found.
     """
     source = origin if origin is not None else world.spider_pos()
     best_visible = None
@@ -338,6 +459,8 @@ def visible_object(
     for pos in positions:
         dist = world.manhattan(source, pos)
         if dist > radius:
+            continue
+        if not _heading_allows_target(world, source, pos):
             continue
         if has_line_of_sight(world, source, pos):
             if dist < best_visible_dist or (dist == best_visible_dist and tuple(pos) < tuple(best_visible)):
@@ -362,17 +485,16 @@ def visible_object(
         if visible <= 0.0:
             dx = 0.0
             dy = 0.0
-        return _apply_visual_noise(
-            world,
-            PerceivedTarget(
+        target = PerceivedTarget(
             visible=float(visible),
             certainty=float(certainty),
             occluded=0.0,
             dx=float(dx),
             dy=float(dy),
             dist=int(best_visible_dist),
-            ),
+            position=tuple(best_visible),
         )
+        return _apply_visual_noise(world, target) if apply_noise else target
 
     if best_occluded is not None:
         certainty = max(
@@ -380,17 +502,16 @@ def visible_object(
             cfg["occluded_certainty_base"]
             - cfg["occluded_certainty_decay_per_step"] * max(0, best_occluded_dist - 1),
         )
-        return _apply_visual_noise(
-            world,
-            PerceivedTarget(
+        target = PerceivedTarget(
             visible=0.0,
             certainty=float(np.clip(certainty, 0.0, 1.0)),
             occluded=1.0,
             dx=0.0,
             dy=0.0,
             dist=int(best_occluded_dist),
-            ),
+            position=tuple(best_occluded),
         )
+        return _apply_visual_noise(world, target) if apply_noise else target
 
     return PerceivedTarget(
         visible=0.0,
@@ -399,6 +520,7 @@ def visible_object(
         dx=0.0,
         dy=0.0,
         dist=NO_TARGET_DISTANCE,
+        position=None,
     )
 
 
@@ -499,7 +621,11 @@ def lizard_detects_spider(world: "SpiderWorld") -> bool:
     return bool(certainty >= cfg["lizard_detection_threshold"])
 
 
-def predator_visible_to_spider(world: "SpiderWorld") -> PerceivedTarget:
+def predator_visible_to_spider(
+    world: "SpiderWorld",
+    *,
+    apply_noise: bool = True,
+) -> PerceivedTarget:
     """
     Compute the spider's perception of the predator (lizard).
     
@@ -511,16 +637,11 @@ def predator_visible_to_spider(world: "SpiderWorld") -> PerceivedTarget:
             - `dx`, `dy`: relative vector from the spider to the predator; set to `0.0` when not visible.
             - `dist`: Manhattan distance to the predator.
     """
-    motion_bonus = (
-        world.operational_profile.perception["predator_motion_bonus"]
-        if world.lizard.mode in {"CHASE", "INVESTIGATE"}
-        else 0.0
-    )
     return visible_object(
         world,
         [world.lizard_pos()],
         radius=visible_range(world),
-        motion_bonus=motion_bonus,
+        apply_noise=apply_noise,
     )
 
 
@@ -544,6 +665,12 @@ def build_visual_observation(
     food_view: PerceivedTarget,
     shelter_view: PerceivedTarget,
     predator_view: PerceivedTarget,
+    heading_dx: float,
+    heading_dy: float,
+    food_trace_strength: float,
+    shelter_trace_strength: float,
+    predator_trace_strength: float,
+    predator_motion_salience_value: float,
     day: float,
     night: float,
 ) -> VisualObservation:
@@ -576,6 +703,12 @@ def build_visual_observation(
         predator_occluded=predator_view.occluded,
         predator_dx=predator_view.dx,
         predator_dy=predator_view.dy,
+        heading_dx=heading_dx,
+        heading_dy=heading_dy,
+        food_trace_strength=food_trace_strength,
+        shelter_trace_strength=shelter_trace_strength,
+        predator_trace_strength=predator_trace_strength,
+        predator_motion_salience=predator_motion_salience_value,
         day=day,
         night=night,
     )
@@ -633,6 +766,7 @@ def build_hunger_observation(
     food_smell_strength: float,
     food_smell_dx: float,
     food_smell_dy: float,
+    food_trace: tuple[float, float, float],
     food_memory: tuple[float, float, float],
 ) -> HungerObservation:
     """
@@ -650,6 +784,7 @@ def build_hunger_observation(
     Returns:
         HungerObservation: Observation populated with hunger, on-food flag, food perception fields, smell gradient, and food memory fields.
     """
+    food_trace_dx, food_trace_dy, food_trace_strength = food_trace
     food_mem_dx, food_mem_dy, food_mem_age = food_memory
     return HungerObservation(
         hunger=world.state.hunger,
@@ -662,6 +797,9 @@ def build_hunger_observation(
         food_smell_strength=food_smell_strength,
         food_smell_dx=food_smell_dx,
         food_smell_dy=food_smell_dy,
+        food_trace_dx=food_trace_dx,
+        food_trace_dy=food_trace_dy,
+        food_trace_strength=food_trace_strength,
         food_memory_dx=food_mem_dx,
         food_memory_dy=food_mem_dy,
         food_memory_age=food_mem_age,
@@ -679,6 +817,7 @@ def build_sleep_observation(
     sleep_phase_level: float,
     rest_streak_norm: float,
     shelter_role_level: float,
+    shelter_trace: tuple[float, float, float],
     shelter_memory: tuple[float, float, float],
 ) -> SleepObservation:
     """
@@ -696,6 +835,7 @@ def build_sleep_observation(
     Returns:
         SleepObservation: dataclass containing fatigue, hunger, on_shelter, night, home vector and distance, health, recent_pain, sleep phase/rest metrics, sleep_debt, shelter role level, and shelter memory fields populated from `world` and the provided arguments.
     """
+    shelter_trace_dx, shelter_trace_dy, shelter_trace_strength = shelter_trace
     shelter_mem_dx, shelter_mem_dy, shelter_mem_age = shelter_memory
     return SleepObservation(
         fatigue=world.state.fatigue,
@@ -711,6 +851,9 @@ def build_sleep_observation(
         rest_streak_norm=rest_streak_norm,
         sleep_debt=world.state.sleep_debt,
         shelter_role_level=shelter_role_level,
+        shelter_trace_dx=shelter_trace_dx,
+        shelter_trace_dy=shelter_trace_dy,
+        shelter_trace_strength=shelter_trace_strength,
         shelter_memory_dx=shelter_mem_dx,
         shelter_memory_dy=shelter_mem_dy,
         shelter_memory_age=shelter_mem_age,
@@ -723,10 +866,12 @@ def build_alert_observation(
     predator_view: PerceivedTarget,
     predator_dist_norm: float,
     predator_smell_strength: float,
+    predator_motion_salience_value: float,
     home_dx: float,
     home_dy: float,
     on_shelter: float,
     night: float,
+    predator_trace: tuple[float, float, float],
     predator_memory: tuple[float, float, float],
     escape_memory: tuple[float, float, float],
 ) -> AlertObservation:
@@ -749,6 +894,7 @@ def build_alert_observation(
         AlertObservation: Observation populated with predator perception fields, smell strength, home vector,
         recent pain/contact values, shelter/night flags, and predator/escape memory triples.
     """
+    predator_trace_dx, predator_trace_dy, predator_trace_strength = predator_trace
     predator_mem_dx, predator_mem_dy, predator_mem_age = predator_memory
     escape_mem_dx, escape_mem_dy, escape_mem_age = escape_memory
     return AlertObservation(
@@ -759,12 +905,16 @@ def build_alert_observation(
         predator_dy=predator_view.dy,
         predator_dist=predator_dist_norm,
         predator_smell_strength=predator_smell_strength,
+        predator_motion_salience=predator_motion_salience_value,
         home_dx=home_dx,
         home_dy=home_dy,
         recent_pain=world.state.recent_pain,
         recent_contact=world.state.recent_contact,
         on_shelter=on_shelter,
         night=night,
+        predator_trace_dx=predator_trace_dx,
+        predator_trace_dy=predator_trace_dy,
+        predator_trace_strength=predator_trace_strength,
         predator_memory_dx=predator_mem_dx,
         predator_memory_dy=predator_mem_dy,
         predator_memory_age=predator_mem_age,
@@ -863,16 +1013,17 @@ def build_motor_context_observation(
 
 def observe_world(world: "SpiderWorld") -> dict[str, object]:
     """
-    Builds the spider's observation views from the world state and returns serialized observation arrays plus metadata.
+    Assembles and serializes the spider's observation vectors and diagnostic metadata from the current world state.
+    
+    Builds all perception, smell, memory and internal-state views, converts each typed observation into a flat numpy vector, validates expected shapes, and returns those vectors together with a comprehensive "meta" diagnostics mapping.
     
     Parameters:
-        world (SpiderWorld): The simulation world containing the spider, environment, and state used to compute perceptions, gradients, memory vectors, and other features.
+        world (SpiderWorld): Simulation state and environment used to compute perceptions, gradients, memory vectors, traces, and internal-state features.
     
     Returns:
-        obs (dict[str, object]): A dictionary containing:
-            - Serialized observation vectors keyed by view name: "visual", "sensory", "hunger", "sleep", "alert", "action_context", "motor_context" (and "motor_extra" as a compatibility copy).
-            - "meta": a dict with diagnostic fields including distances (food, shelter, predator), day/night flags, on_shelter/on_food booleans, predator visibility, lizard pose and mode, shelter role/terrain, phase and sleep metrics, per-vision PerceivedTarget entries under "vision", memory vectors with TTLs, and memory ages (or None when absent).
-    
+        dict[str, object]: A dictionary containing:
+            - Serialized observation vectors keyed by view name: "visual", "sensory", "hunger", "sleep", "alert", "action_context", "motor_context". "motor_extra" is provided as a copy of "motor_context" for compatibility.
+            - "meta": a dict of diagnostic fields including nearest distances (food, shelter, predator), predator distance used for perception, day/night flags, on_shelter/on_food booleans, predator visibility flag, lizard position and mode, shelter role and terrain at the spider, phase and sleep metrics, heading, configured profiles, predator motion salience, per-vision PerceivedTarget entries under "vision", perceptual trace views under "percept_traces", memory vectors with TTLs under "memory_vectors", and individual memory ages (or None when absent).
     """
     from .memory import MEMORY_TTLS, memory_vector
 
@@ -890,10 +1041,25 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
     shelter_role_level = world.shelter_role_level()
     sleep_phase = world.sleep_phase_level()
     rest_norm = world.rest_streak_norm()
+    heading_dx = float(world.state.heading_dx)
+    heading_dy = float(world.state.heading_dy)
+    food_trace_view = world._trace_view(world.state.food_trace)
+    shelter_trace_view = world._trace_view(world.state.shelter_trace)
+    predator_trace_view = world._trace_view(world.state.predator_trace)
+    food_trace_dx = float(food_trace_view["dx"])
+    food_trace_dy = float(food_trace_view["dy"])
+    food_trace_strength = float(food_trace_view["strength"])
+    shelter_trace_dx = float(shelter_trace_view["dx"])
+    shelter_trace_dy = float(shelter_trace_view["dy"])
+    shelter_trace_strength = float(shelter_trace_view["strength"])
+    predator_trace_dx = float(predator_trace_view["dx"])
+    predator_trace_dy = float(predator_trace_view["dy"])
+    predator_trace_strength = float(predator_trace_view["strength"])
 
     food_view = visible_object(world, world.food_positions, radius=visible_range(world))
     shelter_view = visible_object(world, world.shelter_cells, radius=visible_range(world))
     predator_view = predator_visible_to_spider(world)
+    motion_salience = predator_motion_salience(world, predator_view=predator_view)
     predator_dist_real = world.manhattan(world.spider_pos(), world.lizard_pos())
     predator_dist_norm = min(1.0, predator_dist_real / float(world.width + world.height))
 
@@ -917,6 +1083,12 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         food_view=food_view,
         shelter_view=shelter_view,
         predator_view=predator_view,
+        heading_dx=heading_dx,
+        heading_dy=heading_dy,
+        food_trace_strength=food_trace_strength,
+        shelter_trace_strength=shelter_trace_strength,
+        predator_trace_strength=predator_trace_strength,
+        predator_motion_salience_value=motion_salience,
         day=day,
         night=night,
     )
@@ -937,6 +1109,7 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         food_smell_strength=food_smell_strength,
         food_smell_dx=food_smell_dx,
         food_smell_dy=food_smell_dy,
+        food_trace=(food_trace_dx, food_trace_dy, food_trace_strength),
         food_memory=(food_mem_dx, food_mem_dy, food_mem_age),
     )
     sleep_observation = build_sleep_observation(
@@ -949,6 +1122,7 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         sleep_phase_level=sleep_phase,
         rest_streak_norm=rest_norm,
         shelter_role_level=shelter_role_level,
+        shelter_trace=(shelter_trace_dx, shelter_trace_dy, shelter_trace_strength),
         shelter_memory=(shelter_mem_dx, shelter_mem_dy, shelter_mem_age),
     )
     alert_observation = build_alert_observation(
@@ -956,10 +1130,12 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         predator_view=predator_view,
         predator_dist_norm=predator_dist_norm,
         predator_smell_strength=predator_smell_strength,
+        predator_motion_salience_value=motion_salience,
         home_dx=home_dx,
         home_dy=home_dy,
         on_shelter=on_shelter,
         night=night,
+        predator_trace=(predator_trace_dx, predator_trace_dy, predator_trace_strength),
         predator_memory=(predator_mem_dx, predator_mem_dy, predator_mem_age),
         escape_memory=(escape_mem_dx, escape_mem_dy, escape_mem_age),
     )
@@ -999,7 +1175,7 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         if key not in obs:
             continue
         if obs[key].shape != (dim,):
-            raise ValueError(f"Observação '{key}' esperada com shape {(dim,)}, recebida {obs[key].shape}")
+            raise ValueError(f"Observation '{key}' expected shape {(dim,)}, received {obs[key].shape}")
 
     obs["meta"] = {
         "food_dist": food_dist,
@@ -1027,10 +1203,17 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         "map_template": world.map_template_name,
         "reward_profile": world.reward_profile,
         "noise_profile": world.noise_profile.name,
+        "heading": {"dx": int(world.state.heading_dx), "dy": int(world.state.heading_dy)},
+        "predator_motion_salience": motion_salience,
         "vision": {
             "food": asdict(food_view),
             "shelter": asdict(shelter_view),
             "predator": asdict(predator_view),
+        },
+        "percept_traces": {
+            "food": food_trace_view,
+            "shelter": shelter_trace_view,
+            "predator": predator_trace_view,
         },
         "memory_vectors": {
             "food": {"dx": food_mem_dx, "dy": food_mem_dy, "age": food_mem_age, "ttl": MEMORY_TTLS["food"]},

@@ -1,42 +1,45 @@
-# Simulador neuro-modular de aranha com predador explícito e interfaces padronizadas
+# Neuro-Modular Spider Simulator With Explicit Predator And Standardized Interfaces
 
-Implementação do simulador da aranha com três mudanças estruturais centrais:
+This project implements a simulated spider with a modular brain, explicit predator pressure, standardized neural interfaces, online learning, deterministic behavioral scenarios, and reproducible evaluation workflows.
 
-1. inclusão de um **predador explícito** (`lizard`) no mundo;
-2. troca do controle motor abstrato por uma **saída locomotora primitiva** (`cima`, `baixo`, `esquerda`, `direita`, `parada`);
-3. definição de **interfaces padrão de entrada/saída** para cada centro/córtex, para reduzir acoplamento excessivo entre as redes.
+The current version centers on three structural changes:
 
-Na versão atual, esse núcleo foi estendido com:
+1. an explicit predator (`lizard`) inside the world
+2. a primitive locomotion output space instead of high-level semantic actions
+3. standardized input and output interfaces for each center or cortex to reduce excessive coupling between networks
 
-- **perfis de recompensa** (`classic` e `ecological`);
-- **geometria real de abrigo** com entrada, interior e zona profunda;
-- **máquinas de estado do lagarto** (`PATROL`, `ORIENT`, `INVESTIGATE`, `CHASE`, `WAIT`, `RECOVER`);
-- **memória operacional do lagarto** para alvo investigado, janela de ambush, streak de perseguição e recuperação;
-- **memória explícita da aranha** para comida, predador, abrigo seguro e rota de fuga;
-- **templates de mapa** e **cenários determinísticos** para avaliação comportamental.
+That core has since been extended with:
 
-O sistema continua com redes neurais pequenas em NumPy, aprendizado online e módulos independentes, mas agora a arquitetura está mais alinhada com a biologia simplificada do organismo e com a modularização funcional pedida.
+- reward profiles (`classic`, `ecological`, `austere`)
+- explicit shelter geometry with entrance, interior, and deep zones
+- a richer lizard state machine (`PATROL`, `ORIENT`, `INVESTIGATE`, `CHASE`, `WAIT`, `RECOVER`)
+- lizard working memory for investigate targets, ambush windows, chase streaks, and recovery
+- explicit spider memory for food, predator, safe shelter, and escape route
+- map templates and deterministic scenarios for behavioral evaluation
+- behavioral scorecards, ablations, learning-evidence workflows, reward audits, and offline analysis
 
-## O que mudou
+The system still uses small NumPy neural networks, online learning, and independent modules, but the current architecture is closer to a simplified organism under ecological constraints.
 
-### 1. Predador explícito: lagarto (`lizard`)
+## What Changed
 
-O risco noturno probabilístico foi substituído por uma entidade concreta no ambiente.
+### 1. Explicit Predator: The Lizard
 
-Características do lagarto:
+Probabilistic nighttime danger was replaced by a concrete predator in the environment.
 
-- ocupa uma célula própria no grid;
-- possui **visão limitada**;
-- move-se **mais lentamente** do que a aranha;
-- **não entra na caverna/abrigo**;
-- ao encostar na aranha causa **dor** e perda de saúde;
-- a aranha pode fugir caso continue se movendo, porque o lagarto é mais lento.
+The lizard:
 
-### 2. Saída motora primitiva
+- occupies a real grid cell
+- has limited vision
+- moves more slowly than the spider
+- cannot enter the shelter
+- causes pain and health loss on contact
+- can be escaped if the spider keeps moving effectively
 
-O córtex motor não escolhe mais ações semânticas como `MOVE_TO_FOOD` ou `MOVE_TO_SHELTER`.
+### 2. Primitive Motor Output
 
-Agora o espaço motor é:
+The motor system no longer chooses semantic actions such as `MOVE_TO_FOOD` or `MOVE_TO_SHELTER`.
+
+The action space is now:
 
 - `MOVE_UP`
 - `MOVE_DOWN`
@@ -44,228 +47,76 @@ Agora o espaço motor é:
 - `MOVE_RIGHT`
 - `STAY`
 
-Com isso, o simulador fica menos acoplado a comportamentos “prontos” e mais próximo de um organismo simples controlando locomoção básica.
+That keeps the simulator closer to basic locomotion control instead of scripted behavior verbs.
 
-### 3. Comer e dormir como comportamentos situados/autonômicos
+### 3. Eating And Sleeping As Situated Behaviors
 
-Como a saída motora foi reduzida à locomoção, **alimentação** e **repouso** passam a emergir do contexto espacial:
+Because the motor output is now limited to locomotion, feeding and rest emerge from spatial context:
 
-- ao alcançar comida, a aranha alimenta-se automaticamente;
-- ao alcançar o abrigo durante fadiga/noite, a aranha recupera-se automaticamente;
-- ficar parada ainda pode potencializar alimentação/repouso, mas não é mais um pré-requisito rígido.
+- when the spider reaches food, feeding happens automatically
+- when the spider reaches shelter under fatigue or night pressure, recovery happens automatically
+- staying still can still help feeding or rest, but it is no longer a rigid prerequisite
 
-Isso simplifica a biologia do agente e evita que a rede motora precise codificar “comer” e “dormir” como verbos separados.
+## Modular Architecture
 
-## Arquitetura modular
+The brain now contains five proposer modules plus `action_center` and `motor_cortex`:
 
-O cérebro agora tem cinco módulos propositores + `action_center` + córtex motor:
+1. `visual_cortex`
+2. `sensory_cortex`
+3. `hunger_center`
+4. `sleep_center`
+5. `alert_center`
+6. `action_center`
+7. `motor_cortex`
 
-1. **visual_cortex**
-2. **sensory_cortex**
-3. **hunger_center**
-4. **sleep_center**
-5. **alert_center**
-6. **action_center**
-7. **motor_cortex**
+The first five networks propose locomotion in the same output space. `action_center` applies valence-based priority gating before final arbitration, and `motor_cortex` acts as the final locomotor executor or corrector.
 
-As cinco primeiras redes produzem **propostas locomotoras** sobre o mesmo espaço de saída. O `action_center` arbitra essas propostas em um espaço locomotor explícito, e o `motor_cortex` passa a atuar como executor/corretor locomotor final.
+The current architecture also includes:
 
-Além disso, foi introduzido um mecanismo simples de redução de coadaptação:
+- fixed, named interfaces per module
+- module dropout during training
+- local reflexes per module, defined from the module's own interface
+- auxiliary per-module targets ("reflex targets") to reduce coadaptation
+- explicit contribution metrics in `action_center` for dominance, agreement, and effective proposer count
+- the `local_credit_only` ablation, which preserves current inference but removes global policy-gradient broadcast during modular training
 
-- **interfaces fixas e nomeadas** por módulo;
-- **module dropout** durante treinamento;
-- **reflexos locais por módulo**, definidos a partir da própria interface do módulo;
-- **alvos auxiliares por módulo** (“reflex targets”) para que cada rede aprenda sua função específica em vez de depender excessivamente das demais.
+Layer responsibilities:
 
-### Responsabilidades por camada
+- `spider_cortex_sim/world.py`: ecological dynamics, body state, and explicit observable memory
+- `spider_cortex_sim/interfaces.py`: named contracts between world and brain
+- `spider_cortex_sim/modules.py`: proposer networks only
+- `spider_cortex_sim/agent.py`: local reflexes, auxiliary targets, valence gating, and final motor correction
 
-- `spider_cortex_sim/world.py`: mantém a dinâmica ecológica, o estado corporal e a memória explícita observável.
-- `spider_cortex_sim/interfaces.py`: define os contratos nomeados de entrada e saída que ligam mundo e cérebro.
-- `spider_cortex_sim/modules.py`: executa apenas as redes proponentes e devolve propostas locomotoras por módulo.
-- `spider_cortex_sim/agent.py`: aplica reflexos locais interpretáveis, calcula alvos auxiliares auditáveis, arbitra em `action_center` e executa a correção final em `motor_cortex`.
+The generated contract documentation lives in [docs/interfaces.md](docs/interfaces.md). The short topology note for the newer arbitration chain lives in [docs/action_center_design.md](docs/action_center_design.md).
 
-## Interfaces padrão de entrada/saída
+## Environment
 
-A saída comum de todos os módulos propositores é sempre o mesmo vetor locomotor:
+The 2D grid world contains:
 
-```text
-[MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY]
-```
+- shelter or burrow (`H`)
+- shelter spatial roles (`entrance`, `inside`, `deep`)
+- walls or blocked cells (`#`)
+- clutter terrain (`:`)
+- food (`F`)
+- spider (`A`)
+- predator lizard (`L`)
+- day/night cycle
+- limited vision
+- food and predator smell fields
+- homeostatic pressures from hunger, fatigue, health, pain, and contact
 
-### 1. `visual_cortex`
+If the spider and lizard occupy the same ASCII-rendered cell, the renderer shows `X`.
 
-Entrada (`visual`):
-
-- comida visível?
-- direção relativa da comida visível
-- abrigo visível?
-- direção relativa do abrigo visível
-- predador visível?
-- direção relativa do predador visível
-- dia
-- noite
-
-Função: usar apenas objetos presentes no campo visual limitado.
-
-### 2. `sensory_cortex`
-
-Entrada (`sensory`):
-
-- dor recente causada pelo predador
-- contato físico recente com o predador
-- saúde
-- fome
-- fadiga
-- intensidade do cheiro de comida
-- gradiente do cheiro de comida
-- intensidade do cheiro do predador
-- gradiente do cheiro do predador
-- luminosidade
-
-Função: integrar sinais corporais e químicos imediatos.
-
-### 3. `hunger_center`
-
-Entrada (`hunger`):
-
-- fome
-- está sobre comida?
-- comida visível?
-- direção da comida visível
-- intensidade do cheiro de comida
-- gradiente do cheiro de comida
-
-Função: puxar a locomoção em direção à alimentação.
-
-### 4. `sleep_center`
-
-Entrada (`sleep`):
-
-- fadiga
-- fome
-- está no abrigo?
-- noite
-- vetor interno até o abrigo (`home_dx`, `home_dy`, `home_dist`)
-- saúde
-- dor recente
-- fase atual de sono (`sleep_phase_level`)
-- continuidade recente do repouso (`rest_streak_norm`)
-- dívida de sono (`sleep_debt`)
-- profundidade atual no abrigo (`shelter_role_level`)
-- memória do último abrigo seguro
-
-Função: promover retorno ao abrigo e repouso, mas levando em conta o estado corporal.
-
-### 5. `alert_center`
-
-Entrada (`alert`):
-
-- predador visível?
-- direção relativa do predador visível
-- distância ao predador
-- intensidade do cheiro do predador
-- vetor interno até o abrigo
-- dor recente
-- contato recente
-- está no abrigo?
-- noite
-- memória da última posição vista do predador
-- memória da rota recente de fuga
-
-Função: fuga do predador e priorização do abrigo quando há ameaça.
-
-### 6. `action_center`
-
-Entrada (`action_context`):
-
-- fome
-- fadiga
-- saúde
-- dor recente
-- contato recente
-- está sobre comida?
-- está no abrigo?
-- predador visível?
-- confiança visual no predador
-- distância ao predador
-- dia/noite
-- último deslocamento
-- dívida de sono
-- profundidade atual no abrigo
-
-Saída:
-
-- logits sobre `MOVE_UP`, `MOVE_DOWN`, `MOVE_LEFT`, `MOVE_RIGHT`, `STAY`
-- estimativa de valor do estado
-
-Input efetivo da rede:
-
-- `SpiderBrain._build_action_input()` concatena as propostas locomotoras dos módulos especializados ao vetor bruto de `action_context`.
-
-Função: arbitrar explicitamente entre fome, ameaça, repouso e exploração antes da execução motora.
-
-### 7. `motor_cortex`
-
-Entrada (`motor_context`):
-
-- está sobre comida?
-- está no abrigo?
-- predador visível?
-- confiança visual no predador
-- distância ao predador
-- dia/noite
-- último deslocamento
-- profundidade atual no abrigo
-
-Saída:
-
-- logits corretivos sobre `MOVE_UP`, `MOVE_DOWN`, `MOVE_LEFT`, `MOVE_RIGHT`, `STAY`
-
-Input efetivo da rede:
-
-- `SpiderBrain._build_motor_input()` concatena a intenção locomotora escolhida pelo `action_center` em one-hot ao vetor bruto de `motor_context`.
-
-Função: especializar a execução locomotora final sem acumular a arbitragem comportamental.
-
-## Como o aprendizado funciona
-
-O treinamento continua **online**, passo a passo.
-
-Em cada tick:
-
-1. o ambiente gera as interfaces sensoriais padronizadas;
-2. cada módulo especializado propõe locomoção usando apenas sua própria interface;
-3. cada módulo também pode adicionar um pequeno **viés reflexo inato** compatível com sua função;
-4. o `action_center` arbitra as propostas e escolhe uma intenção locomotora explícita;
-5. o `motor_cortex` corrige/executa essa intenção no contexto local;
-6. o ambiente aplica a transição, incluindo comida, repouso e predador;
-7. ocorre atualização TD online do ator-crítico no `action_center`, da correção locomotora no `motor_cortex` e um ajuste auxiliar por módulo baseado em seu reflexo local.
-
-## Ambiente
-
-O mundo em grade 2D agora contém:
-
-- **abrigo/caverna** (`H`)
-- **papéis espaciais do abrigo** (`entrance`, `inside`, `deep`)
-- **paredes/obstáculos** (`#`)
-- **terreno com clutter** (`:`)
-- **comida** (`F`)
-- **aranha** (`A`)
-- **lagarto predador** (`L`)
-- ciclo de **dia/noite**
-- visão limitada
-- cheiro de comida e do predador
-- homeostase por fome, fadiga, saúde, dor e contato
-
-No render ASCII, se lagarto e aranha ocuparem a mesma célula, aparece `X`.
-
-## Estrutura do projeto
+## Project Layout
 
 ```text
 neuro_modular_sim/
 ├── README.md
+├── docs/
+│   ├── ablation_workflow.md
+│   ├── action_center_design.md
+│   └── interfaces.md
 ├── spider_cortex_sim/
-│   ├── __init__.py
 │   ├── __main__.py
 │   ├── agent.py
 │   ├── bus.py
@@ -277,36 +128,37 @@ neuro_modular_sim/
 │   ├── simulation.py
 │   └── world.py
 └── tests/
-    ├── test_training.py
-    └── test_world.py
 ```
 
-## Instalação
+## Installation
 
-### 1. Criar e ativar o ambiente virtual
+Create and activate a virtual environment:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-### 2. Instalar dependências
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> **Nota:** `numpy` é obrigatório. `pygame-ce` é opcional, necessário apenas para a interface gráfica (`--gui`).
+Notes:
 
-## Como executar
+- `numpy` is required
+- `pygame-ce` is optional and only needed for the graphical interface (`--gui`)
 
-No diretório raiz do projeto, com o ambiente virtual ativado:
+## Quick Start
+
+Run a standard training and evaluation session:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim --episodes 120 --eval-episodes 3 --max-steps 90
 ```
 
-Com resumo e trace salvos em arquivo:
+Save a summary and trace:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -317,7 +169,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --trace spider_trace.jsonl
 ```
 
-Para renderizar a última avaliação em ASCII:
+Render the final evaluation episode in ASCII:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -327,9 +179,9 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --render-eval
 ```
 
-### Perfis de recompensa e mapas
+## Reward Profiles And Maps
 
-Treinar com o perfil ecológico e um mapa alternativo:
+Train with the ecological profile and an alternate map:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -340,7 +192,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --map-template side_burrow
 ```
 
-Os templates atualmente disponíveis são:
+Available map templates:
 
 - `central_burrow`
 - `side_burrow`
@@ -349,26 +201,22 @@ Os templates atualmente disponíveis são:
 - `exposed_feeding_ground`
 - `entrance_funnel`
 
-`corridor_escape` usa agora terreno `NARROW`, que representa passagem estreita:
+Map notes:
 
-- reduz a confiança visual;
-- aumenta risco quando o predador está próximo;
-- adiciona custo/fadiga próprios.
+- `corridor_escape` uses `NARROW` terrain, representing a constrained passage
+- `two_shelters` introduces two deep shelters competing with a central transition zone
+- `exposed_feeding_ground` concentrates food in open terrain with more exposed approach paths
+- `entrance_funnel` compresses the shelter entrance through a bottleneck that favors blocking and ambush
 
-Os layouts adicionais foram feitos para produzir episódios ecologicamente diferentes:
+Reward profiles:
 
-- `two_shelters`: dois abrigos profundos competindo com uma zona central de transição;
-- `exposed_feeding_ground`: comida concentrada em área aberta, com aproximação mais exposta;
-- `entrance_funnel`: entrada do abrigo comprimida por um gargalo que favorece bloqueio e ambush.
+- `classic`: more guided, best for quick training and baseline runs
+- `ecological`: less direct shaping and more pressure from world dynamics
+- `austere`: minimal-progress baseline for shaping audits and contrast
 
-Os perfis de recompensa são:
+## Deterministic Scenarios
 
-- `classic`: mais guiado, melhor para treino rápido e baseline;
-- `ecological`: menos shaping direto e mais custo vindo da dinâmica do mundo.
-
-### Cenários determinísticos
-
-Executar um cenário específico:
+Run a single scenario:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -377,7 +225,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --scenario night_rest
 ```
 
-Executar a suíte completa de cenários:
+Run the full scenario suite:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -386,7 +234,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --scenario-suite
 ```
 
-Cenários disponíveis:
+Available scenarios:
 
 - `night_rest`
 - `predator_edge`
@@ -398,17 +246,19 @@ Cenários disponíveis:
 - `two_shelter_tradeoff`
 - `exposed_day_foraging`
 - `food_deprivation`
+- `food_vs_predator_conflict`
+- `sleep_vs_exploration_conflict`
 
-A suíte agora combina cenários e mapas específicos, por exemplo:
+Scenario-to-map specializations include:
 
-- `entrance_ambush`, `shelter_blockade` e `recover_after_failed_chase` usam `entrance_funnel`;
-- `open_field_foraging` e `exposed_day_foraging` usam `exposed_feeding_ground`;
-- `corridor_gauntlet` usa `corridor_escape`;
-- `two_shelter_tradeoff` usa `two_shelters`.
+- `entrance_ambush`, `shelter_blockade`, and `recover_after_failed_chase` use `entrance_funnel`
+- `open_field_foraging` and `exposed_day_foraging` use `exposed_feeding_ground`
+- `corridor_gauntlet` uses `corridor_escape`
+- `two_shelter_tradeoff` uses `two_shelters`
 
-### Avaliação comportamental
+## Behavioral Evaluation
 
-Executar a suíte comportamental completa com scorecards explícitos:
+Run the full behavioral suite with explicit scorecards:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -418,7 +268,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --full-summary
 ```
 
-Executar apenas um cenário comportamental e exportar CSV flat:
+Run one behavioral scenario and export flat CSV:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -429,34 +279,28 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --full-summary
 ```
 
-O bloco `behavior_evaluation` do `summary` inclui:
+`summary["behavior_evaluation"]` includes:
 
-- `suite`: scorecards agregados por cenário com `success_rate`, `checks`, `behavior_metrics`, `diagnostics` e `failures`;
-- `summary`: taxa de sucesso da suíte e regressões detectadas;
-- `comparisons`: matriz opcional por perfil/mapa/seed quando os flags de comparação comportamental são usados.
-- `learning_evidence`: comparação opcional entre checkpoint treinado e controles como `random_init`, `reflex_only`, `freeze_half_budget` e `trained_long_budget`.
+- `suite`: aggregated scenario scorecards with `success_rate`, `checks`, `behavior_metrics`, `diagnostics`, and `failures`
+- `summary`: overall suite success and detected regressions
+- `comparisons`: optional profile/map/seed comparison matrices when behavioral comparison flags are used
+- `learning_evidence`: optional comparison between a trained checkpoint and controls such as `random_init`, `reflex_only`, `freeze_half_budget`, and `trained_long_budget`
 
-Para os cenários fracos do benchmark curto, os scorecards agora carregam metadata pública do próprio cenário:
+Weak-signal scenarios now publish scenario-owned interpretation metadata:
 
-- `diagnostic_focus`: qual ambiguidade o scorecard quer separar;
-- `success_interpretation`: como ler um cenário realmente resolvido;
-- `failure_interpretation`: como ler um `0.0` sem colapsar tudo em “não aprendeu”;
-- `budget_note`: nota curta sobre o que o orçamento `dev` costuma revelar naquele cenário.
+- `diagnostic_focus`
+- `success_interpretation`
+- `failure_interpretation`
+- `budget_note`
 
-O bloco `suite[scenario]["diagnostics"]` resume especialmente:
+The scenario diagnostics block also summarizes:
 
-- `primary_outcome`: desfecho predominante do cenário;
-- `outcome_distribution`: distribuição normalizada dos desfechos por episódio;
-- `partial_progress_rate`: taxa de episódios com progresso parcial real;
-- `died_without_contact_rate`: taxa de mortes sem contato direto com o predador.
+- `primary_outcome`
+- `outcome_distribution`
+- `partial_progress_rate`
+- `died_without_contact_rate`
 
-Os quatro cenários mais fracos no orçamento curto agora distinguem melhor “falha total” de “sinal parcial útil”:
-
-- `open_field_foraging` e `exposed_day_foraging`: usam `progress_band` para separar avanço, estagnação e regressão espacial.
-- `corridor_gauntlet`: destaca o caso “evitou contato, mas ficou estagnado” sem tratá-lo como a mesma falha de uma morte após progresso.
-- `food_deprivation`: pode falhar com `success_rate=0.0` mesmo quando há aproximação real da comida; esse caso aparece como `partial_progress_died`.
-
-### Interface gráfica (Pygame)
+## Graphical Interface (Pygame)
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -468,24 +312,24 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --map-template central_burrow
 ```
 
-A interface agora exibe também:
+The GUI displays:
 
-- o **lagarto predador** no grid;
-- papéis do abrigo e terreno do mapa;
-- contadores de **contatos**, **avistamentos** e **fugas**;
-- posição, modo e alvo atual do lagarto;
-- memória explícita da aranha e dívida de sono;
-- componentes recentes de recompensa;
-- distribuição noturna por papel do abrigo e ocupação dos estados do lagarto.
+- the predator lizard on the grid
+- shelter roles and terrain types
+- contact, sighting, and escape counters
+- lizard position, mode, and current target
+- explicit spider memory and sleep debt
+- recent reward components
+- nighttime shelter-role distribution and predator-state occupancy
 
-Atalhos úteis na GUI:
+Useful shortcuts:
 
-- `V`: overlay de células visíveis/ocluídas;
-- `M`: heatmap de cheiro de comida/predador.
+- `V`: toggle visibility overlay
+- `M`: toggle smell heatmap
 
-## Salvar e carregar o cérebro
+## Saving And Loading The Brain
 
-Treinar e salvar:
+Train and save:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -493,7 +337,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --save-brain spider_brain
 ```
 
-Carregar e continuar treinando:
+Load and continue training:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -502,7 +346,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --save-brain spider_brain
 ```
 
-Carregar apenas módulos específicos:
+Load only selected modules:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -511,114 +355,109 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --load-modules visual_cortex hunger_center
 ```
 
-Observação: a arquitetura atual possui uma assinatura de interfaces. Saves antigos, anteriores à padronização atual, são rejeitados com erro explícito de incompatibilidade.
-Saves treinados antes da introdução de `sleep_phase` e `rest_streak` também são incompatíveis com a arquitetura atual.
-Saves anteriores à arquitetura com `sleep_debt`, papéis do abrigo, sinais de certeza/oclusão visual e memória explícita também são incompatíveis com a versão atual.
-O registry versionado das interfaces e a documentação gerada dos contratos atuais estão em [`docs/interfaces.md`](docs/interfaces.md).
+Compatibility notes:
 
-## Testes
+- the current architecture uses an explicit interface signature
+- older saves predating the current interface standardization are rejected with explicit incompatibility errors
+- older checkpoints predating `sleep_phase`, `rest_streak`, `sleep_debt`, shelter-role signals, certainty/occlusion signals, explicit memory, or oriented perception are also incompatible with the current architecture
+- the versioned interface registry and generated contract docs are in [docs/interfaces.md](docs/interfaces.md)
+
+Because interface descriptions are part of the current fingerprinted metadata, this English translation pass also changes interface and architecture fingerprints. Older checkpoints may therefore fail compatibility checks even though behavior and identifiers were not intentionally refactored.
+
+## Tests
+
+Run the full suite:
 
 ```bash
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
 
-Os testes cobrem:
+The tests cover:
 
-- shapes das interfaces padronizadas;
-- alimentação e repouso contextuais;
-- decomposição auditável de recompensa por componente;
-- progressão de sono `SETTLING -> RESTING -> DEEP_SLEEP`, dívida de sono e interrupções;
-- contato do lagarto com dano real;
-- restrição geométrica de abrigo e oclusão;
-- memória explícita da aranha;
-- templates de mapa e reachability;
-- regressões determinísticas de cenário;
-- memória guiando fuga e forrageio mesmo após perda de visada;
-- runner de cenários e métrica determinística de latência de resposta ao predador;
-- atualização online de parâmetros;
-- checks leves de treinabilidade em `classic`, `ecological`, comparações e mapa alternativo.
+- standardized interface shapes and generated interface docs
+- contextual feeding and rest
+- auditable reward decomposition
+- sleep progression `SETTLING -> RESTING -> DEEP_SLEEP`, sleep debt, and interruptions
+- predator contact with real damage
+- shelter geometry and occlusion
+- explicit spider memory
+- map templates and reachability
+- deterministic scenario regressions
+- memory-guided escape and foraging after loss of sight
+- scenario runners and deterministic predator-response latency
+- online parameter updates
+- lightweight trainability checks across reward profiles, comparisons, and alternate maps
 
-## Métricas e rastreio
+## Metrics And Tracing
 
-O `summary` e o `trace` agora incluem:
+The `summary` and `trace` include:
 
-- `reward_components` por passo, permitindo auditar a recompensa total sem ler `world.py`;
-- ocupação noturna do abrigo e taxa de imobilidade noturna;
-- distribuição noturna por papel do abrigo (`outside`, `entrance`, `inside`, `deep`);
-- latência média de resposta a encontros com o predador;
-- `reward_profile` e `map_template`;
-- `config.operational_profile`, com nome, versão e payload efetivo dos thresholds/pesos operacionais ativos;
-- `config.budget`, com perfil de orçamento, força do benchmark, seeds resolvidos e overrides explícitos;
-- `checkpointing`, quando `--checkpoint-selection best` é usado em workflows comportamentais;
-- campos explícitos de certeza/oclusão visual por canal;
-- vetores de memória (`dx`, `dy`, `age/ttl`) no metadata do trace;
-- ocupação do predador por estado (`PATROL`, `ORIENT`, `INVESTIGATE`, `CHASE`, `WAIT`, `RECOVER`);
-- contagem de transições de estado do predador e estado dominante por episódio/cenário;
-- deltas de distância para comida e abrigo, para diferenciar episódios de aproximação, fuga e retorno;
-- resultados por cenário quando `--scenario` ou `--scenario-suite` são usados.
-- scorecards comportamentais por cenário em `behavior_evaluation`, com checks threshold-based reproduzíveis por seed.
-- bandas diagnósticas por episódio (`progress_band`, `outcome_band`) nos cenários fracos, para diferenciar regressão, estagnação, progresso parcial e sucesso completo.
+- per-step `reward_components`
+- `reward_audit`, including component inventory, shaping categories, and leakage candidates
+- nighttime shelter occupancy and nighttime stillness
+- nighttime shelter-role distribution (`outside`, `entrance`, `inside`, `deep`)
+- predator-response latency
+- `reward_profile` and `map_template`
+- `config.operational_profile`, including active thresholds and operational weights
+- `config.budget`, including resolved profile, benchmark strength, seeds, and explicit overrides
+- `checkpointing` when `--checkpoint-selection best` is used
+- explicit certainty and occlusion fields per visual channel
+- world-owned `heading` and decayed percept traces in trace metadata
+- explicit `predator_motion_salience`
+- normalized memory vectors in trace metadata
+- predator occupancy by state (`PATROL`, `ORIENT`, `INVESTIGATE`, `CHASE`, `WAIT`, `RECOVER`)
+- predator state transitions and dominant predator state per episode or scenario
+- food and shelter distance deltas
+- `event_log` stages per tick
+- behavioral scorecards per scenario in `behavior_evaluation`
+- diagnostic per-episode bands such as `progress_band` and `outcome_band`
+- explicit `action_center` arbitration outputs such as `winning_valence`, `valence_scores`, `module_gates`, `suppressed_modules`, and `evidence`
 
-Se `--debug-trace` for combinado com `--trace`, cada tick inclui também:
+When `--debug-trace` is combined with `--trace`, each tick also includes:
 
-- observação serializada antes/depois da transição;
-- componentes de recompensa;
-- vetores de memória já normalizados;
-- logits neurais por módulo antes do reflexo, delta reflexo aplicado e logits pós-reflexo;
-- `effective_reflex_scale`, `module_reflex_override`, `module_reflex_dominance` e `final_reflex_override`;
-- estado interno completo do predador.
+- serialized observations before and after transition
+- reward components
+- normalized memory vectors
+- per-module logits before reflex, reflex delta, and post-reflex logits
+- logits after valence gating, per-module `gate_weight`, and `debug.arbitration`
+- `effective_reflex_scale`, `module_reflex_override`, `module_reflex_dominance`, and `final_reflex_override`
+- full predator internal state
 
-A saída curta da CLI também imprime esses agregados de avaliação para facilitar comparação rápida de baselines.
+Use `--full-summary` to print the complete JSON summary to stdout.
 
-Para imprimir o `summary` integral no stdout, use `--full-summary`.
+## Budget Profiles
 
-O perfil operacional ativo pode ser selecionado pela CLI com `--operational-profile`. O perfil inicial `default_v1` preserva exatamente os thresholds e pesos atuais de reflexos, percepção e heurísticas de reward; esse mesmo bloco também é persistido no `metadata.json` de `save/load` e nas linhas exportadas em `behavior_csv` via `operational_profile` e `operational_profile_version`.
+The CLI exposes explicit budget profiles:
 
-O envelope experimental de ruído agora é explícito e independente do perfil operacional. Use `--noise-profile {none,low,medium,high}` para ativar ruído controlado em percepção visual, olfato, execução motora, spawn/respawn e desempates do predador. O valor default `none` preserva o caminho reproduzível anterior; o `summary` passa a registrar `config.noise_profile` com o payload resolvido de cada canal.
+- `smoke`: quick sanity or CI profile (`6` episodes, `1` evaluation run, `60` steps, seed `7`)
+- `dev`: short reproducible local benchmark (`12` episodes, `2` evaluation runs, `90` steps, seeds `7/17/29`)
+- `report`: stronger reporting workflow (`24` episodes, `4` evaluation runs, `120` steps, `2` repetitions per scenario, seeds `7/17/29/41/53`)
 
-Os perfis de orçamento também são explícitos na CLI e nos artefatos:
-
-- `smoke`: sanity check rápido/CI (`6` episódios, `1` eval, `60` passos, seed `7`);
-- `dev`: benchmark local curto e reproduzível (`12` episódios, `2` eval, `90` passos, seeds `7/17/29`);
-- `report`: workflow canônico para conclusões mais fortes (`24` episódios, `4` eval, `120` passos, `2` repetições por cenário, seeds `7/17/29/41/53`).
-
-Sem `--budget-profile`, a execução continua possível em modo `custom`; nesse caso, `summary["config"]["budget"]` registra os valores efetivos e qualquer override manual aplicado por `--episodes`, `--eval-episodes`, `--max-steps`, `--scenario-episodes`, `--behavior-seeds`, `--ablation-seeds` ou `--checkpoint-interval`.
-
-O `behavior_csv` também passa a carregar `budget_profile`, `benchmark_strength`, `checkpoint_source` e `noise_profile`, além de `operational_profile` e da metadata de ablação já existente.
-Ele também exporta `architecture_version` e `architecture_fingerprint` para rastreabilidade entre runs e checkpoints.
-Ele agora inclui também `scenario_description`, `scenario_objective`, `scenario_focus`, além de `metric_progress_band`, `metric_outcome_band` e dos booleanos diagnósticos dos cenários fracos.
-
-## Perfis de orçamento
-
-Comandos canônicos por perfil:
+Canonical commands:
 
 ```bash
-# smoke: sanity/CI
+# smoke: sanity / CI
 PYTHONPATH=. python3 -m spider_cortex_sim \
   --budget-profile smoke \
   --behavior-suite --full-summary
 
-# dev: benchmark local rápido
+# dev: fast local benchmark
 PYTHONPATH=. python3 -m spider_cortex_sim \
   --budget-profile dev \
   --ablation-suite --full-summary
 
-# report: benchmark forte + seleção automática do melhor checkpoint
+# report: stronger benchmark + automatic checkpoint selection
 PYTHONPATH=. python3 -m spider_cortex_sim \
   --budget-profile report \
   --checkpoint-selection best \
   --ablation-suite --full-summary
 ```
 
-Custos esperados:
+Without `--budget-profile`, the run still works in `custom` mode and records the effective values and overrides in `summary["config"]["budget"]`.
 
-- `smoke`: segundos, pensado para sanity check;
-- `dev`: dezenas de segundos locais, pensado para iteração;
-- `report`: mais caro, pensado para documentação/relato e não para loop rápido.
+## Comparison Workflows
 
-### Workflow de comparação
-
-Comparar perfis de recompensa no mapa atual:
+Compare reward profiles on the current map:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -626,7 +465,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --compare-profiles --full-summary
 ```
 
-Comparar mapas no perfil atual:
+Compare maps under the current reward profile:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -635,20 +474,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --compare-maps --full-summary
 ```
 
-Gerar summary + debug trace enriquecido:
-
-```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
-  --budget-profile dev \
-  --compare-profiles --compare-maps \
-  --summary spider_summary_compare.json \
-  --trace spider_trace_debug.jsonl \
-  --debug-trace
-```
-
-### Workflow de comparação comportamental
-
-Comparar a suíte comportamental entre perfis:
+Compare the behavioral suite across profiles:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -656,7 +482,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --behavior-compare-profiles --full-summary
 ```
 
-Comparar a suíte comportamental entre mapas e exportar CSV:
+Compare the behavioral suite across maps and export CSV:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -667,11 +493,11 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --full-summary
 ```
 
-### Análise offline dos artefatos
+The shaping audit uses `austere` as the minimal baseline and records deltas against it under `summary["behavior_evaluation"]["shaping_audit"]`.
 
-O projeto agora inclui um runner separado para transformar `summary.json`, `trace.jsonl` e `behavior_csv` em um bundle de análise offline sem dependências novas.
+## Offline Analysis
 
-Comando canônico:
+The project includes a separate runner that transforms `summary.json`, `trace.jsonl`, and `behavior_csv` into an offline analysis bundle:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim.offline_analysis \
@@ -681,35 +507,16 @@ PYTHONPATH=. python3 -m spider_cortex_sim.offline_analysis \
   --output-dir offline_analysis
 ```
 
-Regras do runner:
+Rules:
 
-- `--output-dir` é obrigatório;
-- ao menos um entre `--summary`, `--trace` e `--behavior-csv` é obrigatório;
-- o relatório sempre é emitido, mesmo com entrada parcial;
-- quando alguma leitura depende de `--debug-trace`, isso aparece como limitação em `report.md` e `report.json`, em vez de abortar a execução.
+- `--output-dir` is required
+- at least one of `--summary`, `--trace`, or `--behavior-csv` is required
+- the report is always emitted, even with partial input
+- missing blocks are reported in `report.md` and `report.json` instead of aborting execution
 
-Artefatos gerados:
+## Ablations And Learning Evidence
 
-- `report.md`
-- `report.json`
-- `training_eval.svg`
-- `scenario_success.svg`
-- `scenario_checks.csv`
-- `reward_components.csv`
-- `ablation_comparison.svg`, quando houver payload de ablação ou CSV suficiente para reconstruí-lo
-- `reflex_frequency.svg`, quando houver `trace`
-
-O relatório consolida:
-
-- curva de treino/avaliação quando o `summary` traz histórico suficiente;
-- sucesso por cenário e checks com falha a partir de `behavior_evaluation.suite` ou, na falta dele, do `behavior_csv`;
-- comparações entre perfis, mapas e variantes de ablação;
-- métricas arquiteturais já exportadas, como `mean_reward_components`, `mean_night_role_distribution`, `mean_predator_state_occupancy`, `mean_predator_mode_transitions`, `mean_food_distance_delta` e `mean_shelter_distance_delta`;
-- frequência de reflexos por módulo a partir de `trace.messages[*].payload.reflex`, enriquecida por `debug.reflexes` quando o trace foi gerado com `--debug-trace`.
-
-### Workflow de ablações
-
-Comparar a referência modular com a suíte canônica de ablações:
+Compare the modular reference against the canonical ablation suite:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -719,46 +526,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --full-summary
 ```
 
-Executar treino com annealing linear de reflexo e registrar a comparação pós-treino com `eval_reflex_scale=0.0`:
-
-```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
-  --budget-profile dev \
-  --episodes 12 \
-  --eval-episodes 2 \
-  --reflex-scale 1.0 \
-  --reflex-anneal-final-scale 0.25 \
-  --summary spider_reflex_schedule_summary.json \
-  --full-summary
-```
-
-Comparar apenas a baseline monolítica contra a referência modular:
-
-```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
-  --budget-profile dev \
-  --ablation-variant monolithic_policy \
-  --behavior-scenario night_rest \
-  --full-summary
-```
-
-O bloco `behavior_evaluation.ablations` do `summary` inclui:
-
-- `reference_variant`: variante modular usada como referência;
-- `variants`: payload compacto por variante, incluindo configuração, suíte, métricas legadas e `without_reflex_support`;
-- `deltas_vs_reference`: diferença de `scenario_success_rate`, `episode_success_rate` e `success_rate` por cenário em relação a `modular_full`.
-
-As variantes canônicas agora incluem também o sweep gradual `reflex_scale_0_25`, `reflex_scale_0_50` e `reflex_scale_0_75`.
-
-As linhas exportadas em `behavior_csv` agora carregam também:
-
-- `reflex_scale`;
-- `reflex_anneal_final_scale`;
-- `eval_reflex_scale`.
-
-## Learning Evidence
-
-Rodar a suíte de `learning_evidence` no orçamento smoke:
+Run the `learning_evidence` suite under the smoke budget:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -769,7 +537,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --full-summary
 ```
 
-Rodar a comparação canônica curto vs longo:
+Run the canonical short-vs-long learning-evidence comparison:
 
 ```bash
 PYTHONPATH=. python3 -m spider_cortex_sim \
@@ -782,67 +550,20 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --full-summary
 ```
 
-O bloco `behavior_evaluation.learning_evidence` inclui:
+The detailed ablation workflow, variant definitions, and canonical check-in table live in [docs/ablation_workflow.md](docs/ablation_workflow.md).
 
-- `reference_condition`: hoje fixado em `trained_final`;
-- `conditions`: payload compacto por condição, com `policy_mode`, `train_episodes`, `checkpoint_source` e a suíte comportamental agregada;
-- `deltas_vs_reference`: deltas de `scenario_success_rate`, `episode_success_rate` e `mean_reward` contra `trained_final`;
-- `evidence_summary`: gate objetivo baseado em `scenario_success_rate`, comparando `trained_final` contra `random_init` e `reflex_only`, com `trained_without_reflex_support` registrado apenas como sinal complementar.
+## Modeling Notes
 
-As linhas exportadas em `behavior_csv` passam a carregar também:
+- The system is biologically inspired, not biologically faithful
+- The "return vector to shelter" is a simplified form of proprioception or minimal spatial memory
+- Explicit memory is world-owned: target, age, and TTL are maintained by the environment and only consumed by cortical modules through observation
+- Local per-module reflexes act like innate behavior that online learning later refines
+- There is no giant fallback center that integrates everything; each proposer receives only its own interface and emits only standardized locomotion proposals
 
-- `learning_evidence_condition`;
-- `learning_evidence_policy_mode`;
-- `learning_evidence_train_episodes`;
-- `learning_evidence_frozen_after_episode`;
-- `learning_evidence_checkpoint_source`;
-- `learning_evidence_budget_profile`;
-- `learning_evidence_budget_benchmark_strength`.
+## Natural Extensions
 
-O workflow completo, com definições das variantes e uma tabela de resultados check-in, está em [docs/ablation_workflow.md](docs/ablation_workflow.md).
-
-## Comandos de benchmark
-
-Baseline clássico:
-
-```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
-  --budget-profile report \
-  --reward-profile classic --map-template central_burrow \
-  --summary spider_summary_classic.json
-```
-
-Comparação ecológica:
-
-```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
-  --budget-profile report \
-  --reward-profile ecological --map-template central_burrow \
-  --summary spider_summary_ecological.json
-```
-
-Mapa alternativo com cenários:
-
-```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
-  --budget-profile dev \
-  --map-template side_burrow \
-  --scenario-suite \
-  --summary spider_summary_side_burrow.json
-```
-
-## Observações de modelagem
-
-- O sistema é **biologicamente inspirado**, não biologicamente fiel.
-- O “vetor de retorno ao abrigo” é uma simplificação de propriocepção / memória espacial mínima.
-- A memória explícita é **world-owned**: idade, alvo e TTL são mantidos pelo ambiente e apenas consumidos pelos módulos corticais via observação.
-- Os reflexos locais por módulo funcionam como uma forma de “comportamento inato”, sobre a qual o aprendizado online faz refinamento, e agora aparecem no trace/debug com ação-alvo, motivo e sinais disparadores.
-- Não há um centro coringa gigante integrando tudo; cada módulo recebe apenas sua interface própria e emite apenas proposta locomotora padronizada.
-
-## Extensões naturais
-
-1. adicionar memória recorrente por módulo;
-2. introduzir múltiplos predadores com nichos sensoriais diferentes;
-3. modelar campo visual orientado em vez de visão omnidirecional curta;
-4. separar locomoção em marcha/velocidade/orientação corporal;
-5. migrar as redes para PyTorch preservando a mesma assinatura modular.
+1. add recurrent memory per module
+2. introduce multiple predators with different sensory niches
+3. model a more strongly oriented field of view rather than a short omnidirectional one
+4. separate locomotion into gait, speed, and body orientation
+5. migrate the networks to PyTorch while preserving the same modular interface signature

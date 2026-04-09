@@ -1,47 +1,55 @@
 # Action Center Design Note
 
-## Objetivo
+## Goal
 
-Separar arbitragem comportamental de execução locomotora sem trocar o espaço motor do ambiente.
+Separate behavioral arbitration from locomotor execution without changing the environment's motor space.
 
-Nova cadeia:
+New pipeline:
 
-`módulos especializados ou monolithic_policy -> action_center -> motor_cortex -> ação final`
+`specialized modules or monolithic_policy -> valence-based priority gating -> action_center -> motor_cortex -> final action`
 
-## Contratos
+## Contracts
 
 - `action_center`
-  - entrada: concatenação das propostas locomotoras + `action_context`
-  - saída: logits locomotores sobre `MOVE_UP`, `MOVE_DOWN`, `MOVE_LEFT`, `MOVE_RIGHT`, `STAY`
-  - cabeça de valor: sim
+  - input: concatenation of locomotion proposals plus `action_context`
+  - output: locomotion logits over `MOVE_UP`, `MOVE_DOWN`, `MOVE_LEFT`, `MOVE_RIGHT`, `STAY`
+  - value head: yes
+  - explicit arbitration: `priority_gating` with valences `threat`, `hunger`, `sleep`, and `exploration`
 
 - `motor_cortex`
-  - entrada: intenção locomotora escolhida pelo `action_center` em one-hot + `motor_context`
-  - saída: logits corretivos sobre o mesmo espaço locomotor
-  - cabeça de valor: não
+  - input: the locomotion intent chosen by `action_center` in one-hot form plus `motor_context`
+  - output: corrective logits over the same locomotion space
+  - value head: no
 
-## Contextos
+## Contexts
 
 - `action_context`
-  - estado corporal e situacional amplo para arbitragem: fome, fadiga, saúde, dor, contato, comida/abrigo, predador, ciclo dia/noite, último deslocamento, dívida de sono e profundidade no abrigo
+  - broad bodily and situational state for arbitration: hunger, fatigue, health, pain, contact, food or shelter status, predator cues, day or night cycle, last movement, sleep debt, and shelter depth
 
 - `motor_context`
-  - contexto local de execução/correção: comida/abrigo, predador, ciclo dia/noite, último deslocamento e profundidade no abrigo
+  - local execution or correction context: food or shelter status, predator cues, day or night cycle, last movement, and shelter depth
 
-## Reflexos
+## Reflexes
 
-- Os reflexos locais continuam nos módulos propositores.
-- Eles modulam propostas antes do `action_center`.
-- O `motor_cortex` não aplica reflexos; ele só corrige a execução da intenção arbitrada.
+- Local reflexes remain in the proposer modules.
+- They modulate proposals before `action_center`.
+- After that, `action_center` applies module gates according to the winning valence.
+- `motor_cortex` does not apply reflexes; it only corrects execution of the arbitrated intent.
+
+## Auditability
+
+- The bus or trace serializes `winning_valence`, `valence_scores`, `module_gates`, `suppressed_modules`, `evidence`, `intent_before_gating`, and `intent_after_gating`.
+- `ModuleResult` also carries `valence_role`, `gate_weight`, `gated_logits`, `intent_before_gating`, and `intent_after_gating` for explicit debugging of each gate's effect.
+- The `food_vs_predator_conflict` and `sleep_vs_exploration_conflict` scenarios exercise this arbitration deterministically.
 
 ## Monolithic Policy
 
-- `monolithic_policy` continua como baseline de proposta única.
-- Ela agora alimenta o mesmo `action_center` e o mesmo `motor_cortex` da arquitetura modular.
-- Isso mantém comparabilidade estrutural a jusante da etapa propositora.
+- `monolithic_policy` remains the single-proposal baseline.
+- It now feeds the same `action_center` and the same `motor_cortex` used by the modular architecture.
+- That preserves structural comparability downstream of the proposal stage.
 
-## Compatibilidade
+## Compatibility
 
-- `architecture_signature()` agora inclui `action_center`, `action_context` e o novo `motor_context`.
-- `ARCHITECTURE_VERSION` foi incrementada.
-- Checkpoints antigos falham com mensagem explícita; não há migração automática nesta entrega.
+- `architecture_signature()` now includes `action_center`, `action_context`, and the new `motor_context`.
+- `ARCHITECTURE_VERSION` was incremented.
+- Older checkpoints fail with an explicit message; this change does not provide automatic migration.

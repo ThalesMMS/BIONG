@@ -4,15 +4,21 @@ import os
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
 
 from spider_cortex_sim.ablations import canonical_ablation_configs
-from spider_cortex_sim.agent import BrainStep
+from spider_cortex_sim.agent import BrainStep, SpiderBrain
 from spider_cortex_sim.interfaces import ACTION_TO_INDEX
 from spider_cortex_sim.scenarios import SCENARIO_NAMES
-from spider_cortex_sim.simulation import SpiderSimulation
+from spider_cortex_sim.simulation import (
+    CURRICULUM_FOCUS_SCENARIOS,
+    CURRICULUM_PROFILE_NAMES,
+    CurriculumPhaseDefinition,
+    SpiderSimulation,
+)
 from spider_cortex_sim.world import SpiderWorld
 
 
@@ -82,7 +88,7 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertGreater(evaluation["mean_reward_components"]["feeding"], 0.0)
         self.assertEqual(summary["config"]["world"]["reward_profile"], "classic")
         self.assertEqual(summary["config"]["world"]["map_template"], "central_burrow")
-        self.assertEqual(summary["config"]["architecture_version"], 8)
+        self.assertEqual(summary["config"]["architecture_version"], SpiderBrain.ARCHITECTURE_VERSION)
         self.assertTrue(summary["config"]["architecture_fingerprint"])
         self.assertEqual(summary["config"]["operational_profile"]["name"], "default_v1")
         self.assertEqual(summary["config"]["operational_profile"]["version"], 1)
@@ -143,21 +149,603 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(summary["config"]["reflex_schedule"]["final_scale"], 0.25)
         self.assertIn("mean_reflex_usage_rate", summary["evaluation"])
         self.assertIn("mean_module_reflex_usage_rate", summary["evaluation"])
+        self.assertIn("mean_module_contribution_share", summary["evaluation"])
+        self.assertIn("mean_effective_module_count", summary["evaluation"])
         self.assertIn("evaluation_without_reflex_support", summary)
         self.assertEqual(summary["evaluation_without_reflex_support"]["eval_reflex_scale"], 0.0)
 
+    def test_train_curriculum_records_training_regime_and_phase_summary(self) -> None:
+        sim = SpiderSimulation(seed=19, max_steps=20)
+        summary, _ = sim.train(
+            episodes=6,
+            evaluation_episodes=1,
+            capture_evaluation_trace=False,
+            curriculum_profile="ecological_v1",
+        )
+
+        self.assertEqual(summary["config"]["training_regime"]["mode"], "curriculum")
+        self.assertEqual(
+            summary["config"]["training_regime"]["curriculum_profile"],
+            "ecological_v1",
+        )
+        self.assertIn("curriculum", summary)
+        self.assertEqual(summary["curriculum"]["profile"], "ecological_v1")
+        self.assertEqual(len(summary["curriculum"]["phases"]), 4)
+        self.assertIn(
+            summary["curriculum"]["phases"][0]["status"],
+            {"promoted", "max_budget_exhausted", "skipped_no_budget"},
+        )
+
+    def test_train_curriculum_is_reproducible_for_same_seed(self) -> None:
+        sim_a = SpiderSimulation(seed=21, max_steps=20)
+        sim_b = SpiderSimulation(seed=21, max_steps=20)
+
+        summary_a, _ = sim_a.train(
+            episodes=6,
+            evaluation_episodes=0,
+            capture_evaluation_trace=False,
+            curriculum_profile="ecological_v1",
+        )
+        summary_b, _ = sim_b.train(
+            episodes=6,
+            evaluation_episodes=0,
+            capture_evaluation_trace=False,
+            curriculum_profile="ecological_v1",
+        )
+
+        self.assertEqual(summary_a["curriculum"], summary_b["curriculum"])
+
+    # ---------------------------------------------------------------------------
+    # Curriculum constants
+    # ---------------------------------------------------------------------------
+
+    def test_curriculum_profile_names_contains_required_values(self) -> None:
+        self.assertIn("none", CURRICULUM_PROFILE_NAMES)
+        self.assertIn("ecological_v1", CURRICULUM_PROFILE_NAMES)
+
+    def test_curriculum_focus_scenarios_are_expected_four(self) -> None:
+        expected = {
+            "open_field_foraging",
+            "corridor_gauntlet",
+            "exposed_day_foraging",
+            "food_deprivation",
+        }
+        self.assertEqual(set(CURRICULUM_FOCUS_SCENARIOS), expected)
+
+    # ---------------------------------------------------------------------------
+    # CurriculumPhaseDefinition dataclass
+    # ---------------------------------------------------------------------------
+
+    def test_curriculum_phase_definition_stores_fields(self) -> None:
+        phase = CurriculumPhaseDefinition(
+            name="phase_test",
+            training_scenarios=("scenario_a",),
+            promotion_scenarios=("scenario_a",),
+            success_threshold=0.75,
+            max_episodes=10,
+            min_episodes=5,
+        )
+        self.assertEqual(phase.name, "phase_test")
+        self.assertEqual(phase.training_scenarios, ("scenario_a",))
+        self.assertEqual(phase.success_threshold, 0.75)
+        self.assertEqual(phase.max_episodes, 10)
+        self.assertEqual(phase.min_episodes, 5)
+
+    def test_curriculum_phase_definition_is_frozen(self) -> None:
+        phase = CurriculumPhaseDefinition(
+            name="p",
+            training_scenarios=("s",),
+            promotion_scenarios=("s",),
+            success_threshold=1.0,
+            max_episodes=4,
+            min_episodes=2,
+        )
+        with self.assertRaises((AttributeError, TypeError)):
+            phase.name = "modified"  # type: ignore[misc]
+
+    # ---------------------------------------------------------------------------
+    # _resolve_curriculum_phase_budgets
+    # ---------------------------------------------------------------------------
+
+    def test_resolve_curriculum_phase_budgets_zero_returns_all_zeros(self) -> None:
+        result = SpiderSimulation._resolve_curriculum_phase_budgets(0)
+        self.assertEqual(result, [0, 0, 0, 0])
+
+    def test_resolve_curriculum_phase_budgets_negative_treated_as_zero(self) -> None:
+        result = SpiderSimulation._resolve_curriculum_phase_budgets(-5)
+        self.assertEqual(result, [0, 0, 0, 0])
+
+    def test_resolve_curriculum_phase_budgets_returns_four_phases(self) -> None:
+        result = SpiderSimulation._resolve_curriculum_phase_budgets(12)
+        self.assertEqual(len(result), 4)
+
+    def test_resolve_curriculum_phase_budgets_sum_equals_total(self) -> None:
+        for total in (1, 6, 12, 24, 60, 100):
+            with self.subTest(total=total):
+                result = SpiderSimulation._resolve_curriculum_phase_budgets(total)
+                self.assertEqual(sum(result), total)
+
+    def test_resolve_curriculum_phase_budgets_single_episode_distributes(self) -> None:
+        result = SpiderSimulation._resolve_curriculum_phase_budgets(1)
+        self.assertEqual(sum(result), 1)
+        # At least the first non-zero phase gets the episode
+        self.assertTrue(any(b > 0 for b in result))
+
+    def test_resolve_curriculum_phase_budgets_all_nonnegative(self) -> None:
+        for total in (0, 1, 3, 6, 7, 12, 50):
+            with self.subTest(total=total):
+                result = SpiderSimulation._resolve_curriculum_phase_budgets(total)
+                self.assertTrue(all(b >= 0 for b in result))
+
+    def test_resolve_curriculum_phase_budgets_last_phase_gets_remainder(self) -> None:
+        result = SpiderSimulation._resolve_curriculum_phase_budgets(12)
+        self.assertEqual(result, [2, 2, 4, 4])
+
+    # ---------------------------------------------------------------------------
+    # _resolve_curriculum_profile
+    # ---------------------------------------------------------------------------
+
+    def test_resolve_curriculum_profile_none_returns_empty_list(self) -> None:
+        phases = SpiderSimulation._resolve_curriculum_profile(
+            curriculum_profile="none", total_episodes=12
+        )
+        self.assertEqual(phases, [])
+
+    def test_resolve_curriculum_profile_invalid_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            SpiderSimulation._resolve_curriculum_profile(
+                curriculum_profile="bad_profile", total_episodes=12
+            )
+
+    def test_resolve_curriculum_profile_ecological_v1_returns_four_phases(self) -> None:
+        phases = SpiderSimulation._resolve_curriculum_profile(
+            curriculum_profile="ecological_v1", total_episodes=12
+        )
+        self.assertEqual(len(phases), 4)
+
+    def test_resolve_curriculum_profile_ecological_v1_all_are_phase_definitions(self) -> None:
+        phases = SpiderSimulation._resolve_curriculum_profile(
+            curriculum_profile="ecological_v1", total_episodes=12
+        )
+        for phase in phases:
+            self.assertIsInstance(phase, CurriculumPhaseDefinition)
+
+    def test_resolve_curriculum_profile_ecological_v1_phase_names(self) -> None:
+        phases = SpiderSimulation._resolve_curriculum_profile(
+            curriculum_profile="ecological_v1", total_episodes=12
+        )
+        expected_names = [
+            "phase_1_night_rest_predator_edge",
+            "phase_2_entrance_ambush_shelter_blockade",
+            "phase_3_open_field_exposed_day",
+            "phase_4_corridor_food_deprivation",
+        ]
+        actual_names = [p.name for p in phases]
+        self.assertEqual(actual_names, expected_names)
+
+    def test_resolve_curriculum_profile_ecological_v1_thresholds(self) -> None:
+        phases = SpiderSimulation._resolve_curriculum_profile(
+            curriculum_profile="ecological_v1", total_episodes=12
+        )
+        # Early phases require perfect score, later phases require half
+        self.assertEqual(phases[0].success_threshold, 1.0)
+        self.assertEqual(phases[1].success_threshold, 1.0)
+        self.assertEqual(phases[2].success_threshold, 0.5)
+        self.assertEqual(phases[3].success_threshold, 0.5)
+
+    def test_resolve_curriculum_profile_ecological_v1_min_not_exceed_max(self) -> None:
+        phases = SpiderSimulation._resolve_curriculum_profile(
+            curriculum_profile="ecological_v1", total_episodes=12
+        )
+        for phase in phases:
+            self.assertLessEqual(phase.min_episodes, phase.max_episodes)
+
+    def test_resolve_curriculum_profile_ecological_v1_budgets_sum_equals_total(self) -> None:
+        total = 12
+        phases = SpiderSimulation._resolve_curriculum_profile(
+            curriculum_profile="ecological_v1", total_episodes=total
+        )
+        self.assertEqual(sum(p.max_episodes for p in phases), total)
+
+    def test_resolve_curriculum_profile_phase3_scenarios_include_focus(self) -> None:
+        phases = SpiderSimulation._resolve_curriculum_profile(
+            curriculum_profile="ecological_v1", total_episodes=12
+        )
+        phase3_scenarios = set(phases[2].training_scenarios)
+        self.assertIn("open_field_foraging", phase3_scenarios)
+        self.assertIn("exposed_day_foraging", phase3_scenarios)
+
+    def test_resolve_curriculum_profile_phase4_scenarios_include_focus(self) -> None:
+        phases = SpiderSimulation._resolve_curriculum_profile(
+            curriculum_profile="ecological_v1", total_episodes=12
+        )
+        phase4_scenarios = set(phases[3].training_scenarios)
+        self.assertIn("corridor_gauntlet", phase4_scenarios)
+        self.assertIn("food_deprivation", phase4_scenarios)
+
+    # ---------------------------------------------------------------------------
+    # _regime_row_metadata_from_summary
+    # ---------------------------------------------------------------------------
+
+    def test_regime_row_metadata_flat_no_curriculum(self) -> None:
+        training_regime = {"mode": "flat", "curriculum_profile": "none"}
+        result = SpiderSimulation._regime_row_metadata_from_summary(training_regime, None)
+        self.assertEqual(result["training_regime"], "flat")
+        self.assertEqual(result["curriculum_profile"], "none")
+        self.assertEqual(result["curriculum_phase"], "")
+        self.assertEqual(result["curriculum_phase_status"], "")
+
+    def test_regime_row_metadata_curriculum_with_phases(self) -> None:
+        training_regime = {"mode": "curriculum", "curriculum_profile": "ecological_v1"}
+        curriculum_summary = {
+            "phases": [
+                {"name": "phase_1_night_rest_predator_edge", "status": "promoted"},
+                {"name": "phase_4_corridor_food_deprivation", "status": "max_budget_exhausted"},
+            ]
+        }
+        result = SpiderSimulation._regime_row_metadata_from_summary(
+            training_regime, curriculum_summary
+        )
+        self.assertEqual(result["training_regime"], "curriculum")
+        self.assertEqual(result["curriculum_profile"], "ecological_v1")
+        # Should use the last phase
+        self.assertEqual(result["curriculum_phase"], "phase_4_corridor_food_deprivation")
+        self.assertEqual(result["curriculum_phase_status"], "max_budget_exhausted")
+
+    def test_regime_row_metadata_none_curriculum_summary(self) -> None:
+        training_regime = {"mode": "curriculum", "curriculum_profile": "ecological_v1"}
+        result = SpiderSimulation._regime_row_metadata_from_summary(training_regime, None)
+        self.assertEqual(result["curriculum_phase"], "")
+        self.assertEqual(result["curriculum_phase_status"], "")
+
+    def test_regime_row_metadata_empty_phases_list(self) -> None:
+        training_regime = {"mode": "curriculum", "curriculum_profile": "ecological_v1"}
+        curriculum_summary = {"phases": []}
+        result = SpiderSimulation._regime_row_metadata_from_summary(
+            training_regime, curriculum_summary
+        )
+        self.assertEqual(result["curriculum_phase"], "")
+        self.assertEqual(result["curriculum_phase_status"], "")
+
+    def test_regime_row_metadata_single_phase_in_curriculum(self) -> None:
+        training_regime = {"mode": "curriculum", "curriculum_profile": "ecological_v1"}
+        curriculum_summary = {
+            "phases": [
+                {"name": "phase_1_night_rest_predator_edge", "status": "promoted"},
+            ]
+        }
+        result = SpiderSimulation._regime_row_metadata_from_summary(
+            training_regime, curriculum_summary
+        )
+        self.assertEqual(result["curriculum_phase"], "phase_1_night_rest_predator_edge")
+        self.assertEqual(result["curriculum_phase_status"], "promoted")
+
+    def test_regime_row_metadata_missing_keys_use_defaults(self) -> None:
+        # training_regime with no recognized keys
+        result = SpiderSimulation._regime_row_metadata_from_summary({}, None)
+        self.assertEqual(result["training_regime"], "flat")
+        self.assertEqual(result["curriculum_profile"], "none")
+
+    # ---------------------------------------------------------------------------
+    # _set_training_regime_metadata (instance method)
+    # ---------------------------------------------------------------------------
+
+    def test_set_training_regime_metadata_flat_mode(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        sim._set_training_regime_metadata(curriculum_profile="none", episodes=6)
+        regime = sim._latest_training_regime_summary
+        self.assertEqual(regime["mode"], "flat")
+        self.assertEqual(regime["curriculum_profile"], "none")
+        self.assertEqual(regime["resolved_budget"]["total_training_episodes"], 6)
+        self.assertEqual(regime["resolved_budget"]["phase_episode_budgets"], [])
+
+    def test_set_training_regime_metadata_curriculum_mode(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        sim._set_training_regime_metadata(curriculum_profile="ecological_v1", episodes=12)
+        regime = sim._latest_training_regime_summary
+        self.assertEqual(regime["mode"], "curriculum")
+        self.assertEqual(regime["curriculum_profile"], "ecological_v1")
+        self.assertEqual(regime["resolved_budget"]["total_training_episodes"], 12)
+        self.assertEqual(len(regime["resolved_budget"]["phase_episode_budgets"]), 4)
+        self.assertEqual(sum(regime["resolved_budget"]["phase_episode_budgets"]), 12)
+
+    def test_set_training_regime_metadata_curriculum_summary_stored(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        curriculum_summary = {"profile": "ecological_v1", "phases": []}
+        sim._set_training_regime_metadata(
+            curriculum_profile="ecological_v1",
+            episodes=6,
+            curriculum_summary=curriculum_summary,
+        )
+        self.assertIsNotNone(sim._latest_curriculum_summary)
+        self.assertEqual(sim._latest_curriculum_summary["profile"], "ecological_v1")
+
+    def test_set_training_regime_metadata_none_curriculum_summary_clears_latest(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        # First set with a summary
+        sim._set_training_regime_metadata(
+            curriculum_profile="ecological_v1",
+            episodes=6,
+            curriculum_summary={"profile": "ecological_v1", "phases": []},
+        )
+        # Then clear it
+        sim._set_training_regime_metadata(
+            curriculum_profile="ecological_v1",
+            episodes=6,
+            curriculum_summary=None,
+        )
+        self.assertIsNone(sim._latest_curriculum_summary)
+
+    # ---------------------------------------------------------------------------
+    # _execute_training_schedule
+    # ---------------------------------------------------------------------------
+
+    def test_execute_training_schedule_invalid_profile_raises_value_error(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        with self.assertRaises(ValueError):
+            sim._execute_training_schedule(episodes=4, curriculum_profile="bad_profile")
+
+    def test_execute_training_schedule_flat_zero_episodes_returns_empty(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        history = sim._execute_training_schedule(episodes=0, curriculum_profile="none")
+        self.assertEqual(history, [])
+
+    def test_execute_training_schedule_flat_returns_correct_episode_count(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        history = sim._execute_training_schedule(episodes=3, curriculum_profile="none")
+        self.assertEqual(len(history), 3)
+
+    def test_execute_training_schedule_flat_sets_regime_mode_flat(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        sim._execute_training_schedule(episodes=2, curriculum_profile="none")
+        self.assertEqual(sim._latest_training_regime_summary["mode"], "flat")
+
+    def test_execute_training_schedule_curriculum_sets_regime_mode_curriculum(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        sim._execute_training_schedule(episodes=6, curriculum_profile="ecological_v1")
+        self.assertEqual(sim._latest_training_regime_summary["mode"], "curriculum")
+
+    def test_execute_training_schedule_flat_calls_checkpoint_callback(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        call_counts = []
+        sim._execute_training_schedule(
+            episodes=3,
+            curriculum_profile="none",
+            checkpoint_callback=lambda n: call_counts.append(n),
+        )
+        self.assertEqual(call_counts, [1, 2, 3])
+
+    # ---------------------------------------------------------------------------
+    # Train with flat regime — regression tests
+    # ---------------------------------------------------------------------------
+
+    def test_train_flat_regime_default_mode_is_flat_in_summary(self) -> None:
+        """Default training (no curriculum_profile) should record mode=flat."""
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        summary, _ = sim.train(
+            episodes=2,
+            evaluation_episodes=0,
+            capture_evaluation_trace=False,
+        )
+        self.assertEqual(summary["config"]["training_regime"]["mode"], "flat")
+        self.assertEqual(
+            summary["config"]["training_regime"]["curriculum_profile"], "none"
+        )
+        self.assertNotIn("curriculum", summary)
+
+    def test_train_invalid_curriculum_profile_raises_value_error(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        with self.assertRaises(ValueError):
+            sim.train(
+                episodes=2,
+                evaluation_episodes=0,
+                capture_evaluation_trace=False,
+                curriculum_profile="invalid_profile",
+            )
+
+    def test_train_curriculum_phase_budgets_sum_equals_episodes(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        episodes = 6
+        summary, _ = sim.train(
+            episodes=episodes,
+            evaluation_episodes=0,
+            capture_evaluation_trace=False,
+            curriculum_profile="ecological_v1",
+        )
+        phase_budgets = summary["config"]["training_regime"]["resolved_budget"][
+            "phase_episode_budgets"
+        ]
+        self.assertEqual(sum(phase_budgets), episodes)
+
+    def test_train_curriculum_summary_has_four_phases(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        summary, _ = sim.train(
+            episodes=6,
+            evaluation_episodes=0,
+            capture_evaluation_trace=False,
+            curriculum_profile="ecological_v1",
+        )
+        self.assertEqual(len(summary["curriculum"]["phases"]), 4)
+
+    def test_train_curriculum_phases_have_required_fields(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        summary, _ = sim.train(
+            episodes=6,
+            evaluation_episodes=0,
+            capture_evaluation_trace=False,
+            curriculum_profile="ecological_v1",
+        )
+        required_fields = {
+            "name", "training_scenarios", "promotion_scenarios",
+            "success_threshold", "max_episodes", "min_episodes",
+            "allocated_episodes", "carryover_in", "episodes_executed", "status",
+        }
+        for phase in summary["curriculum"]["phases"]:
+            for field in required_fields:
+                self.assertIn(field, phase, msg=f"Missing field {field!r}")
+
+    def test_train_curriculum_total_episodes_recorded_correctly(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        summary, _ = sim.train(
+            episodes=6,
+            evaluation_episodes=0,
+            capture_evaluation_trace=False,
+            curriculum_profile="ecological_v1",
+        )
+        self.assertEqual(
+            summary["curriculum"]["total_training_episodes"], 6
+        )
+
+    def test_train_curriculum_promotion_carries_budget_forward(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+
+        def fake_run_episode(
+            episode_index: int,
+            *,
+            training: bool,
+            sample: bool,
+            render: bool = False,
+            capture_trace: bool = False,
+            scenario_name: str | None = None,
+            debug_trace: bool = False,
+            policy_mode: str = "normal",
+        ):
+            return {"episode": episode_index, "scenario": scenario_name}, []
+
+        eval_calls = {"count": 0}
+
+        def fake_evaluate_behavior_suite(*args, **kwargs):
+            eval_calls["count"] += 1
+            if eval_calls["count"] == 1:
+                payload = {
+                    "summary": {
+                        "scenario_success_rate": 1.0,
+                        "episode_success_rate": 1.0,
+                    },
+                    "suite": {},
+                }
+            else:
+                payload = {
+                    "summary": {
+                        "scenario_success_rate": 0.0,
+                        "episode_success_rate": 0.0,
+                    },
+                    "suite": {},
+                }
+            return payload, [], []
+
+        with mock.patch.object(sim, "run_episode", side_effect=fake_run_episode), \
+             mock.patch.object(sim, "evaluate_behavior_suite", side_effect=fake_evaluate_behavior_suite):
+            training_history = sim._execute_training_schedule(
+                episodes=12,
+                curriculum_profile="ecological_v1",
+            )
+
+        self.assertEqual(len(training_history), 12)
+        curriculum = sim._latest_curriculum_summary
+        self.assertIsNotNone(curriculum)
+        phase_1 = curriculum["phases"][0]
+        phase_2 = curriculum["phases"][1]
+        phase_4 = curriculum["phases"][3]
+        self.assertEqual(phase_1["status"], "promoted")
+        self.assertEqual(phase_1["allocated_episodes"], 2)
+        self.assertEqual(phase_1["episodes_executed"], 1)
+        self.assertEqual(phase_2["carryover_in"], 1)
+        self.assertEqual(phase_2["allocated_episodes"], 3)
+        self.assertEqual(phase_4["carryover_in"], 0)
+        self.assertEqual(phase_4["allocated_episodes"], phase_4["max_episodes"])
+        self.assertEqual(curriculum["executed_training_episodes"], 12)
+
+    def test_train_curriculum_final_phase_absorbs_carried_budget(self) -> None:
+        sim = SpiderSimulation(seed=9, max_steps=10)
+
+        def fake_run_episode(
+            episode_index: int,
+            *,
+            training: bool,
+            sample: bool,
+            render: bool = False,
+            capture_trace: bool = False,
+            scenario_name: str | None = None,
+            debug_trace: bool = False,
+            policy_mode: str = "normal",
+        ):
+            return {"episode": episode_index, "scenario": scenario_name}, []
+
+        eval_payloads = [
+            {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}, "suite": {}},
+            {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}, "suite": {}},
+            {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}, "suite": {}},
+            {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}, "suite": {}},
+        ]
+
+        with mock.patch.object(sim, "run_episode", side_effect=fake_run_episode), \
+             mock.patch.object(sim, "evaluate_behavior_suite", side_effect=[
+                 (payload, [], []) for payload in eval_payloads
+             ]):
+            training_history = sim._execute_training_schedule(
+                episodes=12,
+                curriculum_profile="ecological_v1",
+            )
+
+        self.assertEqual(len(training_history), 12)
+        curriculum = sim._latest_curriculum_summary
+        self.assertIsNotNone(curriculum)
+        phase_4 = curriculum["phases"][3]
+        self.assertEqual(phase_4["status"], "promoted")
+        self.assertEqual(phase_4["carryover_in"], 4)
+        self.assertEqual(phase_4["allocated_episodes"], 8)
+        self.assertEqual(phase_4["episodes_executed"], 8)
+        self.assertEqual(curriculum["executed_training_episodes"], 12)
+
+    def test_train_curriculum_phase_status_is_valid_value(self) -> None:
+        """All phase statuses must be one of the known terminal values."""
+        valid_statuses = {"promoted", "max_budget_exhausted", "skipped_no_budget"}
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        summary, _ = sim.train(
+            episodes=6,
+            evaluation_episodes=0,
+            capture_evaluation_trace=False,
+            curriculum_profile="ecological_v1",
+        )
+        for phase in summary["curriculum"]["phases"]:
+            self.assertIn(phase["status"], valid_statuses)
+
+    def test_train_curriculum_csv_rows_contain_regime_columns(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        _, rows = sim.train(
+            episodes=6,
+            evaluation_episodes=1,
+            capture_evaluation_trace=False,
+            curriculum_profile="ecological_v1",
+        )
+        for row in rows:
+            self.assertIn("training_regime", row)
+            self.assertIn("curriculum_profile", row)
+            self.assertIn("curriculum_phase", row)
+            self.assertIn("curriculum_phase_status", row)
+
+    def test_train_flat_csv_rows_training_regime_is_flat(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        _, rows = sim.train(
+            episodes=2,
+            evaluation_episodes=1,
+            capture_evaluation_trace=False,
+        )
+        for row in rows:
+            self.assertEqual(row["training_regime"], "flat")
+            self.assertEqual(row["curriculum_profile"], "none")
+
     def test_scenario_runner_reports_named_results(self) -> None:
         """
-        Verify that run_scenarios returns a mapping keyed by scenario names and that each scenario's results include expected evaluation metrics; also confirm a non-empty trace is produced with debug and distance_deltas in the final entry.
+        Verify that run_scenarios returns a mapping keyed by the provided scenario names and that each scenario's results include expected evaluation metrics; also confirm a non-empty trace is produced whose final entry contains required debug fields.
         
-        Specifically, this test:
-        - Runs the named scenarios "night_rest", "recover_after_failed_chase", and "two_shelter_tradeoff".
-        - Asserts the result keys match the provided scenario names.
-        - Asserts per-scenario metrics:
-            - "night_rest" contains "mean_reward".
-            - "recover_after_failed_chase" contains "mean_reward_components" and "mean_predator_mode_transitions".
-            - "two_shelter_tradeoff" contains "dominant_predator_state".
-        - Asserts the returned trace is non-empty and that the last trace entry contains "debug" and "distance_deltas".
+        Runs the scenarios "night_rest", "recover_after_failed_chase", and "two_shelter_tradeoff" and asserts:
+        - The result mapping keys exactly match the provided scenario names.
+        - "night_rest" includes "mean_reward".
+        - "recover_after_failed_chase" includes "mean_reward_components" and "mean_predator_mode_transitions".
+        - "two_shelter_tradeoff" includes "dominant_predator_state".
+        - The returned trace is non-empty and the final trace entry contains "debug", "distance_deltas", "predator_escape", and "event_log".
         """
         sim = SpiderSimulation(seed=17, max_steps=40)
         results, trace = sim.run_scenarios(
@@ -175,12 +763,19 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertIn("debug", trace[-1])
         self.assertIn("distance_deltas", trace[-1])
         self.assertIn("predator_escape", trace[-1])
+        self.assertIn("event_log", trace[-1])
+        self.assertIsInstance(trace[-1]["event_log"], list)
+        self.assertTrue(trace[-1]["event_log"])
+        self.assertIsInstance(trace[-1]["event_log"][0], dict)
+        self.assertIn("stage", trace[-1]["event_log"][0])
+        self.assertIn("name", trace[-1]["event_log"][0])
+        self.assertIn("payload", trace[-1]["event_log"][0])
 
     def test_behavior_suite_reports_scorecards_and_legacy_metrics(self) -> None:
         """
         Verify evaluate_behavior_suite returns complete scorecards, legacy scenario metadata, annotated rows, and a populated trace.
         
-        Asserts that the returned payload contains 'suite', 'summary', and 'legacy_scenarios'; that the suite contains exactly the requested scenarios; that the 'night_rest' scorecard includes 'success_rate', 'checks', 'behavior_metrics', 'failures', and 'legacy_metrics' and that 'deep_night_shelter' is one of its checks; that returned rows are non-empty and the first row reports expected metadata (reward_profile 'classic', scenario_map and evaluation_map 'central_burrow', architecture_version 8, a non-empty architecture_fingerprint, operational_profile 'default_v1' with version 1, and noise_profile 'none'); and that the trace is non-empty with the final trace entry containing a 'debug' field.
+        Asserts the returned payload contains "suite", "summary", and "legacy_scenarios"; that the suite keys match the requested scenarios; that the "night_rest" scorecard includes success rate, checks (including "deep_night_shelter"), behavior metrics, failures, and legacy metrics; that returned rows are non-empty and the first row contains expected metadata (reward_profile "classic", scenario_map and evaluation_map "central_burrow", correct architecture version and non-empty architecture_fingerprint, operational_profile "default_v1" version 1, noise_profile "none", and a noise_profile_config); and that the trace is non-empty with the final trace entry containing a "debug" field.
         """
         sim = SpiderSimulation(seed=23, max_steps=20)
         payload, trace, rows = sim.evaluate_behavior_suite(
@@ -204,7 +799,7 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertEqual(rows[0]["reward_profile"], "classic")
         self.assertEqual(rows[0]["scenario_map"], "central_burrow")
         self.assertEqual(rows[0]["evaluation_map"], "central_burrow")
-        self.assertEqual(rows[0]["architecture_version"], 8)
+        self.assertEqual(rows[0]["architecture_version"], SpiderBrain.ARCHITECTURE_VERSION)
         self.assertTrue(rows[0]["architecture_fingerprint"])
         self.assertEqual(rows[0]["operational_profile"], "default_v1")
         self.assertEqual(rows[0]["operational_profile_version"], 1)
@@ -294,7 +889,7 @@ class SpiderTrainingTest(unittest.TestCase):
         payload, rows = SpiderSimulation.compare_ablation_suite(
             episodes=0,
             evaluation_episodes=0,
-            variant_names=["no_module_reflexes", "monolithic_policy"],
+            variant_names=["no_module_reflexes", "local_credit_only", "monolithic_policy"],
             names=("night_rest",),
             seeds=(7,),
         )
@@ -304,9 +899,11 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertEqual(payload["scenario_names"], ["night_rest"])
         self.assertIn("modular_full", payload["variants"])
         self.assertIn("no_module_reflexes", payload["variants"])
+        self.assertIn("local_credit_only", payload["variants"])
         self.assertIn("monolithic_policy", payload["variants"])
         self.assertIn("config", payload["variants"]["monolithic_policy"])
         self.assertIn("summary", payload["deltas_vs_reference"]["monolithic_policy"])
+        self.assertIn("summary", payload["deltas_vs_reference"]["local_credit_only"])
         self.assertIn("night_rest", payload["deltas_vs_reference"]["no_module_reflexes"]["scenarios"])
         self.assertTrue(rows)
         self.assertIn("ablation_variant", rows[0])
@@ -315,6 +912,7 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertIn("benchmark_strength", rows[0])
         self.assertIn("checkpoint_source", rows[0])
         self.assertIn("noise_profile", rows[0])
+        self.assertIn("metric_module_contribution_alert_center", rows[0])
 
     def test_compare_configurations_uses_budget_profile_defaults(self) -> None:
         """
@@ -352,6 +950,138 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertEqual(rows[0]["checkpoint_source"], "final")
         self.assertEqual(rows[0]["noise_profile"], "none")
         self.assertIn("noise_profile_config", rows[0])
+
+    def test_compare_training_regimes_reports_focus_scenarios_and_rows(self) -> None:
+        payload, rows = SpiderSimulation.compare_training_regimes(
+            budget_profile="smoke",
+            reward_profile="classic",
+            map_template="central_burrow",
+            names=("night_rest", "open_field_foraging", "corridor_gauntlet", "exposed_day_foraging", "food_deprivation"),
+            curriculum_profile="ecological_v1",
+        )
+
+        self.assertEqual(payload["budget_profile"], "smoke")
+        self.assertEqual(payload["seeds"], [7])
+        self.assertEqual(payload["reference_regime"], "flat")
+        self.assertEqual(payload["curriculum_profile"], "ecological_v1")
+        self.assertIn("flat", payload["regimes"])
+        self.assertIn("curriculum", payload["regimes"])
+        self.assertEqual(
+            payload["regimes"]["flat"]["episode_allocation"],
+            payload["regimes"]["curriculum"]["episode_allocation"],
+        )
+        self.assertEqual(
+            payload["focus_scenarios"],
+            [
+                "open_field_foraging",
+                "corridor_gauntlet",
+                "exposed_day_foraging",
+                "food_deprivation",
+            ],
+        )
+        self.assertTrue(rows)
+        for field in (
+            "training_regime",
+            "curriculum_profile",
+            "curriculum_phase",
+            "curriculum_phase_status",
+        ):
+            self.assertIn(field, rows[0])
+        curriculum_rows = [
+            row for row in rows if row["training_regime"] == "curriculum"
+        ]
+        self.assertTrue(curriculum_rows)
+        for field in (
+            "curriculum_profile",
+            "curriculum_phase",
+            "curriculum_phase_status",
+        ):
+            self.assertNotIn(curriculum_rows[0][field], {"", "none"})
+
+    def test_compare_training_regimes_none_profile_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            SpiderSimulation.compare_training_regimes(
+                budget_profile="smoke",
+                curriculum_profile="none",
+            )
+
+    def test_compare_training_regimes_invalid_profile_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            SpiderSimulation.compare_training_regimes(
+                budget_profile="smoke",
+                curriculum_profile="bad_profile",
+            )
+
+    def test_compare_training_regimes_zero_budget_preserves_curriculum_metadata(self) -> None:
+        payload, rows = SpiderSimulation.compare_training_regimes(
+            budget_profile="smoke",
+            episodes=0,
+            evaluation_episodes=0,
+            names=("night_rest",),
+            curriculum_profile="ecological_v1",
+        )
+
+        self.assertEqual(
+            payload["regimes"]["curriculum"]["training_regime"]["mode"],
+            "curriculum",
+        )
+        self.assertEqual(
+            payload["regimes"]["curriculum"]["training_regime"]["curriculum_profile"],
+            "ecological_v1",
+        )
+        curriculum_rows = [
+            row for row in rows if row["training_regime"] == "curriculum"
+        ]
+        self.assertTrue(curriculum_rows)
+        for row in curriculum_rows:
+            self.assertEqual(row["curriculum_profile"], "ecological_v1")
+            self.assertEqual(row["curriculum_phase"], "")
+            self.assertEqual(row["curriculum_phase_status"], "")
+
+    def test_compare_training_regimes_returns_deltas_vs_flat_key(self) -> None:
+        payload, _ = SpiderSimulation.compare_training_regimes(
+            budget_profile="smoke",
+            names=("night_rest",),
+            curriculum_profile="ecological_v1",
+        )
+        self.assertIn("deltas_vs_flat", payload)
+
+    def test_compare_training_regimes_focus_summary_has_both_regimes(self) -> None:
+        payload, _ = SpiderSimulation.compare_training_regimes(
+            budget_profile="smoke",
+            names=("open_field_foraging", "night_rest"),
+            curriculum_profile="ecological_v1",
+        )
+        self.assertIn("focus_summary", payload)
+        self.assertIn("flat", payload["focus_summary"])
+        self.assertIn("curriculum", payload["focus_summary"])
+
+    def test_compare_training_regimes_focus_scenarios_subset_of_names(self) -> None:
+        # When only non-focus scenarios are requested, focus_scenarios should be empty
+        payload, _ = SpiderSimulation.compare_training_regimes(
+            budget_profile="smoke",
+            names=("night_rest", "predator_edge"),
+            curriculum_profile="ecological_v1",
+        )
+        self.assertEqual(payload["focus_scenarios"], [])
+
+    def test_compare_training_regimes_scenario_names_recorded_in_payload(self) -> None:
+        names = ("night_rest", "open_field_foraging")
+        payload, _ = SpiderSimulation.compare_training_regimes(
+            budget_profile="smoke",
+            names=names,
+            curriculum_profile="ecological_v1",
+        )
+        self.assertEqual(payload["scenario_names"], list(names))
+
+    def test_compare_training_regimes_seeds_recorded_in_payload(self) -> None:
+        payload, _ = SpiderSimulation.compare_training_regimes(
+            budget_profile="smoke",
+            names=("night_rest",),
+            seeds=(42,),
+            curriculum_profile="ecological_v1",
+        )
+        self.assertIn(42, payload["seeds"])
 
     def test_compare_ablation_suite_uses_budget_profile_defaults(self) -> None:
         """
@@ -746,9 +1476,14 @@ class SpiderTrainingTest(unittest.TestCase):
 
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("module_reflex_scales", proc.stderr)
-        self.assertRegex(proc.stderr.lower(), r"inválid|invalid|módul|module")
+        self.assertIn("invalid", proc.stderr.lower())
 
     def test_cli_rejects_custom_reflex_flags_for_ablation_workflows(self) -> None:
+        """
+        Ensures the CLI rejects custom reflex flags when an ablation workflow is requested.
+        
+        Runs the package CLI with an ablation variant and a custom reflex flag and asserts the process exits with a non-zero status and that stderr mentions both the ablation context and lack of support for the custom reflex flag.
+        """
         proc = subprocess.run(
             [
                 sys.executable,
@@ -922,6 +1657,50 @@ class SpiderTrainingTest(unittest.TestCase):
             self.assertIn("learning_evidence_frozen_after_episode", header)
             self.assertIn("learning_evidence_checkpoint_source", header)
 
+    def test_cli_curriculum_emits_summary_comparison_and_csv_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "curriculum.csv"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "spider_cortex_sim",
+                    "--episodes",
+                    "2",
+                    "--eval-episodes",
+                    "1",
+                    "--behavior-scenario",
+                    "night_rest",
+                    "--budget-profile",
+                    "smoke",
+                    "--curriculum-profile",
+                    "ecological_v1",
+                    "--full-summary",
+                    "--behavior-csv",
+                    str(csv_path),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={**os.environ, "PYTHONPATH": "."},
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["config"]["training_regime"]["mode"], "curriculum")
+            self.assertIn("curriculum", payload)
+            self.assertIn("curriculum_comparison", payload["behavior_evaluation"])
+            self.assertEqual(
+                payload["behavior_evaluation"]["curriculum_comparison"]["curriculum_profile"],
+                "ecological_v1",
+            )
+            self.assertTrue(csv_path.exists())
+            header = csv_path.read_text(encoding="utf-8").splitlines()[0]
+            self.assertIn("training_regime", header)
+            self.assertIn("curriculum_profile", header)
+            self.assertIn("curriculum_phase", header)
+            self.assertIn("curriculum_phase_status", header)
+
     def test_offline_analysis_module_emits_report_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             behavior_csv = Path(tmpdir) / "behavior.csv"
@@ -1088,17 +1867,20 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertIn("reward_components", trace[-1])
         self.assertAlmostEqual(trace[-1]["reward"], sum(trace[-1]["reward_components"].values()))
         self.assertIn("distance_deltas", trace[-1])
+        self.assertIn("event_log", trace[-1])
+        self.assertIsInstance(trace[-1]["event_log"], list)
+        self.assertTrue(trace[-1]["event_log"])
+        self.assertIsInstance(trace[-1]["event_log"][0], dict)
+        self.assertIn("stage", trace[-1]["event_log"][0])
+        self.assertIn("name", trace[-1]["event_log"][0])
+        self.assertIn("payload", trace[-1]["event_log"][0])
         self.assertIn("debug", trace[-1])
 
     def test_brain_step_and_debug_trace_expose_reflex_metadata(self) -> None:
         """
-        Verifies that brain action steps and debug traces expose reflex metadata and related debug fields.
+        Ensure brain action steps and debug traces include reflex metadata and related debug fields.
         
-        Asserts that:
-        - A reflex produced by `brain.act` appears on the `action.proposal` bus message from `alert_center` and that its `action` and `reason` match the reflex object on the module result.
-        - Running a scripted episode with `capture_trace=True` and `debug_trace=True` records the reflex under `trace[0]["debug"]["reflexes"]["alert_center"]["reflex"]` with expected `action` and `reason`.
-        - The recorded debug payload contains top-level `action_center` and `motor_cortex` entries, includes `selected_intent` under `action_center`, and includes `correction_logits` under `motor_cortex`.
-        - Reflex debug payloads are JSON-serializable.
+        Verifies that a reflex produced by brain.act is present on the `action.proposal` bus message from `alert_center` with matching `action` and `reason`, and that the proposal payload includes gating/valence/intent fields (`valence_role`, `gate_weight`, `gated_logits`, `intent_before_gating`, `intent_after_gating`) which are JSON-serializable. Runs a scripted episode with `capture_trace=True` and `debug_trace=True` and verifies the trace records the reflex at `trace[0]["debug"]["reflexes"]["alert_center"]["reflex"]` with the expected `action` and `reason`, that top-level debug includes `action_center` and `motor_cortex` (including `selected_intent` and `correction_logits`), that arbitration information and `suppressed_modules` are present, and that debug/reflex payloads are JSON-serializable.
         """
         sim = SpiderSimulation(seed=53, max_steps=1)
         sim.world.reset(seed=53)
@@ -1117,7 +1899,17 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertIsNotNone(alert_result.reflex)
         self.assertEqual(proposal_payload["reflex"]["action"], alert_result.reflex.action)
         self.assertEqual(proposal_payload["reflex"]["reason"], alert_result.reflex.reason)
+        self.assertIn("valence_role", proposal_payload)
+        self.assertIn("gate_weight", proposal_payload)
+        self.assertIn("contribution_share", proposal_payload)
+        self.assertIn("gated_logits", proposal_payload)
         json.dumps(proposal_payload["reflex"])
+        json.dumps(proposal_payload["gated_logits"])
+        json.dumps(proposal_payload["valence_role"])
+        json.dumps(proposal_payload["gate_weight"])
+        json.dumps(proposal_payload["contribution_share"])
+        json.dumps(proposal_payload["intent_before_gating"])
+        json.dumps(proposal_payload["intent_after_gating"])
 
         trace_sim = SpiderSimulation(seed=59, max_steps=1)
         original_reset = trace_sim.world.reset
@@ -1145,8 +1937,38 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertIn("action_center", trace[0]["debug"])
         self.assertIn("motor_cortex", trace[0]["debug"])
         self.assertIn("selected_intent", trace[0]["debug"]["action_center"])
+        self.assertIn("winning_valence", trace[0]["debug"]["action_center"])
+        self.assertIn("module_gates", trace[0]["debug"]["action_center"])
+        self.assertIn("module_contribution_share", trace[0]["debug"]["action_center"])
+        self.assertIn("dominant_module", trace[0]["debug"]["action_center"])
+        self.assertIn("effective_module_count", trace[0]["debug"]["action_center"])
+        self.assertIn("arbitration", trace[0]["debug"])
+        self.assertIn("suppressed_modules", trace[0]["debug"]["arbitration"])
+        self.assertIn("module_agreement_rate", trace[0]["debug"]["arbitration"])
+        self.assertIn("contribution_share", trace[0]["debug"]["reflexes"]["alert_center"])
         self.assertIn("correction_logits", trace[0]["debug"]["motor_cortex"])
         json.dumps(debug_alert)
+        json.dumps(trace[0]["debug"]["action_center"])
+        json.dumps(trace[0]["debug"]["arbitration"])
+
+    def test_behavior_suite_rows_include_independence_metrics(self) -> None:
+        sim = SpiderSimulation(seed=61, max_steps=8)
+        payload, _, rows = sim.evaluate_behavior_suite(
+            names=["night_rest"],
+            episodes_per_scenario=1,
+            capture_trace=False,
+            debug_trace=False,
+        )
+
+        self.assertIn("suite", payload)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertIn("metric_module_contribution_alert_center", row)
+        self.assertIn("metric_dominant_module", row)
+        self.assertIn("metric_dominant_module_share", row)
+        self.assertIn("metric_effective_module_count", row)
+        self.assertIn("metric_module_agreement_rate", row)
+        self.assertIn("metric_module_disagreement_rate", row)
 
     def test_training_guardrail_matrix_stays_finite_and_minimally_viable(self) -> None:
         comparisons = SpiderSimulation.compare_configurations(
@@ -1960,7 +2782,7 @@ class CheckpointSourceAnnotationTest(unittest.TestCase):
         self.assertIn("reflex_only", payload["conditions"])
         self.assertTrue(payload["conditions"]["reflex_only"]["skipped"])
         self.assertIn(
-            "reflexos desabilitados",
+            "reflexes disabled",
             payload["conditions"]["reflex_only"]["reason"],
         )
 

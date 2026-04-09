@@ -1040,6 +1040,8 @@ class WorldStepInfoDictTest(unittest.TestCase):
         _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
         self.assertIn("distance_deltas", info)
         self.assertIsInstance(info["distance_deltas"], dict)
+        self.assertIn("event_log", info)
+        self.assertIsInstance(info["event_log"], list)
 
     def test_distance_deltas_has_food_shelter_predator_keys(self) -> None:
         world = self._make_world()
@@ -1159,6 +1161,7 @@ class SimulationScenarioMapSwitchingTest(unittest.TestCase):
         for item in trace:
             self.assertIn("distance_deltas", item)
             self.assertIn("predator_transition", item)
+            self.assertIn("event_log", item)
 
     def test_scenario_stats_include_new_metric_fields(self) -> None:
         from spider_cortex_sim.simulation import SpiderSimulation

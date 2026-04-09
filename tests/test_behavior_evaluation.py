@@ -36,13 +36,20 @@ from spider_cortex_sim.metrics import (
     flatten_behavior_rows,
     summarize_behavior_suite,
 )
+from spider_cortex_sim.ablations import PROPOSAL_SOURCE_NAMES
 from spider_cortex_sim.scenarios import (
     FOOD_DEPRIVATION_INITIAL_HUNGER,
     FOOD_DEPRIVATION_CHECKS,
+    FOOD_VS_PREDATOR_CONFLICT_CHECKS,
     NIGHT_REST_INITIAL_SLEEP_DEBT,
     NIGHT_REST_CHECKS,
     PREDATOR_EDGE_CHECKS,
     SCENARIO_NAMES,
+    SLEEP_VS_EXPLORATION_CONFLICT_CHECKS,
+    SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT,
+    _payload_float,
+    _payload_text,
+    _trace_action_selection_payloads,
     _trace_any_mode,
     _trace_any_sleep_phase,
     _trace_escape_seen,
@@ -58,6 +65,12 @@ NOISE_PROFILE_CONFIG_JSON = (
     "\"predator\":{\"random_choice_prob\":0.0},\"spawn\":{\"uniform_mix\":0.0},"
     "\"visual\":{\"certainty_jitter\":0.0,\"direction_jitter\":0.0,\"dropout_prob\":0.0}}"
 )
+CURRICULUM_COLUMNS = [
+    "training_regime",
+    "curriculum_profile",
+    "curriculum_phase",
+    "curriculum_phase_status",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +119,19 @@ def _make_episode_stats(**overrides) -> EpisodeStats:
     )
     defaults.update(overrides)
     return EpisodeStats(**defaults)
+
+
+def _make_action_selection_trace_item(payload: dict[str, object]) -> dict[str, object]:
+    """Wrap an action.selection payload in the trace envelope used by scorers."""
+    return {
+        "messages": [
+            {
+                "sender": "action_center",
+                "topic": "action.selection",
+                "payload": payload,
+            }
+        ]
+    }
 
 
 def _make_behavior_check_result(name="check_a", passed=True, value=1.0, description="desc", expected="true") -> BehaviorCheckResult:
@@ -1049,6 +1075,33 @@ class TraceHelpersTest(unittest.TestCase):
     def test_trace_escape_seen_empty(self) -> None:
         self.assertFalse(_trace_escape_seen([]))
 
+    def test_trace_action_selection_payloads_extracts_action_center_messages(self) -> None:
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {"winning_valence": "threat"},
+                    },
+                    {
+                        "sender": "motor_cortex",
+                        "topic": "action.execution",
+                        "payload": {"selected_action": "MOVE_LEFT"},
+                    },
+                ]
+            }
+        ]
+        payloads = _trace_action_selection_payloads(trace)
+        self.assertEqual(payloads, [{"winning_valence": "threat"}])
+
+    def test_payload_float_and_text_helpers(self) -> None:
+        payload = {"winning_valence": "sleep", "module_gates": {"visual_cortex": 0.48}}
+        self.assertEqual(_payload_text(payload, "winning_valence"), "sleep")
+        self.assertAlmostEqual(_payload_float(payload, "module_gates", "visual_cortex"), 0.48)
+        self.assertIsNone(_payload_text(payload, "missing"))
+        self.assertIsNone(_payload_float(payload, "module_gates", "missing"))
+
 
 # ---------------------------------------------------------------------------
 # Check spec constants
@@ -1084,8 +1137,20 @@ class CheckSpecConstantsTest(unittest.TestCase):
         self.assertIn("approaches_food", names)
         self.assertIn("survives_deprivation", names)
 
+    def test_food_vs_predator_conflict_checks_has_three_items(self) -> None:
+        self.assertEqual(len(FOOD_VS_PREDATOR_CONFLICT_CHECKS), 3)
+
+    def test_sleep_vs_exploration_conflict_checks_has_three_items(self) -> None:
+        self.assertEqual(len(SLEEP_VS_EXPLORATION_CONFLICT_CHECKS), 3)
+
     def test_all_specs_have_non_empty_fields(self) -> None:
-        for spec in list(NIGHT_REST_CHECKS) + list(PREDATOR_EDGE_CHECKS) + list(FOOD_DEPRIVATION_CHECKS):
+        for spec in (
+            list(NIGHT_REST_CHECKS)
+            + list(PREDATOR_EDGE_CHECKS)
+            + list(FOOD_DEPRIVATION_CHECKS)
+            + list(FOOD_VS_PREDATOR_CONFLICT_CHECKS)
+            + list(SLEEP_VS_EXPLORATION_CONFLICT_CHECKS)
+        ):
             self.assertTrue(spec.name)
             self.assertTrue(spec.description)
             self.assertTrue(spec.expected)
@@ -1201,6 +1266,131 @@ class ScoreFunctionTest(unittest.TestCase):
         self.assertTrue(score.behavior_metrics["partial_progress"])
         self.assertTrue(score.behavior_metrics["died_after_progress"])
         self.assertTrue(score.behavior_metrics["died_without_contact"])
+
+    def test_food_vs_predator_conflict_reads_action_selection_messages(self) -> None:
+        spec = get_scenario("food_vs_predator_conflict")
+        stats = _make_episode_stats(
+            scenario="food_vs_predator_conflict",
+            alive=True,
+            predator_contacts=0,
+        )
+        trace = [
+            _make_action_selection_trace_item(
+                {
+                    "winning_valence": "threat",
+                    "module_gates": {"hunger_center": 0.18},
+                    "evidence": {
+                        "threat": {
+                            "predator_visible": 1.0,
+                            "predator_proximity": 0.9,
+                            "predator_certainty": 0.8,
+                        }
+                    },
+                }
+            )
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertTrue(score.success)
+        self.assertIn("threat_priority_rate", score.behavior_metrics)
+
+    def test_food_vs_predator_conflict_requires_rate_threshold(self) -> None:
+        spec = get_scenario("food_vs_predator_conflict")
+        stats = _make_episode_stats(
+            scenario="food_vs_predator_conflict",
+            alive=True,
+            predator_contacts=0,
+        )
+        trace = [
+            _make_action_selection_trace_item(
+                {
+                    "winning_valence": "threat",
+                    "module_gates": {"hunger_center": 0.18},
+                    "evidence": {
+                        "threat": {
+                            "predator_visible": 1.0,
+                            "predator_proximity": 0.9,
+                            "predator_certainty": 0.8,
+                        }
+                    },
+                }
+            ),
+            _make_action_selection_trace_item(
+                {
+                    "winning_valence": "hunger",
+                    "module_gates": {"hunger_center": 1.0},
+                    "evidence": {
+                        "threat": {
+                            "predator_visible": 1.0,
+                            "predator_proximity": 0.9,
+                            "predator_certainty": 0.8,
+                        }
+                    },
+                }
+            ),
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertFalse(score.checks["threat_priority"].passed)
+        self.assertTrue(score.checks["foraging_suppressed_under_threat"].passed)
+        self.assertAlmostEqual(score.behavior_metrics["threat_priority_rate"], 0.5)
+        self.assertAlmostEqual(score.behavior_metrics["foraging_suppressed_rate"], 1.0)
+
+    def test_sleep_vs_exploration_conflict_reads_action_selection_messages(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=2,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT - 0.2,
+        )
+        trace = [
+            _make_action_selection_trace_item(
+                {
+                    "winning_valence": "sleep",
+                    "module_gates": {"visual_cortex": 0.48, "sensory_cortex": 0.56},
+                    "evidence": {
+                        "sleep": {"sleep_debt": 0.92, "fatigue": 0.94},
+                        "threat": {"predator_visible": 0.0},
+                    },
+                }
+            )
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertTrue(score.success)
+        self.assertIn("sleep_priority_rate", score.behavior_metrics)
+
+    def test_sleep_vs_exploration_conflict_requires_rate_threshold(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=2,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT - 0.2,
+        )
+        trace = [
+            _make_action_selection_trace_item(
+                {
+                    "winning_valence": "sleep",
+                    "module_gates": {"visual_cortex": 0.48, "sensory_cortex": 0.56},
+                    "evidence": {
+                        "sleep": {"sleep_debt": 0.92, "fatigue": 0.94},
+                        "threat": {"predator_visible": 0.0},
+                    },
+                }
+            ),
+            _make_action_selection_trace_item(
+                {
+                    "winning_valence": "exploration",
+                    "module_gates": {"visual_cortex": 0.96, "sensory_cortex": 0.92},
+                    "evidence": {
+                        "sleep": {"sleep_debt": 0.92, "fatigue": 0.94},
+                        "threat": {"predator_visible": 0.0},
+                    },
+                }
+            ),
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertFalse(score.checks["sleep_priority"].passed)
+        self.assertTrue(score.checks["exploration_suppressed_under_sleep_pressure"].passed)
+        self.assertAlmostEqual(score.behavior_metrics["sleep_priority_rate"], 0.5)
+        self.assertAlmostEqual(score.behavior_metrics["exploration_suppressed_rate"], 1.0)
 
     def test_open_field_foraging_score_passes_with_food_progress(self) -> None:
         spec = get_scenario("open_field_foraging")
@@ -1352,18 +1542,22 @@ class SaveBehaviorCsvTest(unittest.TestCase):
 
     def _make_rows(self):
         """
-        Builds example CSV-ready behavior evaluation rows used by the test suite.
+        Constructs example CSV-ready behavior evaluation rows used by the test suite.
         
-        Each returned element is a dict representing one episode row with fields found in the behavior-evaluation CSV export: general metadata (reward/evaluation maps, operational and noise profiles, seeds, checkpoint source), learning-evidence configuration (condition, policy mode, train episodes, frozen checkpoint, checkpoint source, budget profile and benchmark strength), reflex and budget settings (reflex_scale, reflex_anneal_final_scale, eval_reflex_scale, budget_profile, benchmark_strength), scenario metadata (name, description, objective, focus), outcome fields (episode, success, failure_count, failures), numeric/behavior metrics (prefixed with `metric_`) and per-check columns (prefixed with `check_` containing `_passed`, `_value`, and `_expected` variants).
+        Each returned element is a dict mapping CSV column names to values and includes the full set of fields asserted by tests: general metadata (reward/evaluation maps, operational/noise profiles, seeds, checkpoint source), curriculum/training fields (training_regime, curriculum_profile, curriculum_phase, curriculum_phase_status), learning-evidence configuration, reflex and budget settings, scenario metadata, outcome fields (episode, success, failure_count, failures), numeric behavior metrics (prefixed with `metric_`), and per-check columns (prefixed with `check_` containing `_passed`, `_value`, and `_expected` variants).
         
         Returns:
-            list[dict]: A list of row dictionaries (one per episode) containing CSV-ready fields used by behavior tests.
+            list[dict]: Example row dictionaries (one per episode) formatted for CSV export and used by behavior-evaluation tests.
         """
         return [
             {
                 "reward_profile": "classic",
                 "scenario_map": "night_rest_map",
                 "evaluation_map": "central_burrow",
+                "training_regime": "curriculum",
+                "curriculum_profile": "ecological_v1",
+                "curriculum_phase": "phase_4_corridor_food_deprivation",
+                "curriculum_phase_status": "max_budget_exhausted",
                 "learning_evidence_condition": "trained_final",
                 "learning_evidence_policy_mode": "normal",
                 "learning_evidence_train_episodes": 6,
@@ -1424,6 +1618,7 @@ class SaveBehaviorCsvTest(unittest.TestCase):
                 "reward_profile",
                 "scenario_map",
                 "evaluation_map",
+                *CURRICULUM_COLUMNS,
                 "learning_evidence_condition",
                 "learning_evidence_policy_mode",
                 "learning_evidence_train_episodes",
@@ -1503,9 +1698,9 @@ class SaveBehaviorCsvTest(unittest.TestCase):
 
     def test_csv_is_readable_by_csv_reader(self) -> None:
         """
-        Verify the CSV produced by SpiderSimulation.save_behavior_csv can be read by csv.DictReader and contains the expected stringified fields.
+        Verify the CSV produced by SpiderSimulation.save_behavior_csv is readable by csv.DictReader and that key fields serialize to the expected string values.
         
-        Creates a temporary CSV file from a single behavior row, reads it back with csv.DictReader, asserts exactly one data row is present, and checks that a set of expected columns (including reward/profile/map metadata, seed fields, scenario metadata, outcome fields, and the `noise_profile` column) are serialized to the exact string values.
+        Writes a single-row CSV to a temporary file, reads it back with csv.DictReader, asserts exactly one data row is present, and checks that metadata (including reward/profile/map fields, curriculum and learning-evidence columns, reflex/budget/checkpoint settings, seed fields, scenario metadata, outcome fields, and noise profile/config) are serialized exactly as expected.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "test.csv"
@@ -1519,6 +1714,10 @@ class SaveBehaviorCsvTest(unittest.TestCase):
                 "reward_profile": "classic",
                 "scenario_map": "night_rest_map",
                 "evaluation_map": "central_burrow",
+                "training_regime": "curriculum",
+                "curriculum_profile": "ecological_v1",
+                "curriculum_phase": "phase_4_corridor_food_deprivation",
+                "curriculum_phase_status": "max_budget_exhausted",
                 "learning_evidence_condition": "trained_final",
                 "learning_evidence_policy_mode": "normal",
                 "learning_evidence_train_episodes": "6",
@@ -1760,6 +1959,18 @@ class CLIBehaviorArgumentsTest(unittest.TestCase):
         args = self.parser.parse_args([])
         self.assertIsNone(args.behavior_csv)
 
+    def test_curriculum_profile_arg(self) -> None:
+        args = self.parser.parse_args(["--curriculum-profile", "ecological_v1"])
+        self.assertEqual(args.curriculum_profile, "ecological_v1")
+
+    def test_curriculum_profile_default_none(self) -> None:
+        args = self.parser.parse_args([])
+        self.assertEqual(args.curriculum_profile, "none")
+
+    def test_curriculum_profile_invalid_value(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(["--curriculum-profile", "invalid_value"])
+
     def test_operational_profile_arg(self) -> None:
         args = self.parser.parse_args(["--operational-profile", "default_v1"])
         self.assertEqual(args.operational_profile, "default_v1")
@@ -1946,6 +2157,36 @@ class EvaluateBehaviorSuiteIntegrationTest(unittest.TestCase):
         payload, _, rows = sim.evaluate_behavior_suite(["night_rest"], episodes_per_scenario=2)
         self.assertEqual(payload["suite"]["night_rest"]["episodes"], 2)
         self.assertEqual(len(rows), 2)
+
+    def test_compare_behavior_suite_includes_shaping_audit(self) -> None:
+        payload, _rows = self.SimClass.compare_behavior_suite(
+            episodes=0,
+            evaluation_episodes=0,
+            names=("night_rest",),
+            seeds=(7,),
+            reward_profiles=("classic", "austere"),
+        )
+        self.assertIn("reward_audit", payload)
+        self.assertEqual(payload["reward_audit"]["minimal_profile"], "austere")
+        self.assertIn("comparison", payload["reward_audit"])
+        self.assertIn(
+            "classic",
+            payload["reward_audit"]["comparison"]["deltas_vs_minimal"],
+        )
+
+    def test_compare_behavior_suite_omits_minimal_baseline_when_austere_not_compared(self) -> None:
+        payload, _rows = self.SimClass.compare_behavior_suite(
+            episodes=0,
+            evaluation_episodes=0,
+            names=("night_rest",),
+            seeds=(7,),
+            reward_profiles=("classic", "ecological"),
+        )
+        self.assertIsNone(payload["reward_audit"]["minimal_profile"])
+        self.assertEqual(
+            payload["reward_audit"]["comparison"]["deltas_vs_minimal"],
+            {},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2145,6 +2386,7 @@ class EpisodeMetricAccumulatorReflexTest(unittest.TestCase):
         *,
         final_reflex_override: bool = False,
         module_results: list | None = None,
+        arbitration_decision: object | None = None,
     ) -> object:
         class FakeDecision:
             pass
@@ -2152,7 +2394,30 @@ class EpisodeMetricAccumulatorReflexTest(unittest.TestCase):
         decision = FakeDecision()
         decision.final_reflex_override = final_reflex_override
         decision.module_results = module_results or []
+        decision.arbitration_decision = arbitration_decision
         return decision
+
+    def _make_arbitration(
+        self,
+        *,
+        module_contribution_share: dict[str, float] | None = None,
+        dominant_module: str = "alert_center",
+        dominant_module_share: float = 0.0,
+        effective_module_count: float = 0.0,
+        module_agreement_rate: float = 0.0,
+        module_disagreement_rate: float = 0.0,
+    ) -> object:
+        class FakeArbitration:
+            pass
+
+        arbitration = FakeArbitration()
+        arbitration.module_contribution_share = module_contribution_share or {}
+        arbitration.dominant_module = dominant_module
+        arbitration.dominant_module_share = dominant_module_share
+        arbitration.effective_module_count = effective_module_count
+        arbitration.module_agreement_rate = module_agreement_rate
+        arbitration.module_disagreement_rate = module_disagreement_rate
+        return arbitration
 
     def _make_module_result(
         self,
@@ -2303,6 +2568,46 @@ class EpisodeMetricAccumulatorReflexTest(unittest.TestCase):
         self.assertIn("mean_reflex_dominance", snapshot)
         self.assertIsInstance(snapshot["mean_reflex_dominance"], float)
 
+    def test_module_contribution_share_accumulated_from_arbitration(self) -> None:
+        acc = self._make_accumulator()
+        acc.record_decision(
+            self._make_decision(
+                arbitration_decision=self._make_arbitration(
+                    module_contribution_share={"alert_center": 0.75},
+                )
+            )
+        )
+        self.assertAlmostEqual(
+            acc.module_contribution_share_sums["alert_center"],
+            0.75,
+        )
+
+    def test_snapshot_includes_independence_metrics(self) -> None:
+        acc = self._make_accumulator()
+        acc.record_decision(
+            self._make_decision(
+                arbitration_decision=self._make_arbitration(
+                    module_contribution_share={"alert_center": 0.7, "hunger_center": 0.3},
+                    dominant_module="alert_center",
+                    dominant_module_share=0.7,
+                    effective_module_count=1.72,
+                    module_agreement_rate=0.8,
+                    module_disagreement_rate=0.2,
+                )
+            )
+        )
+        snapshot = acc.snapshot()
+        self.assertIn("module_contribution_share", snapshot)
+        self.assertIn("dominant_module_distribution", snapshot)
+        self.assertEqual(snapshot["dominant_module"], "alert_center")
+        self.assertAlmostEqual(snapshot["dominant_module_share"], 0.7)
+        self.assertAlmostEqual(snapshot["effective_module_count"], 1.72)
+        self.assertAlmostEqual(snapshot["module_agreement_rate"], 0.8)
+        self.assertAlmostEqual(snapshot["module_disagreement_rate"], 0.2)
+        for name in PROPOSAL_SOURCE_NAMES:
+            self.assertIn(name, snapshot["module_contribution_share"])
+            self.assertIn(name, snapshot["dominant_module_distribution"])
+
     def test_snapshot_denominator_uses_max_one_when_no_decisions(self) -> None:
         # With zero decisions, snapshot should still not raise division-by-zero
         acc = self._make_accumulator()
@@ -2330,16 +2635,25 @@ class AggregateEpisodeStatsReflexTest(unittest.TestCase):
         module_reflex_usage_rates: dict | None = None,
         module_reflex_override_rates: dict | None = None,
         module_reflex_dominance: dict | None = None,
+        module_contribution_share: dict | None = None,
+        dominant_module: str = "",
+        dominant_module_share: float = 0.0,
+        effective_module_count: float = 0.0,
+        module_agreement_rate: float = 0.0,
+        module_disagreement_rate: float = 0.0,
     ) -> EpisodeStats:
         module_rates = {name: 0.0 for name in REFLEX_MODULE_NAMES}
         module_overrides = {name: 0.0 for name in REFLEX_MODULE_NAMES}
         module_dominance = {name: 0.0 for name in REFLEX_MODULE_NAMES}
+        module_contribution = {name: 0.0 for name in PROPOSAL_SOURCE_NAMES}
         if module_reflex_usage_rates:
             module_rates.update(module_reflex_usage_rates)
         if module_reflex_override_rates:
             module_overrides.update(module_reflex_override_rates)
         if module_reflex_dominance:
             module_dominance.update(module_reflex_dominance)
+        if module_contribution_share:
+            module_contribution.update(module_contribution_share)
         return EpisodeStats(
             episode=0,
             seed=7,
@@ -2381,6 +2695,12 @@ class AggregateEpisodeStatsReflexTest(unittest.TestCase):
             module_reflex_usage_rates=module_rates,
             module_reflex_override_rates=module_overrides,
             module_reflex_dominance=module_dominance,
+            module_contribution_share=module_contribution,
+            dominant_module=dominant_module,
+            dominant_module_share=dominant_module_share,
+            effective_module_count=effective_module_count,
+            module_agreement_rate=module_agreement_rate,
+            module_disagreement_rate=module_disagreement_rate,
         )
 
     def test_aggregate_empty_history_returns_zeros(self) -> None:
@@ -2446,6 +2766,52 @@ class AggregateEpisodeStatsReflexTest(unittest.TestCase):
             self.assertIn(name, result["mean_module_reflex_usage_rate"])
             self.assertIn(name, result["mean_module_reflex_override_rate"])
             self.assertIn(name, result["mean_module_reflex_dominance"])
+
+    def test_aggregate_includes_mean_module_contribution_share(self) -> None:
+        history = [
+            self._make_episode_stats(module_contribution_share={"alert_center": 0.2}),
+            self._make_episode_stats(module_contribution_share={"alert_center": 0.6}),
+        ]
+        result = aggregate_episode_stats(history)
+        self.assertIn("mean_module_contribution_share", result)
+        self.assertAlmostEqual(
+            result["mean_module_contribution_share"]["alert_center"],
+            0.4,
+        )
+
+    def test_aggregate_includes_dominant_module_distribution(self) -> None:
+        history = [
+            self._make_episode_stats(dominant_module="alert_center"),
+            self._make_episode_stats(dominant_module="alert_center"),
+            self._make_episode_stats(dominant_module="hunger_center"),
+        ]
+        result = aggregate_episode_stats(history)
+        self.assertEqual(result["dominant_module"], "alert_center")
+        self.assertAlmostEqual(
+            result["dominant_module_distribution"]["alert_center"],
+            2 / 3,
+        )
+
+    def test_aggregate_includes_mean_independence_scalars(self) -> None:
+        history = [
+            self._make_episode_stats(
+                dominant_module_share=0.7,
+                effective_module_count=1.5,
+                module_agreement_rate=0.8,
+                module_disagreement_rate=0.2,
+            ),
+            self._make_episode_stats(
+                dominant_module_share=0.5,
+                effective_module_count=2.0,
+                module_agreement_rate=0.6,
+                module_disagreement_rate=0.4,
+            ),
+        ]
+        result = aggregate_episode_stats(history)
+        self.assertAlmostEqual(result["mean_dominant_module_share"], 0.6)
+        self.assertAlmostEqual(result["mean_effective_module_count"], 1.75)
+        self.assertAlmostEqual(result["mean_module_agreement_rate"], 0.7)
+        self.assertAlmostEqual(result["mean_module_disagreement_rate"], 0.3)
 
 
 class ParseModuleReflexScalesTest(unittest.TestCase):
@@ -2535,6 +2901,537 @@ class CLIReflexScaleDefaultsTest(unittest.TestCase):
         ])
         self.assertIn("alert_center=0.5", args.module_reflex_scale)
         self.assertIn("sleep_center=0.25", args.module_reflex_scale)
+
+
+# ---------------------------------------------------------------------------
+# _payload_float edge cases
+# ---------------------------------------------------------------------------
+
+class PayloadFloatEdgeCasesTest(unittest.TestCase):
+    """Comprehensive edge case tests for _payload_float."""
+
+    def test_missing_top_level_key_returns_none(self) -> None:
+        payload = {"other_key": 1.0}
+        self.assertIsNone(_payload_float(payload, "missing_key"))
+
+    def test_missing_nested_key_returns_none(self) -> None:
+        payload = {"outer": {"inner": 0.5}}
+        self.assertIsNone(_payload_float(payload, "outer", "missing"))
+
+    def test_none_value_returns_none(self) -> None:
+        payload = {"key": None}
+        self.assertIsNone(_payload_float(payload, "key"))
+
+    def test_non_numeric_string_returns_none(self) -> None:
+        payload = {"key": "not_a_number"}
+        self.assertIsNone(_payload_float(payload, "key"))
+
+    def test_valid_int_returns_float(self) -> None:
+        payload = {"key": 3}
+        result = _payload_float(payload, "key")
+        self.assertAlmostEqual(result, 3.0)
+        self.assertIsInstance(result, float)
+
+    def test_valid_float_returned(self) -> None:
+        payload = {"key": 0.75}
+        self.assertAlmostEqual(_payload_float(payload, "key"), 0.75)
+
+    def test_empty_path_returns_none(self) -> None:
+        # No path arguments -> current is the dict itself, float({}) raises TypeError
+        payload = {"key": 1.0}
+        self.assertIsNone(_payload_float(payload))
+
+    def test_intermediate_not_dict_returns_none(self) -> None:
+        payload = {"outer": "string_not_dict"}
+        self.assertIsNone(_payload_float(payload, "outer", "inner"))
+
+    def test_deep_nested_path(self) -> None:
+        payload = {"a": {"b": {"c": 0.42}}}
+        self.assertAlmostEqual(_payload_float(payload, "a", "b", "c"), 0.42)
+
+    def test_bool_true_converts_to_one(self) -> None:
+        payload = {"flag": True}
+        self.assertAlmostEqual(_payload_float(payload, "flag"), 1.0)
+
+    def test_bool_false_converts_to_zero(self) -> None:
+        payload = {"flag": False}
+        self.assertAlmostEqual(_payload_float(payload, "flag"), 0.0)
+
+    def test_zero_float_value(self) -> None:
+        payload = {"key": 0.0}
+        self.assertEqual(_payload_float(payload, "key"), 0.0)
+
+    def test_list_as_value_returns_none(self) -> None:
+        payload = {"key": [1, 2, 3]}
+        self.assertIsNone(_payload_float(payload, "key"))
+
+
+# ---------------------------------------------------------------------------
+# _payload_text edge cases
+# ---------------------------------------------------------------------------
+
+class PayloadTextEdgeCasesTest(unittest.TestCase):
+    """Comprehensive edge case tests for _payload_text."""
+
+    def test_missing_top_level_key_returns_none(self) -> None:
+        payload = {"other_key": "value"}
+        self.assertIsNone(_payload_text(payload, "missing_key"))
+
+    def test_none_value_returns_none(self) -> None:
+        payload = {"key": None}
+        self.assertIsNone(_payload_text(payload, "key"))
+
+    def test_string_value_returned_as_is(self) -> None:
+        payload = {"key": "threat"}
+        self.assertEqual(_payload_text(payload, "key"), "threat")
+
+    def test_int_value_converted_to_string(self) -> None:
+        payload = {"key": 42}
+        self.assertEqual(_payload_text(payload, "key"), "42")
+
+    def test_float_value_converted_to_string(self) -> None:
+        payload = {"key": 3.14}
+        result = _payload_text(payload, "key")
+        self.assertIsInstance(result, str)
+        self.assertIn("3.14", result)
+
+    def test_nested_path_retrieval(self) -> None:
+        payload = {"outer": {"inner": "sleep"}}
+        self.assertEqual(_payload_text(payload, "outer", "inner"), "sleep")
+
+    def test_intermediate_not_dict_returns_none(self) -> None:
+        payload = {"outer": "flat_string"}
+        self.assertIsNone(_payload_text(payload, "outer", "inner"))
+
+    def test_bool_true_converted_to_string(self) -> None:
+        payload = {"key": True}
+        self.assertEqual(_payload_text(payload, "key"), "True")
+
+    def test_empty_path_returns_string_of_dict(self) -> None:
+        # No path -> current is the full dict, str(dict) is returned
+        payload = {"key": "val"}
+        result = _payload_text(payload)
+        self.assertIsInstance(result, str)
+        self.assertIn("key", result)
+
+    def test_missing_nested_key_returns_none(self) -> None:
+        payload = {"outer": {"other": "value"}}
+        self.assertIsNone(_payload_text(payload, "outer", "missing"))
+
+
+# ---------------------------------------------------------------------------
+# _trace_action_selection_payloads edge cases
+# ---------------------------------------------------------------------------
+
+class TraceActionSelectionPayloadsEdgeCasesTest(unittest.TestCase):
+    """Edge cases for _trace_action_selection_payloads."""
+
+    def test_empty_trace_returns_empty_list(self) -> None:
+        self.assertEqual(_trace_action_selection_payloads([]), [])
+
+    def test_item_without_messages_key_skipped(self) -> None:
+        trace = [{"state": {"tick": 1}}]
+        self.assertEqual(_trace_action_selection_payloads(trace), [])
+
+    def test_messages_not_a_list_skipped(self) -> None:
+        trace = [{"messages": "not_a_list"}]
+        self.assertEqual(_trace_action_selection_payloads(trace), [])
+
+    def test_non_dict_message_skipped(self) -> None:
+        trace = [{"messages": ["not_a_dict", 42]}]
+        self.assertEqual(_trace_action_selection_payloads(trace), [])
+
+    def test_wrong_sender_skipped(self) -> None:
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "motor_cortex",
+                        "topic": "action.selection",
+                        "payload": {"winning_valence": "threat"},
+                    }
+                ]
+            }
+        ]
+        self.assertEqual(_trace_action_selection_payloads(trace), [])
+
+    def test_wrong_topic_skipped(self) -> None:
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.execution",
+                        "payload": {"selected_action": "MOVE_UP"},
+                    }
+                ]
+            }
+        ]
+        self.assertEqual(_trace_action_selection_payloads(trace), [])
+
+    def test_non_dict_payload_skipped(self) -> None:
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": "not_a_dict",
+                    }
+                ]
+            }
+        ]
+        self.assertEqual(_trace_action_selection_payloads(trace), [])
+
+    def test_multiple_matching_messages_all_returned(self) -> None:
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {"winning_valence": "threat"},
+                    },
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {"winning_valence": "sleep"},
+                    },
+                ]
+            }
+        ]
+        payloads = _trace_action_selection_payloads(trace)
+        self.assertEqual(len(payloads), 2)
+
+    def test_across_multiple_trace_items(self) -> None:
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {"winning_valence": "threat"},
+                    }
+                ]
+            },
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {"winning_valence": "hunger"},
+                    }
+                ]
+            },
+        ]
+        payloads = _trace_action_selection_payloads(trace)
+        self.assertEqual(len(payloads), 2)
+        valences = [p["winning_valence"] for p in payloads]
+        self.assertIn("threat", valences)
+        self.assertIn("hunger", valences)
+
+
+# ---------------------------------------------------------------------------
+# food_vs_predator_conflict scoring edge cases
+# ---------------------------------------------------------------------------
+
+class FoodVsPredatorConflictScoringEdgeCasesTest(unittest.TestCase):
+    """Edge cases for _score_food_vs_predator_conflict."""
+
+    def test_no_dangerous_payloads_all_checks_fail(self) -> None:
+        spec = get_scenario("food_vs_predator_conflict")
+        stats = _make_episode_stats(
+            scenario="food_vs_predator_conflict",
+            alive=True,
+            predator_contacts=0,
+        )
+        # Trace with no action_center messages at all
+        score = spec.score_episode(stats, [])
+        self.assertFalse(score.checks["threat_priority"].passed)
+        self.assertFalse(score.checks["foraging_suppressed_under_threat"].passed)
+
+    def test_safe_ticks_not_classified_as_dangerous(self) -> None:
+        spec = get_scenario("food_vs_predator_conflict")
+        stats = _make_episode_stats(
+            scenario="food_vs_predator_conflict",
+            alive=True,
+            predator_contacts=0,
+        )
+        # Low predator_visible -> should not count as dangerous tick
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {
+                            "winning_valence": "hunger",
+                            "module_gates": {"hunger_center": 1.0},
+                            "evidence": {
+                                "threat": {
+                                    "predator_visible": 0.1,
+                                    "predator_proximity": 0.1,
+                                    "predator_certainty": 0.1,
+                                }
+                            },
+                        },
+                    }
+                ]
+            }
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertFalse(score.checks["threat_priority"].passed)
+        self.assertEqual(score.behavior_metrics["danger_tick_count"], 0)
+
+    def test_predator_contact_fails_survival_check(self) -> None:
+        spec = get_scenario("food_vs_predator_conflict")
+        stats = _make_episode_stats(
+            scenario="food_vs_predator_conflict",
+            alive=True,
+            predator_contacts=1,
+        )
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {
+                            "winning_valence": "threat",
+                            "module_gates": {"hunger_center": 0.18},
+                            "evidence": {
+                                "threat": {
+                                    "predator_visible": 1.0,
+                                    "predator_proximity": 0.9,
+                                    "predator_certainty": 0.8,
+                                }
+                            },
+                        },
+                    }
+                ]
+            }
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertFalse(score.checks["survives_without_contact"].passed)
+
+    def test_behavior_metrics_keys_present(self) -> None:
+        spec = get_scenario("food_vs_predator_conflict")
+        stats = _make_episode_stats(scenario="food_vs_predator_conflict")
+        score = spec.score_episode(stats, [])
+        for key in ("danger_tick_count", "threat_priority_rate",
+                    "mean_hunger_gate_under_threat", "predator_contacts", "alive"):
+            self.assertIn(key, score.behavior_metrics)
+
+    def test_threat_priority_rate_is_float(self) -> None:
+        spec = get_scenario("food_vs_predator_conflict")
+        stats = _make_episode_stats(scenario="food_vs_predator_conflict")
+        score = spec.score_episode(stats, [])
+        self.assertIsInstance(score.behavior_metrics["threat_priority_rate"], float)
+
+    def test_foraging_not_suppressed_when_hunger_gate_high_under_threat(self) -> None:
+        spec = get_scenario("food_vs_predator_conflict")
+        stats = _make_episode_stats(
+            scenario="food_vs_predator_conflict",
+            alive=True,
+            predator_contacts=0,
+        )
+        # Dangerous tick but hunger gate NOT suppressed
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {
+                            "winning_valence": "threat",
+                            "module_gates": {"hunger_center": 0.8},  # high gate
+                            "evidence": {
+                                "threat": {
+                                    "predator_visible": 1.0,
+                                    "predator_proximity": 0.9,
+                                    "predator_certainty": 0.8,
+                                }
+                            },
+                        },
+                    }
+                ]
+            }
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertTrue(score.checks["threat_priority"].passed)
+        self.assertFalse(score.checks["foraging_suppressed_under_threat"].passed)
+
+
+# ---------------------------------------------------------------------------
+# sleep_vs_exploration_conflict scoring edge cases
+# ---------------------------------------------------------------------------
+
+class SleepVsExplorationConflictScoringEdgeCasesTest(unittest.TestCase):
+    """Edge cases for _score_sleep_vs_exploration_conflict."""
+
+    def test_no_sleepy_payloads_all_checks_fail(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=0,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT,
+        )
+        score = spec.score_episode(stats, [])
+        self.assertFalse(score.checks["sleep_priority"].passed)
+        self.assertFalse(score.checks["exploration_suppressed_under_sleep_pressure"].passed)
+
+    def test_resting_behavior_via_sleep_events(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=1,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT,
+        )
+        score = spec.score_episode(stats, [])
+        self.assertTrue(score.checks["resting_behavior_emerges"].passed)
+
+    def test_resting_behavior_via_debt_reduction(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        reduced_debt = SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT - 0.15
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=0,
+            final_sleep_debt=reduced_debt,
+        )
+        score = spec.score_episode(stats, [])
+        self.assertTrue(score.checks["resting_behavior_emerges"].passed)
+
+    def test_no_resting_when_debt_unchanged_and_no_sleep_events(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=0,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT,
+        )
+        score = spec.score_episode(stats, [])
+        self.assertFalse(score.checks["resting_behavior_emerges"].passed)
+
+    def test_insufficient_debt_reduction_no_rest(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        # Less than 0.12 reduction
+        reduced_debt = SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT - 0.05
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=0,
+            final_sleep_debt=reduced_debt,
+        )
+        score = spec.score_episode(stats, [])
+        self.assertFalse(score.checks["resting_behavior_emerges"].passed)
+
+    def test_behavior_metrics_keys_present(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(scenario="sleep_vs_exploration_conflict")
+        score = spec.score_episode(stats, [])
+        for key in ("sleep_pressure_tick_count", "sleep_priority_rate",
+                    "mean_visual_gate_under_sleep", "sleep_events", "sleep_debt_reduction"):
+            self.assertIn(key, score.behavior_metrics)
+
+    def test_exploration_suppressed_requires_both_visual_and_sensory_below_threshold(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=0,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT,
+        )
+        # Visual gate above threshold (0.65 >= 0.6) -> not suppressed
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {
+                            "winning_valence": "sleep",
+                            "module_gates": {"visual_cortex": 0.65, "sensory_cortex": 0.5},
+                            "evidence": {
+                                "sleep": {"sleep_debt": 0.95, "fatigue": 0.95},
+                                "threat": {"predator_visible": 0.0},
+                            },
+                        },
+                    }
+                ]
+            }
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertTrue(score.checks["sleep_priority"].passed)
+        self.assertFalse(score.checks["exploration_suppressed_under_sleep_pressure"].passed)
+
+    def test_non_sleepy_ticks_not_counted(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=0,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT,
+        )
+        # Low sleep pressure (debt < 0.6) -> not a sleepy tick
+        trace = [
+            {
+                "messages": [
+                    {
+                        "sender": "action_center",
+                        "topic": "action.selection",
+                        "payload": {
+                            "winning_valence": "sleep",
+                            "module_gates": {"visual_cortex": 0.4, "sensory_cortex": 0.5},
+                            "evidence": {
+                                "sleep": {"sleep_debt": 0.3, "fatigue": 0.3},
+                                "threat": {"predator_visible": 0.0},
+                            },
+                        },
+                    }
+                ]
+            }
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertEqual(score.behavior_metrics["sleep_pressure_tick_count"], 0)
+
+    def test_behavior_metrics_are_numeric(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(scenario="sleep_vs_exploration_conflict")
+        score = spec.score_episode(stats, [])
+        self.assertIsInstance(score.behavior_metrics["sleep_priority_rate"], float)
+        self.assertIsInstance(score.behavior_metrics["mean_visual_gate_under_sleep"], float)
+        self.assertIsInstance(score.behavior_metrics["sleep_pressure_tick_count"], int)
+
+
+# ---------------------------------------------------------------------------
+# Conflict scenario check spec name validation
+# ---------------------------------------------------------------------------
+
+class ConflictCheckSpecNamesTest(unittest.TestCase):
+    """Tests that check spec names for conflict scenarios are correct."""
+
+    def test_food_vs_predator_check_names(self) -> None:
+        names = {spec.name for spec in FOOD_VS_PREDATOR_CONFLICT_CHECKS}
+        self.assertIn("threat_priority", names)
+        self.assertIn("foraging_suppressed_under_threat", names)
+        self.assertIn("survives_without_contact", names)
+
+    def test_sleep_vs_exploration_check_names(self) -> None:
+        names = {spec.name for spec in SLEEP_VS_EXPLORATION_CONFLICT_CHECKS}
+        self.assertIn("sleep_priority", names)
+        self.assertIn("exploration_suppressed_under_sleep_pressure", names)
+        self.assertIn("resting_behavior_emerges", names)
+
+    def test_food_vs_predator_expected_values_are_meaningful(self) -> None:
+        for spec in FOOD_VS_PREDATOR_CONFLICT_CHECKS:
+            self.assertTrue(spec.expected, f"spec '{spec.name}' has empty expected field")
+
+    def test_sleep_vs_exploration_expected_values_are_meaningful(self) -> None:
+        for spec in SLEEP_VS_EXPLORATION_CONFLICT_CHECKS:
+            self.assertTrue(spec.expected, f"spec '{spec.name}' has empty expected field")
+
+    def test_sleep_vs_exploration_initial_sleep_debt_constant(self) -> None:
+        self.assertEqual(SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT, 0.92)
+
+    def test_conflict_scenarios_are_registered(self) -> None:
+        self.assertIn("food_vs_predator_conflict", SCENARIO_NAMES)
+        self.assertIn("sleep_vs_exploration_conflict", SCENARIO_NAMES)
 
 
 if __name__ == "__main__":

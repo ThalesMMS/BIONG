@@ -17,42 +17,41 @@ class LearningEvidenceConditionSpec:
 
 def canonical_learning_evidence_conditions() -> Dict[str, LearningEvidenceConditionSpec]:
     """
-    Return the canonical registry of learning-evidence condition specifications.
+    Canonical registry of learning-evidence condition specifications.
     
     Each mapping key is a canonical condition name and each value is a
-    LearningEvidenceConditionSpec describing training/evaluation configuration
-    (policy mode, training budget, evaluation reflex scaling, checkpoint source,
-    and supported architectures). The registry includes the canonical conditions
-    used by the system such as "trained_final", "trained_without_reflex_support",
-    "random_init", "reflex_only", "freeze_half_budget", and "trained_long_budget".
+    LearningEvidenceConditionSpec describing policy mode, training budget,
+    evaluation reflex scaling, checkpoint source, and supported architectures.
+    The registry includes the canonical conditions used by the system such as
+    "trained_final", "trained_without_reflex_support", "random_init",
+    "reflex_only", "freeze_half_budget", and "trained_long_budget".
     
     Returns:
-        conditions (Dict[str, LearningEvidenceConditionSpec]): Mapping from canonical
-        condition name to its specification.
+        Mapping from canonical condition name to its LearningEvidenceConditionSpec.
     """
     return {
         "trained_final": LearningEvidenceConditionSpec(
             name="trained_final",
-            description="Checkpoint final treinado com o orçamento base e avaliação normal.",
+            description="Final checkpoint trained with the base budget and evaluated normally.",
             train_budget="base",
             checkpoint_source="final",
         ),
         "trained_without_reflex_support": LearningEvidenceConditionSpec(
             name="trained_without_reflex_support",
-            description="Mesmo checkpoint treinado, mas avaliado com suporte reflexo desligado.",
+            description="Same trained checkpoint, but evaluated with reflex support disabled.",
             train_budget="base",
             eval_reflex_scale=0.0,
             checkpoint_source="final",
         ),
         "random_init": LearningEvidenceConditionSpec(
             name="random_init",
-            description="Mesma arquitetura/configuração, sem treino, avaliada a partir da inicialização aleatória.",
+            description="Same architecture and configuration, but untrained and evaluated from random initialization.",
             train_budget="none",
             checkpoint_source="initial",
         ),
         "reflex_only": LearningEvidenceConditionSpec(
             name="reflex_only",
-            description="Arquitetura modular sem treino, executando apenas o caminho reflexo local.",
+            description="Untrained modular architecture running only the local reflex path.",
             policy_mode="reflex_only",
             train_budget="none",
             checkpoint_source="initial",
@@ -60,13 +59,13 @@ def canonical_learning_evidence_conditions() -> Dict[str, LearningEvidenceCondit
         ),
         "freeze_half_budget": LearningEvidenceConditionSpec(
             name="freeze_half_budget",
-            description="Treina metade do orçamento, congela pesos e consome o restante sem aprendizado.",
+            description="Trains for half the budget, freezes weights, and consumes the rest without learning.",
             train_budget="freeze_half",
             checkpoint_source="frozen_half_budget",
         ),
         "trained_long_budget": LearningEvidenceConditionSpec(
             name="trained_long_budget",
-            description="Mesma configuração, mas treinada com o orçamento do perfil longo.",
+            description="Same configuration, but trained with the long-profile budget.",
             train_budget="long",
             checkpoint_source="final",
         ),
@@ -109,6 +108,6 @@ def resolve_learning_evidence_conditions(
     missing = [name for name in requested_names if name not in registry]
     if missing:
         raise ValueError(
-            f"Condições de learning_evidence inválidas: {missing}."
+            f"Invalid learning_evidence conditions: {missing}."
         )
     return [registry[name] for name in requested_names]

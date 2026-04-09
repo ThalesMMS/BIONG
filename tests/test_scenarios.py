@@ -78,6 +78,8 @@ class ScenarioRegressionTest(unittest.TestCase):
                 "two_shelter_tradeoff",
                 "exposed_day_foraging",
                 "food_deprivation",
+                "food_vs_predator_conflict",
+                "sleep_vs_exploration_conflict",
             },
         )
 
@@ -95,6 +97,25 @@ class ScenarioRegressionTest(unittest.TestCase):
         _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
         self.assertTrue(info["state"]["predator_memory"]["target"] is not None)
         self.assertIn(world.lizard.mode, {"ORIENT", "CHASE", "INVESTIGATE"})
+
+    def test_non_facing_scenarios_reset_heading_after_teleport(self) -> None:
+        for name in SCENARIO_NAMES:
+            if name in {"predator_edge", "food_vs_predator_conflict"}:
+                continue
+            with self.subTest(scenario=name):
+                world = self._setup_world(name)
+                expected = world._heading_toward(
+                    world.nearest_shelter_entrance(origin=world.spider_pos()),
+                    origin=world.spider_pos(),
+                )
+                self.assertEqual((world.state.heading_dx, world.state.heading_dy), expected)
+
+    def test_predator_facing_scenarios_keep_predator_oriented_heading(self) -> None:
+        for name in ("predator_edge", "food_vs_predator_conflict"):
+            with self.subTest(scenario=name):
+                world = self._setup_world(name)
+                expected = world._heading_toward(world.lizard_pos())
+                self.assertEqual((world.state.heading_dx, world.state.heading_dy), expected)
 
     def test_entrance_ambush_keeps_lizard_waiting_outside(self) -> None:
         world = self._setup_world("entrance_ambush")
@@ -159,12 +180,51 @@ class ScenarioRegressionTest(unittest.TestCase):
         )
 
     def test_food_deprivation_starts_hungry_with_distant_food(self) -> None:
+        """
+        Verify the "food_deprivation" scenario initializes a hungry spider located far from the nearest food.
+        
+        Asserts that the scenario uses the "central_burrow" map template, the spider's hunger is greater than 0.9, and the Manhattan distance from the spider to the first food position is greater than 3.
+        """
         world = self._setup_world("food_deprivation")
         self.assertEqual(world.map_template_name, "central_burrow")
         self.assertGreater(world.state.hunger, 0.9)
         self.assertGreater(world.manhattan(world.spider_pos(), world.food_positions[0]), 3)
 
+    def test_food_vs_predator_conflict_starts_with_visible_pressure_and_near_food(self) -> None:
+        """
+        Verify the "food_vs_predator_conflict" scenario initializes on the exposed feeding ground with a hungry spider positioned near both food and the lizard.
+        
+        Asserts:
+        - the world uses the "exposed_feeding_ground" map template
+        - the spider's hunger is greater than 0.9
+        - the Manhattan distance from the spider to the first food position is <= 3
+        - the Manhattan distance from the spider to the lizard is <= 2
+        """
+        world = self._setup_world("food_vs_predator_conflict")
+        observation = world.observe()
+        self.assertEqual(world.map_template_name, "exposed_feeding_ground")
+        self.assertGreater(world.state.hunger, 0.9)
+        self.assertLessEqual(world.manhattan(world.spider_pos(), world.food_positions[0]), 3)
+        self.assertLessEqual(world.manhattan(world.spider_pos(), world.lizard_pos()), 2)
+        self.assertTrue(observation["meta"]["predator_visible"])
+        self.assertGreater(observation["meta"]["vision"]["predator"]["certainty"], 0.0)
+
+    def test_sleep_vs_exploration_conflict_starts_sleepy_and_safe(self) -> None:
+        world = self._setup_world("sleep_vs_exploration_conflict")
+        observation = world.observe()
+        self.assertEqual(world.map_template_name, "central_burrow")
+        self.assertTrue(observation["meta"]["night"])
+        self.assertGreater(world.state.sleep_debt, 0.9)
+        self.assertIn(world.spider_pos(), world.shelter_cells)
+        self.assertGreater(observation["meta"]["food_dist"], 0)
+        self.assertFalse(observation["meta"]["on_food"])
+
     def test_weak_scenarios_expose_diagnostic_metadata(self) -> None:
+        """
+        Validate that selected scenarios expose required diagnostic metadata.
+        
+        Asserts that for each of the scenarios "open_field_foraging", "corridor_gauntlet", "exposed_day_foraging", and "food_deprivation" the attributes `diagnostic_focus`, `success_interpretation`, `failure_interpretation`, and `budget_note` are truthy.
+        """
         for name in (
             "open_field_foraging",
             "corridor_gauntlet",
@@ -176,6 +236,99 @@ class ScenarioRegressionTest(unittest.TestCase):
             self.assertTrue(scenario.success_interpretation)
             self.assertTrue(scenario.failure_interpretation)
             self.assertTrue(scenario.budget_note)
+
+
+class ConflictScenarioMetadataTest(unittest.TestCase):
+    """Tests for the new conflict scenarios added in this PR."""
+
+    def test_scenario_metadata_and_behavior_checks(self) -> None:
+        cases = [
+            ("food_vs_predator_conflict", "exposed_feeding_ground"),
+            ("sleep_vs_exploration_conflict", "central_burrow"),
+        ]
+        for name, expected_map in cases:
+            with self.subTest(scenario=name):
+                scenario = get_scenario(name)
+                self.assertTrue(scenario.diagnostic_focus)
+                self.assertTrue(scenario.success_interpretation)
+                self.assertTrue(scenario.failure_interpretation)
+                self.assertTrue(scenario.budget_note)
+                self.assertEqual(scenario.map_template, expected_map)
+                self.assertGreater(scenario.max_steps, 0)
+                self.assertLessEqual(scenario.max_steps, 24)
+                self.assertEqual(len(scenario.behavior_checks), 3)
+
+
+class ConflictScenarioSetupTest(unittest.TestCase):
+    """Tests verifying initial state constants for the new conflict scenarios."""
+
+    def _setup_world(self, name: str) -> SpiderWorld:
+        scenario = get_scenario(name)
+        world = SpiderWorld(seed=7, lizard_move_interval=1, map_template=scenario.map_template)
+        world.reset(seed=7)
+        scenario.setup(world)
+        return world
+
+    def test_food_vs_predator_conflict_initializes_high_hunger(self) -> None:
+        world = self._setup_world("food_vs_predator_conflict")
+        self.assertGreater(world.state.hunger, 0.85)
+
+    def test_food_vs_predator_conflict_initializes_low_fatigue(self) -> None:
+        world = self._setup_world("food_vs_predator_conflict")
+        self.assertLess(world.state.fatigue, 0.50)
+
+    def test_food_vs_predator_conflict_daytime(self) -> None:
+        world = self._setup_world("food_vs_predator_conflict")
+        obs = world.observe()
+        self.assertTrue(obs["meta"]["day"])
+
+    def test_food_vs_predator_conflict_lizard_in_patrol_mode(self) -> None:
+        world = self._setup_world("food_vs_predator_conflict")
+        self.assertEqual(world.lizard.mode, "PATROL")
+
+    def test_food_vs_predator_conflict_spider_not_in_shelter(self) -> None:
+        world = self._setup_world("food_vs_predator_conflict")
+        self.assertNotIn(world.spider_pos(), world.shelter_cells)
+
+    def test_sleep_vs_exploration_conflict_initializes_high_sleep_debt(self) -> None:
+        from spider_cortex_sim.scenarios import SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT
+        world = self._setup_world("sleep_vs_exploration_conflict")
+        self.assertAlmostEqual(world.state.sleep_debt, SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT, places=3)
+
+    def test_sleep_vs_exploration_conflict_initializes_nighttime(self) -> None:
+        world = self._setup_world("sleep_vs_exploration_conflict")
+        obs = world.observe()
+        self.assertTrue(obs["meta"]["night"])
+
+    def test_sleep_vs_exploration_conflict_initializes_low_hunger(self) -> None:
+        world = self._setup_world("sleep_vs_exploration_conflict")
+        self.assertLess(world.state.hunger, 0.30)
+
+    def test_sleep_vs_exploration_conflict_initializes_high_fatigue(self) -> None:
+        world = self._setup_world("sleep_vs_exploration_conflict")
+        self.assertGreater(world.state.fatigue, 0.80)
+
+    def test_sleep_vs_exploration_conflict_spider_starts_in_shelter(self) -> None:
+        world = self._setup_world("sleep_vs_exploration_conflict")
+        self.assertIn(world.spider_pos(), world.shelter_cells)
+
+    def test_sleep_vs_exploration_conflict_food_is_far_from_spider(self) -> None:
+        world = self._setup_world("sleep_vs_exploration_conflict")
+        food_pos = world.food_positions[0]
+        self.assertGreater(world.manhattan(world.spider_pos(), food_pos), 1)
+
+    def test_food_vs_predator_conflict_lizard_close_to_spider(self) -> None:
+        world = self._setup_world("food_vs_predator_conflict")
+        dist = world.manhattan(world.spider_pos(), world.lizard_pos())
+        self.assertLessEqual(dist, 3)
+
+    def test_food_vs_predator_conflict_heading_faces_lizard(self) -> None:
+        world = self._setup_world("food_vs_predator_conflict")
+        expected = world._heading_toward(world.lizard_pos())
+        self.assertEqual(
+            (world.state.heading_dx, world.state.heading_dy),
+            expected,
+        )
 
 
 if __name__ == "__main__":

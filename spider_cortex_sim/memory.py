@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import TYPE_CHECKING, Iterable
 
 from .world_types import MemorySlot
@@ -14,6 +15,49 @@ MEMORY_TTLS = {
     "shelter": 20,
     "escape": 8,
 }
+
+
+MEMORY_LEAKAGE_AUDIT = {
+    "food_memory": {
+        "classification": "plausible_memory",
+        "risk": "low",
+        "source": "spider_cortex_sim.memory.refresh_memory",
+        "update_rule": "nearest visible food",
+        "notes": "This is the most ecological case: it depends on visible food and persists only for a short TTL.",
+    },
+    "predator_memory": {
+        "classification": "world_owned_memory",
+        "risk": "medium",
+        "source": "spider_cortex_sim.memory.refresh_memory",
+        "update_rule": "world.lizard_pos() when predator_visible_to_spider() or recent_contact",
+        "notes": "The recorded position is the lizard's real one; plausible as explicit memory, but still world-owned.",
+    },
+    "shelter_memory": {
+        "classification": "world_owned_memory",
+        "risk": "high",
+        "source": "spider_cortex_sim.memory.refresh_memory",
+        "update_rule": "world.safest_shelter_target() on shelter or when shelter cells are visible",
+        "notes": "Stores the safe shelter computed by the world, not just a shelter perceived by the agent.",
+    },
+    "escape_memory": {
+        "classification": "world_owned_memory",
+        "risk": "medium",
+        "source": "spider_cortex_sim.memory.refresh_memory",
+        "update_rule": "escape_memory_target(world) from last_move_dx/last_move_dy",
+        "notes": "The escape route is built by an external rule and enters the observation space already formed.",
+    },
+}
+
+
+def memory_leakage_audit() -> dict[str, dict[str, object]]:
+    """
+    Provide the structured audit catalog for the module's explicit world-owned memory slots.
+    
+    Returns:
+        audit (dict[str, dict[str, object]]): A deep copy of MEMORY_LEAKAGE_AUDIT mapping each memory slot
+        name to its metadata dictionary (classification, risk, source, update_rule, notes).
+    """
+    return deepcopy(MEMORY_LEAKAGE_AUDIT)
 
 
 def empty_memory_slot() -> MemorySlot:

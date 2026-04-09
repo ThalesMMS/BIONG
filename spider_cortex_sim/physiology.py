@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .world import SpiderWorld
+    from .world_types import TickContext
 
 
 SLEEP_PHASES: tuple[str, ...] = ("AWAKE", "SETTLING", "RESTING", "DEEP_SLEEP")
@@ -37,17 +38,17 @@ def rest_streak_norm(world: "SpiderWorld") -> float:
 
 def set_sleep_state(world: "SpiderWorld", phase: str, rest_streak: int) -> None:
     """
-    Set the world's sleep phase and normalize its rest streak after validating the phase.
+    Set the world's sleep phase and normalize its rest streak.
     
     Parameters:
-        phase (str): Sleep phase name; must be one of the keys in SLEEP_PHASE_LEVELS.
-        rest_streak (int): Rest streak value; will be converted to int and clamped to a minimum of 0.
+        phase (str): Sleep phase name; must be a key in SLEEP_PHASE_LEVELS.
+        rest_streak (int): Value to store as the rest streak; converted to int and clamped to a minimum of 0.
     
     Raises:
         ValueError: If `phase` is not a valid sleep phase.
     """
     if phase not in SLEEP_PHASE_LEVELS:
-        raise ValueError(f"Fase de sono inválida: {phase}")
+        raise ValueError(f"Invalid sleep phase: {phase}")
     world.state.sleep_phase = phase
     world.state.rest_streak = max(0, int(rest_streak))
 
@@ -61,21 +62,22 @@ def reset_sleep_state(world: "SpiderWorld") -> None:
 
 def sleep_phase_from_streak(rest_streak: int, *, night: bool, shelter_role: str) -> str:
     """
-    Determine the sleep phase name for a given consecutive rest streak and context.
+    Selects the sleep phase ('AWAKE', 'SETTLING', 'RESTING', or 'DEEP_SLEEP') based on consecutive rest turns, whether it is night, and the shelter role.
     
-    Maps the provided rest_streak, night flag, and shelter_role to one of: "AWAKE", "SETTLING", "RESTING", or "DEEP_SLEEP".
     Parameters:
         rest_streak (int): Consecutive number of resting turns (may be zero or negative).
         night (bool): True if it is nighttime.
-        shelter_role (str): Role of the shelter at the agent's position; expected values include "outside", "entrance", "inside", or "deep".
+        shelter_role (str): Shelter role at the agent's position; e.g. "outside", "entrance", "inside", or "deep".
     
     Returns:
-        phase (str): One of "AWAKE", "SETTLING", "RESTING", or "DEEP_SLEEP" determined as:
-            - If rest_streak <= 0 -> "AWAKE"
-            - If rest_streak == 1 -> "SETTLING"
-            - If shelter_role is "entrance" or "inside" -> "RESTING"
-            - If shelter_role == "deep": rest_streak == 2 -> "RESTING", otherwise "DEEP_SLEEP" if night else "RESTING"
-            - Otherwise -> "AWAKE"
+        phase (str): One of "AWAKE", "SETTLING", "RESTING", or "DEEP_SLEEP". Determination rules:
+            - rest_streak <= 0 -> "AWAKE"
+            - rest_streak == 1 -> "SETTLING"
+            - shelter_role in {"entrance", "inside"} -> "RESTING"
+            - shelter_role == "deep":
+                - rest_streak == 2 -> "RESTING"
+                - otherwise -> "DEEP_SLEEP" if night else "RESTING"
+            - otherwise -> "AWAKE"
     """
     if rest_streak <= 0:
         return "AWAKE"
@@ -90,16 +92,20 @@ def sleep_phase_from_streak(rest_streak: int, *, night: bool, shelter_role: str)
     return "AWAKE"
 
 
-def apply_predator_contact(world: "SpiderWorld", reward_components: dict[str, float], info: dict[str, object]) -> None:
+def apply_predator_contact(
+    world: "SpiderWorld",
+    reward_components: dict[str, float],
+    info: dict[str, object],
+    *,
+    tick_context: "TickContext | None" = None,
+) -> None:
     """
-    Apply the effects of a predator contact to the world state, update rewards, and set info flags.
+    Apply the effects of a predator contact to the world state, update reward components, and set info flags.
     
-    This mutates world.state by reducing health, increasing recent pain/contact and alert/predator contact counters, and writes boolean flags into the provided info mapping. It also applies a negative reward to the `reward_components` accumulator based on sampled damage.
+    Mutates world.state by reducing health (floored at 0.0), raising recent pain/contact, and incrementing alert and predator contact counters. Decreases the `"predator_contact"` entry in reward_components and sets info["pain"] and info["predator_contact"] to True. If provided, records a compact `"predator_contact"` event to the tick_context with sampled damage and the post-change health, recent_pain, and recent_contact values (rounded).
     
     Parameters:
-        world (SpiderWorld): Environment object whose .state and RNG are updated.
-        reward_components (dict[str, float]): Mutable mapping of reward component names to adjustments; the `"predator_contact"` entry is decreased.
-        info (dict[str, object]): Mutable information/flag mapping; sets `info["pain"] = True` and `info["predator_contact"] = True`.
+        tick_context (TickContext | None): Optional context used to record an event when present; no event is recorded if None.
     """
     damage = float(world.rng.uniform(0.08, 0.16))
     world.state.health = max(0.0, world.state.health - damage)
@@ -110,6 +116,15 @@ def apply_predator_contact(world: "SpiderWorld", reward_components: dict[str, fl
     info["pain"] = True
     info["predator_contact"] = True
     reward_components["predator_contact"] -= 0.80 + 1.6 * damage
+    if tick_context is not None:
+        tick_context.record_event(
+            "predator_contact",
+            "predator_contact",
+            damage=round(damage, 6),
+            health=round(float(world.state.health), 6),
+            recent_pain=round(float(world.state.recent_pain), 6),
+            recent_contact=round(float(world.state.recent_contact), 6),
+        )
 
 
 def apply_wakefulness(
@@ -183,19 +198,26 @@ def resolve_autonomic_behaviors(
     night: bool,
     reward_components: dict[str, float],
     info: dict[str, object],
+    tick_context: "TickContext | None" = None,
 ) -> None:
     """
-    Handle feeding, sheltering, and sleep-related autonomous behaviors, mutating world.state and updating reward_components and info accordingly.
+    Decide and apply feeding, sheltering, and sleep-related autonomous behaviors, mutating world.state and updating reward_components and info.
     
-    When the agent is on food this grants feeding effects and resets sleep state. If the agent is not on shelter the sleep state is reset. When on shelter, evaluates whether the agent can attempt to rest based on action, hunger, predator threat, shelter role, fatigue, rest streak, and sleep debt; if rest is attempted it advances the rest streak, sets the new sleep phase, applies restoration, and adjusts resting rewards depending on the resulting phase (`SETTLING`, `RESTING`, or `DEEP_SLEEP`). If rest is not attempted, resets the sleep state and applies conditional resting penalties.
+    Evaluates current context (on food, on shelter, action, hunger, predator threat, shelter role, fatigue, rest streak, and sleep debt) to:
+    - apply feeding effects when on food,
+    - reset sleep state when off shelter,
+    - attempt and apply resting (advance rest streak, set sleep phase, apply restoration, adjust resting rewards) when conditions permit,
+    - or reset sleep state and apply conditional resting penalties when rest is blocked.
+    If provided, records compact event summaries to tick_context.
     
     Parameters:
-        world (SpiderWorld): Environment and state container that will be mutated.
-        action_name (str): Current action name (e.g., "STAY") used to decide feeding/rest behavior.
+        world (SpiderWorld): Environment and mutable state container to update.
+        action_name (str): Current action name used to decide feeding/rest behavior.
         predator_threat (bool): Whether a predator threat is present; prevents rest attempts when True.
-        night (bool): Whether it is night; affects sleep phase resolution, restoration, and reward calculations.
-        reward_components (dict[str, float]): Mutable accumulator for reward components to be adjusted by this function.
-        info (dict[str, object]): Mutable dictionary for setting observational flags (e.g., "ate", "slept").
+        night (bool): Whether it is night; affects sleep resolution, restoration, and reward calculations.
+        reward_components (dict[str, float]): Mutable accumulator for reward components to be adjusted.
+        info (dict[str, object]): Mutable dictionary for observable flags (e.g., "ate", "slept").
+        tick_context (TickContext | None): Optional recorder for compact runtime events; no effect if None.
     """
     if world.on_food():
         hunger_before = world.state.hunger
@@ -207,10 +229,25 @@ def resolve_autonomic_behaviors(
         info["ate"] = True
         world.respawn_food(world.spider_pos())
         reset_sleep_state(world)
+        if tick_context is not None:
+            tick_context.fed_this_tick = True
+            tick_context.record_event(
+                "autonomic",
+                "feeding",
+                hunger_before=round(float(hunger_before), 6),
+                hunger_after=round(float(world.state.hunger), 6),
+                action=action_name,
+            )
         return
 
     if not world.on_shelter():
         reset_sleep_state(world)
+        if tick_context is not None:
+            tick_context.record_event(
+                "autonomic",
+                "sleep_reset_off_shelter",
+                action=action_name,
+            )
         return
 
     fatigue_before = world.state.fatigue
@@ -229,6 +266,15 @@ def resolve_autonomic_behaviors(
         phase = sleep_phase_from_streak(new_rest_streak, night=night, shelter_role=shelter_role)
         set_sleep_state(world, phase, new_rest_streak)
         apply_restoration(world, phase, night=night, shelter_role=shelter_role)
+        if tick_context is not None:
+            tick_context.record_event(
+                "autonomic",
+                "rest_phase",
+                phase=phase,
+                rest_streak=int(world.state.rest_streak),
+                sleep_drive=round(float(sleep_drive), 6),
+                shelter_role=shelter_role,
+            )
 
         if phase == "SETTLING":
             reward_components["resting"] += 0.10 + 0.90 * sleep_drive + (0.06 if night else 0.02)
@@ -246,6 +292,17 @@ def resolve_autonomic_behaviors(
         return
 
     reset_sleep_state(world)
+    if tick_context is not None:
+        tick_context.record_event(
+            "autonomic",
+            "rest_blocked",
+            action=action_name,
+            predator_threat=bool(predator_threat),
+            shelter_role=shelter_role,
+            fatigue_before=round(float(fatigue_before), 6),
+            sleep_debt=round(float(world.state.sleep_debt), 6),
+            hunger=round(float(world.state.hunger), 6),
+        )
     if night or fatigue_before > 0.45 or world.state.sleep_debt > 0.45:
         if action_name != "STAY":
             reward_components["resting"] -= 0.10 + (0.08 if night else 0.04) + 0.32 * world.state.hunger

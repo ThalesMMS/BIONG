@@ -5,6 +5,7 @@ from spider_cortex_sim.memory import (
     age_or_clear_memory,
     empty_memory_slot,
     escape_memory_target,
+    memory_leakage_audit,
     memory_vector,
     refresh_memory,
     set_memory,
@@ -154,3 +155,58 @@ class MemoryModuleTest(unittest.TestCase):
         world.state.recent_contact = 1.0
         refresh_memory(world, initial=True)
         self.assertEqual(world.state.predator_memory.target, (8, 8))
+
+    def test_memory_leakage_audit_marks_shelter_memory_as_high_risk(self) -> None:
+        audit = memory_leakage_audit()
+        self.assertEqual(audit["shelter_memory"]["risk"], "high")
+        self.assertEqual(audit["food_memory"]["classification"], "plausible_memory")
+
+    def test_memory_leakage_audit_returns_all_four_expected_keys(self) -> None:
+        audit = memory_leakage_audit()
+        expected_keys = {"food_memory", "predator_memory", "shelter_memory", "escape_memory"}
+        self.assertEqual(set(audit.keys()), expected_keys)
+
+    def test_memory_leakage_audit_returns_deep_copy_not_reference(self) -> None:
+        audit1 = memory_leakage_audit()
+        audit2 = memory_leakage_audit()
+        audit1["shelter_memory"]["risk"] = "mutated"
+        self.assertEqual(audit2["shelter_memory"]["risk"], "high")
+
+    def test_memory_leakage_audit_each_entry_has_required_fields(self) -> None:
+        audit = memory_leakage_audit()
+        required_fields = {"classification", "risk", "source", "update_rule", "notes"}
+        for slot_name, metadata in audit.items():
+            for field in required_fields:
+                self.assertIn(
+                    field,
+                    metadata,
+                    f"Memory slot {slot_name!r} missing field {field!r}",
+                )
+
+    def test_memory_leakage_audit_predator_memory_is_world_owned_medium_risk(self) -> None:
+        audit = memory_leakage_audit()
+        self.assertEqual(audit["predator_memory"]["classification"], "world_owned_memory")
+        self.assertEqual(audit["predator_memory"]["risk"], "medium")
+
+    def test_memory_leakage_audit_escape_memory_is_world_owned_medium_risk(self) -> None:
+        audit = memory_leakage_audit()
+        self.assertEqual(audit["escape_memory"]["classification"], "world_owned_memory")
+        self.assertEqual(audit["escape_memory"]["risk"], "medium")
+
+    def test_memory_leakage_audit_risk_values_are_valid(self) -> None:
+        audit = memory_leakage_audit()
+        valid_risk_levels = {"low", "medium", "high"}
+        for slot_name, metadata in audit.items():
+            self.assertIn(
+                metadata["risk"],
+                valid_risk_levels,
+                f"Memory slot {slot_name!r} has unexpected risk level {metadata['risk']!r}",
+            )
+
+    def test_memory_leakage_audit_world_owned_slots_count(self) -> None:
+        audit = memory_leakage_audit()
+        world_owned = [
+            name for name, data in audit.items()
+            if data["classification"] == "world_owned_memory"
+        ]
+        self.assertEqual(len(world_owned), 3)

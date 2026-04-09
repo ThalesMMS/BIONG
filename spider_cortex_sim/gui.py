@@ -1,8 +1,10 @@
-"""Interface gráfica Pygame para visualização da simulação neuro-modular da aranha."""
+"""Pygame graphical interface for visualizing the neuro-modular spider simulation."""
 
 from __future__ import annotations
 
+import json
 import sys
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -12,8 +14,8 @@ try:
     import pygame
 except ImportError:
     print(
-        "pygame é necessário para a interface gráfica.\n"
-        "Instale com:  pip install pygame"
+        "pygame is required for the graphical interface.\n"
+        "Install it with:  pip install pygame"
     )
     sys.exit(1)
 
@@ -27,7 +29,7 @@ from .simulation import SpiderSimulation
 from .world import ACTIONS, REWARD_COMPONENT_NAMES, SpiderWorld
 
 # ---------------------------------------------------------------------------
-# Paleta de cores
+# Color palette
 # ---------------------------------------------------------------------------
 COLOR_BG_DAY = (200, 220, 180)
 COLOR_BG_NIGHT = (30, 30, 60)
@@ -83,7 +85,7 @@ COLOR_BUTTON_HOVER = (80, 80, 95)
 COLOR_BUTTON_TEXT = (200, 200, 210)
 
 # ---------------------------------------------------------------------------
-# Constantes de layout
+# Layout constants
 # ---------------------------------------------------------------------------
 CELL_SIZE = 56
 PANEL_WIDTH = 420
@@ -100,9 +102,19 @@ def _lerp_color(c1: Tuple[int, ...], c2: Tuple[int, ...], t: float) -> Tuple[int
 
 
 class Button:
-    """Botão simples para a barra inferior."""
+    """Simple button for the bottom bar."""
 
     def __init__(self, text: str, x: int, y: int, w: int, h: int) -> None:
+        """
+        Initialize a Button with label text and rectangular position/size.
+        
+        Parameters:
+            text (str): Label displayed on the button.
+            x (int): X-coordinate of the button's top-left corner.
+            y (int): Y-coordinate of the button's top-left corner.
+            w (int): Width of the button in pixels.
+            h (int): Height of the button in pixels.
+        """
         self.text = text
         self.rect = pygame.Rect(x, y, w, h)
         self.hovered = False
@@ -121,9 +133,17 @@ class Button:
 
 
 class SpiderGUI:
-    """Janela principal de visualização da simulação."""
+    """Main simulation viewer window."""
 
     def __init__(self, sim: SpiderSimulation) -> None:
+        """
+        Initialize the GUI for a SpiderSimulation and set up Pygame state, layout, runtime state, and UI controls.
+        
+        Initializes Pygame, creates the display surface and clock, prepares fonts, computes grid and panel layout from the simulation world, and initializes runtime bookkeeping used by the GUI (phase/episode/step counters, toggles, toast state, and reward/metric accumulators). Also constructs the bottom-bar control buttons and stores references to the simulation objects (world, brain, bus).
+        
+        Parameters:
+            sim (SpiderSimulation): The simulation instance whose world, brain, and bus the GUI will visualize and control.
+        """
         self.sim = sim
         self.world = sim.world
         self.brain = sim.brain
@@ -149,7 +169,7 @@ class SpiderGUI:
         self.panel_x = grid_w
         self.panel_y = TOP_BAR_HEIGHT
 
-        # Estado
+        # State
         self.running = True
         self.paused = True
         self.step_requested = False
@@ -174,28 +194,37 @@ class SpiderGUI:
         self.episode_metrics = EpisodeMetricAccumulator(REWARD_COMPONENT_NAMES, PREDATOR_STATES)
         self.show_visibility_overlay = False
         self.show_smell_overlay = False
+        self.panel_scroll = 0
+        self.panel_content_height = 0
 
-        # Toast de status
+        # Status toast
         self.toast_text: str = ""
         self.toast_timer: float = 0.0
+        self.toast_is_error: bool = False
 
-        # Botões
+        # Buttons
         btn_y = TOP_BAR_HEIGHT + grid_h + 4
         btn_h = 24
-        self.btn_pause = Button("⏸ Pausar", 10, btn_y, 100, btn_h)
-        self.btn_step = Button("⏭ Passo", 116, btn_y, 90, btn_h)
-        self.btn_slower = Button("◀ Lento", 212, btn_y, 90, btn_h)
-        self.btn_faster = Button("Rápido ▶", 308, btn_y, 90, btn_h)
-        self.btn_restart = Button("↻ Reiniciar", 404, btn_y, 100, btn_h)
-        self.btn_save = Button("💾 Salvar", 510, btn_y, 96, btn_h)
-        self.btn_load = Button("📂 Carregar", 612, btn_y, 100, btn_h)
+        self.btn_pause = Button("⏸ Pause", 10, btn_y, 100, btn_h)
+        self.btn_step = Button("⏭ Step", 116, btn_y, 90, btn_h)
+        self.btn_slower = Button("◀ Slower", 212, btn_y, 90, btn_h)
+        self.btn_faster = Button("Faster ▶", 308, btn_y, 90, btn_h)
+        self.btn_restart = Button("↻ Restart", 404, btn_y, 100, btn_h)
+        self.btn_save = Button("💾 Save", 510, btn_y, 96, btn_h)
+        self.btn_load = Button("📂 Load", 612, btn_y, 100, btn_h)
         self.buttons = [
             self.btn_pause, self.btn_step, self.btn_slower, self.btn_faster,
             self.btn_restart, self.btn_save, self.btn_load,
         ]
 
     def launch(self, train_episodes: int, eval_episodes: int) -> None:
-        """Ponto de entrada principal – treina e avalia com visualização."""
+        """
+        Start the GUI-driven training and evaluation run and enter the main event loop.
+        
+        Parameters:
+            train_episodes (int): Number of training episodes to run before switching to evaluation.
+            eval_episodes (int): Number of evaluation episodes to run after training.
+        """
         self.total_train_episodes = train_episodes
         self.total_eval_episodes = eval_episodes
         self.phase = "training"
@@ -236,6 +265,7 @@ class SpiderGUI:
         )
 
         decision = self.brain.act(self.observation, self.bus, sample=is_training)
+        predator_state_before = self.world.lizard.mode
         next_obs, reward, done, info = self.world.step(decision.action_idx)
 
         if is_training:
@@ -253,6 +283,7 @@ class SpiderGUI:
             next_meta=next_obs["meta"],
             info=info,
             state=self.world.state,
+            predator_state_before=predator_state_before,
             predator_state=self.world.lizard.mode,
         )
         self.observation = next_obs
@@ -265,6 +296,15 @@ class SpiderGUI:
             self.episode_done = True
 
     def _advance_episode(self) -> None:
+        """
+        Advance to the next episode and update the GUI's phase and episode state.
+        
+        During training, records the just-finished episode's reward, increments the training episode counter,
+        and either starts the next training episode or switches to evaluation mode (resetting the episode index)
+        when the configured number of training episodes is reached. During evaluation, increments the evaluation
+        episode counter and either starts the next evaluation episode or marks the run as done and pauses the GUI
+        when the configured number of evaluation episodes is reached.
+        """
         if self.phase == "training":
             self.training_rewards.append(self.episode_reward)
             self.current_episode += 1
@@ -281,7 +321,13 @@ class SpiderGUI:
                 self._start_episode()
 
     def _skip_training(self) -> None:
-        """Roda o treinamento restante sem renderizar."""
+        """
+        Run the remainder of the training phase as fast as possible without rendering.
+        
+        This repeatedly advances the environment by performing steps until each training episode finishes,
+        advances episode bookkeeping after each episode, and when all training episodes complete it starts
+        the next episode (evaluation or a new training episode depending on the phase).
+        """
         while self.phase == "training":
             while not self.episode_done:
                 self._do_step()
@@ -289,24 +335,59 @@ class SpiderGUI:
         self._start_episode()
 
     def _save_brain(self, directory: str | Path | None = None) -> None:
+        """
+        Save the current brain to disk and display a toast message indicating success or failure.
+        
+        If `directory` is provided, it is used as the target path; otherwise `DEFAULT_BRAIN_DIR` is used. On success a toast showing the save path is displayed. Expected filesystem errors are reported via toast; unexpected exceptions are allowed to propagate.
+        
+        Parameters:
+            directory (str | Path | None): Optional directory or path to save the brain. If `None`, the default brain directory is used.
+        """
         path = Path(directory) if directory else Path(DEFAULT_BRAIN_DIR)
         try:
             self.brain.save(path)
-            self._show_toast(f"Cérebro salvo em {path}/")
-        except Exception as exc:
-            self._show_toast(f"Erro ao salvar: {exc}")
+            self._show_toast(f"Brain saved to {path}/", is_error=False)
+        except OSError as exc:
+            self._show_toast(f"Save error: {exc}", is_error=True)
 
     def _load_brain(self, directory: str | Path | None = None, modules: Sequence[str] | None = None) -> None:
+        """
+        Load a saved brain state into the simulation and show a toast reporting the outcome.
+        
+        Parameters:
+            directory (str | Path | None): Filesystem path or directory containing the saved brain. If None, uses the default brain directory.
+            modules (Sequence[str] | None): Optional list of module names to load from the saved brain; if None, loads all available modules.
+        
+        Notes:
+            On success displays a toast with the list of loaded modules. Expected load failures are displayed via toast; unexpected exceptions are allowed to propagate.
+        """
         path = Path(directory) if directory else Path(DEFAULT_BRAIN_DIR)
         try:
             loaded = self.brain.load(path, modules=modules)
-            self._show_toast(f"Carregado: {', '.join(loaded)}")
-        except Exception as exc:
-            self._show_toast(f"Erro ao carregar: {exc}")
+            self._show_toast(f"Loaded: {', '.join(loaded)}", is_error=False)
+        except (
+            FileNotFoundError,
+            PermissionError,
+            OSError,
+            json.JSONDecodeError,
+            zipfile.BadZipFile,
+            KeyError,
+            ValueError,
+        ) as exc:
+            self._show_toast(f"Load error: {exc}", is_error=True)
 
-    def _show_toast(self, text: str, duration: float = 3.5) -> None:
+    def _show_toast(self, text: str, duration: float = 3.5, *, is_error: bool = False) -> None:
+        """
+        Display a transient toast notification in the GUI.
+        
+        Parameters:
+            text (str): Message to display in the toast.
+            duration (float): Time in seconds the toast remains visible (default 3.5).
+            is_error (bool): Whether the toast should render with error styling.
+        """
         self.toast_text = text
         self.toast_timer = duration
+        self.toast_is_error = is_error
 
     def _main_loop(self) -> None:
         while self.running:
@@ -373,6 +454,15 @@ class SpiderGUI:
                     self.show_visibility_overlay = not self.show_visibility_overlay
                 elif event.key == pygame.K_m:
                     self.show_smell_overlay = not self.show_smell_overlay
+                elif event.key == pygame.K_PAGEDOWN:
+                    self._scroll_panel(80)
+                elif event.key == pygame.K_PAGEUP:
+                    self._scroll_panel(-80)
+            elif event.type == pygame.MOUSEWHEEL:
+                # Scroll panel when mouse is over the panel area
+                mx, _ = pygame.mouse.get_pos()
+                if mx >= self.panel_x:
+                    self._scroll_panel(-event.y * 30)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if self.btn_pause.rect.collidepoint(event.pos):
                     self.paused = not self.paused
@@ -390,7 +480,18 @@ class SpiderGUI:
                 elif self.btn_load.rect.collidepoint(event.pos):
                     self._load_brain()
 
+    def _scroll_panel(self, delta: int) -> None:
+        """Scroll the panel content by *delta* pixels, clamping to valid range."""
+        grid_h = self.world.height * CELL_SIZE
+        max_scroll = max(0, self.panel_content_height - grid_h)
+        self.panel_scroll = max(0, min(self.panel_scroll + delta, max_scroll))
+
     def _restart(self) -> None:
+        """
+        Replaces the simulation's brain with a fresh instance using the same hyperparameters and restarts training from episode zero.
+        
+        Resets phase to "training", sets the current episode index to 0, clears accumulated training rewards, and starts a new episode with the freshly constructed brain.
+        """
         self.sim.brain = type(self.sim.brain)(
             seed=self.sim.seed,
             gamma=self.brain.gamma,
@@ -407,9 +508,14 @@ class SpiderGUI:
         self._start_episode()
 
     # -----------------------------------------------------------------------
-    # Desenho
+    # Drawing
     # -----------------------------------------------------------------------
     def _draw(self) -> None:
+        """
+        Render the entire GUI frame on the main screen surface.
+        
+        Clears the screen background and draws the top bar, world grid, right-side panel, and bottom control bar in that order.
+        """
         self.screen.fill(COLOR_PANEL_BG)
         self._draw_top_bar()
         self._draw_grid()
@@ -420,29 +526,42 @@ class SpiderGUI:
         return 1.0 if self.world.is_night() else 0.0
 
     def _draw_top_bar(self) -> None:
+        """
+        Draw the GUI's top information bar showing the simulation phase, episode progress, current tick speed, and run/pause state.
+        
+        Renders a background rectangle across the top of the window and places:
+        - a phase label ("TRAINING", "EVALUATION", or "DONE") with episode progress when applicable,
+        - the current simulation speed in ticks per second,
+        - the current run state ("PAUSED" or "RUNNING").
+        """
         rect = pygame.Rect(0, 0, self.win_w, TOP_BAR_HEIGHT)
         pygame.draw.rect(self.screen, (40, 40, 48), rect)
 
-        # Fase e episódio
+        # Phase and episode
         if self.phase == "training":
-            phase_text = f"TREINAMENTO  ep {self.current_episode + 1}/{self.total_train_episodes}"
+            phase_text = f"TRAINING  ep {self.current_episode + 1}/{self.total_train_episodes}"
         elif self.phase == "evaluation":
-            phase_text = f"AVALIAÇÃO  ep {self.current_episode + 1}/{self.total_eval_episodes}"
+            phase_text = f"EVALUATION  ep {self.current_episode + 1}/{self.total_eval_episodes}"
         else:
-            phase_text = "CONCLUÍDO"
+            phase_text = "DONE"
         label = self.font_lg.render(phase_text, True, COLOR_TEXT_TITLE)
         self.screen.blit(label, (12, 14))
 
-        # Velocidade
-        speed_text = f"Vel: {TICK_SPEEDS[self.speed_idx]} t/s"
+        # Speed
+        speed_text = f"Speed: {TICK_SPEEDS[self.speed_idx]} t/s"
         sl = self.font_sm.render(speed_text, True, COLOR_TEXT_DIM)
         self.screen.blit(sl, (self.win_w - 160, 8))
 
-        state_text = "⏸ PAUSADO" if self.paused else "▶ RODANDO"
+        state_text = "⏸ PAUSED" if self.paused else "▶ RUNNING"
         st = self.font_sm.render(state_text, True, COLOR_TEXT)
         self.screen.blit(st, (self.win_w - 160, 28))
 
     def _draw_grid(self) -> None:
+        """
+        Draws the simulation grid and all related visual overlays onto the GUI screen.
+        
+        Renders each world cell (terrain, clutter, narrow passages, shelter variants) with day/night color interpolation; draws shelter roofs and doors, grid lines, smell and visibility overlays when enabled, food items, the predator (lizard) and the spider, and a soft nighttime tint over the entire grid proportional to night intensity.
+        """
         nt = self._night_t()
         bg = _lerp_color(COLOR_BG_DAY, COLOR_BG_NIGHT, nt)
         ground = _lerp_color(COLOR_GROUND, COLOR_GROUND_NIGHT, nt)
@@ -456,7 +575,7 @@ class SpiderGUI:
 
         ox, oy = self.grid_offset_x, self.grid_offset_y
 
-        # Células
+        # Cells
         for cy in range(self.world.height):
             for cx in range(self.world.width):
                 rx = ox + cx * CELL_SIZE
@@ -527,32 +646,32 @@ class SpiderGUI:
                 overlay.fill((80, 220, 120, 42))
                 self.screen.blit(overlay, (ox + cx * CELL_SIZE, oy + cy * CELL_SIZE))
 
-        # Comida
+        # Food
         for fx, fy in self.world.food_positions:
             cx = ox + fx * CELL_SIZE + CELL_SIZE // 2
             cy_pos = oy + fy * CELL_SIZE + CELL_SIZE // 2
-            # Corpo da mosca/inseto
+            # Fly or insect body
             pygame.draw.circle(self.screen, (80, 60, 40), (cx, cy_pos), 8)
             pygame.draw.circle(self.screen, COLOR_FOOD, (cx, cy_pos), 6)
-            # Asas
+            # Wings
             pygame.draw.ellipse(self.screen, (255, 200, 200, 180),
                                 pygame.Rect(cx - 12, cy_pos - 8, 10, 6))
             pygame.draw.ellipse(self.screen, (255, 200, 200, 180),
                                 pygame.Rect(cx + 2, cy_pos - 8, 10, 6))
 
-        # Lagarto predador
+        # Predator lizard
         self._draw_lizard(
             ox + self.world.lizard.x * CELL_SIZE + CELL_SIZE // 2,
             oy + self.world.lizard.y * CELL_SIZE + CELL_SIZE // 2,
         )
 
-        # Aranha
+        # Spider
         self._draw_spider(
             ox + self.world.state.x * CELL_SIZE + CELL_SIZE // 2,
             oy + self.world.state.y * CELL_SIZE + CELL_SIZE // 2,
         )
 
-        # Overlay noturno suave
+        # Soft nighttime overlay
         if nt > 0:
             overlay = pygame.Surface((grid_w, grid_h), pygame.SRCALPHA)
             overlay.fill((0, 0, 30, int(60 * nt)))
@@ -560,6 +679,13 @@ class SpiderGUI:
 
 
     def _draw_lizard(self, cx: int, cy: int) -> None:
+        """
+        Draws a simplified lizard icon centered at the given grid pixel coordinates.
+        
+        Parameters:
+            cx (int): X coordinate of the lizard's center in pixels.
+            cy (int): Y coordinate of the lizard's center in pixels.
+        """
         tail = [(cx - 16, cy + 2), (cx - 26, cy + 6), (cx - 22, cy + 10)]
         pygame.draw.lines(self.screen, COLOR_LIZARD_BODY, False, tail, 4)
         body_rect = pygame.Rect(cx - 12, cy - 8, 24, 16)
@@ -571,7 +697,14 @@ class SpiderGUI:
         pygame.draw.circle(self.screen, COLOR_LIZARD_EYE, (cx + 12, cy - 2), 2)
 
     def _draw_spider(self, cx: int, cy: int) -> None:
-        # Pernas
+        # Legs
+        """
+        Draws a stylized spider centered at the given screen coordinates.
+        
+        Parameters:
+            cx (int): X coordinate of the spider center (pixels).
+            cy (int): Y coordinate of the spider center (pixels).
+        """
         leg_offsets = [
             (-14, -10), (-16, -3), (-15, 5), (-12, 12),
             (14, -10), (16, -3), (15, 5), (12, 12),
@@ -579,89 +712,105 @@ class SpiderGUI:
         for lx, ly in leg_offsets:
             pygame.draw.line(self.screen, COLOR_SPIDER_LEGS, (cx, cy), (cx + lx, cy + ly), 2)
 
-        # Corpo (abdômen + cefalotórax)
+        # Body (abdomen + cephalothorax)
         pygame.draw.circle(self.screen, COLOR_SPIDER_BODY, (cx, cy + 4), 9)
         pygame.draw.circle(self.screen, (60, 60, 60), (cx, cy - 4), 7)
 
-        # Olhos
+        # Eyes
         pygame.draw.circle(self.screen, COLOR_SPIDER_EYES, (cx - 3, cy - 7), 2)
         pygame.draw.circle(self.screen, COLOR_SPIDER_EYES, (cx + 3, cy - 7), 2)
 
-        # Brilho nos olhos
+        # Eye highlights
         pygame.draw.circle(self.screen, (255, 255, 255), (cx - 2, cy - 8), 1)
         pygame.draw.circle(self.screen, (255, 255, 255), (cx + 4, cy - 8), 1)
 
     def _draw_panel(self) -> None:
+        """
+        Render the right-side information panel with the spider's state, memory, diagnostics, and metrics.
+        
+        Displays labeled sections including:
+        - SPIDER STATE: tick, day/night, position, map/profile, shelter role, status bars (hunger, fatigue, sleep debt, health), counts and predator/lizard info, and overlay toggles.
+        - MEMORY: stored targets and ages for food, predator, shelter, and escape; predator vision and memory vectors when available.
+        - REWARD: last reward, episode total, top reward components, and a mini reward chart.
+        - CURRENT ACTION: available actions, their probabilities, and the currently selected action.
+        - CORTICAL MODULES: per-module name, top action and confidence, reflex info, and miniature probability bars.
+        - PROGRESS: recent training reward mean (when training data exists).
+        - METRICS: episode-level statistics such as night role distribution, predator latency and event counts, and predator state occupancy/tick counts.
+        
+        No value is returned.
+        """
         grid_h = self.world.height * CELL_SIZE
-        panel_rect = pygame.Rect(self.panel_x, self.panel_y, PANEL_WIDTH, grid_h)
-        pygame.draw.rect(self.screen, COLOR_PANEL_BG, panel_rect)
-        pygame.draw.line(self.screen, COLOR_PANEL_BORDER,
-                         (self.panel_x, self.panel_y),
-                         (self.panel_x, self.panel_y + grid_h))
+        # Create an off-screen surface tall enough for all content
+        panel_surf_h = max(grid_h, 1600)
+        panel_surf = pygame.Surface((PANEL_WIDTH, panel_surf_h))
+        panel_surf.fill(COLOR_PANEL_BG)
 
-        x0 = self.panel_x + 14
-        y = self.panel_y + 10
+        x0 = 14
+        y = 10
         pw = PANEL_WIDTH - 28
         metric_snapshot = self.episode_metrics.snapshot()
+        # Temporarily redirect drawing to panel_surf
+        _orig_screen = self.screen
+        self.screen = panel_surf
 
         # --- Status ---
-        y = self._draw_section_title("ESTADO DA ARANHA", x0, y)
+        y = self._draw_section_title("SPIDER STATE", x0, y)
         st = self.world.state
-        phase = "NOITE 🌙" if self.world.is_night() else "DIA ☀"
-        y = self._draw_text(f"Tick: {self.world.tick}   Fase: {phase}", x0, y, COLOR_TEXT)
-        y = self._draw_text(f"Posição: ({st.x}, {st.y})", x0, y, COLOR_TEXT_DIM)
-        y = self._draw_text(f"Mapa: {self.world.map_template_name}   Perfil: {self.world.reward_profile}", x0, y, COLOR_TEXT_DIM)
-        y = self._draw_text(f"Abrigo: {self.world.shelter_role_at(self.world.spider_pos())}", x0, y, COLOR_TEXT_DIM)
+        phase = "NIGHT 🌙" if self.world.is_night() else "DAY ☀"
+        y = self._draw_text(f"Tick: {self.world.tick}   Phase: {phase}", x0, y, COLOR_TEXT)
+        y = self._draw_text(f"Position: ({st.x}, {st.y})", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(f"Map: {self.world.map_template_name}   Profile: {self.world.reward_profile}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(f"Shelter: {self.world.shelter_role_at(self.world.spider_pos())}", x0, y, COLOR_TEXT_DIM)
 
         y += 4
-        y = self._draw_bar("Fome", st.hunger, x0, y, pw, COLOR_BAR_HUNGER)
-        y = self._draw_bar("Fadiga", st.fatigue, x0, y, pw, COLOR_BAR_FATIGUE)
-        y = self._draw_bar("Dívida sono", st.sleep_debt, x0, y, pw, (160, 120, 230))
-        y = self._draw_bar("Saúde", st.health, x0, y, pw, COLOR_BAR_HEALTH)
+        y = self._draw_bar("Hunger", st.hunger, x0, y, pw, COLOR_BAR_HUNGER)
+        y = self._draw_bar("Fatigue", st.fatigue, x0, y, pw, COLOR_BAR_FATIGUE)
+        y = self._draw_bar("Sleep debt", st.sleep_debt, x0, y, pw, (160, 120, 230))
+        y = self._draw_bar("Health", st.health, x0, y, pw, COLOR_BAR_HEALTH)
 
         y += 4
-        y = self._draw_text(f"Comida: {st.food_eaten}   Sono: {st.sleep_events}   Abrigos: {st.shelter_entries}", x0, y, COLOR_TEXT_DIM)
-        y = self._draw_text(f"Predador: contatos={st.predator_contacts}  avistamentos={st.predator_sightings}  fugas={st.predator_escapes}", x0, y, COLOR_TEXT_DIM)
-        y = self._draw_text(f"Lagarto: ({self.world.lizard.x}, {self.world.lizard.y})  modo={self.world.lizard.mode}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(f"Food: {st.food_eaten}   Sleep: {st.sleep_events}   Shelter entries: {st.shelter_entries}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(f"Predator: contacts={st.predator_contacts}  sightings={st.predator_sightings}  escapes={st.predator_escapes}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(f"Lizard: ({self.world.lizard.x}, {self.world.lizard.y})  mode={self.world.lizard.mode}", x0, y, COLOR_TEXT_DIM)
         y = self._draw_text(
-            f"Alvo lagarto: patrulha={self.world.lizard.patrol_target} espera={self.world.lizard.wait_target}",
+            f"Lizard target: patrol={self.world.lizard.patrol_target} wait={self.world.lizard.wait_target}",
             x0,
             y,
             COLOR_TEXT_DIM,
         )
         y = self._draw_text(
-            f"Overlays: vis={'on' if self.show_visibility_overlay else 'off'}  cheiro={'on' if self.show_smell_overlay else 'off'}",
+            f"Overlays: vision={'on' if self.show_visibility_overlay else 'off'}  smell={'on' if self.show_smell_overlay else 'off'}",
             x0,
             y,
             COLOR_TEXT_DIM,
         )
 
         y += 6
-        y = self._draw_section_title("MEMÓRIA", x0, y)
-        y = self._draw_text(f"Comida: alvo={st.food_memory.target} idade={st.food_memory.age}", x0, y, COLOR_TEXT_DIM)
-        y = self._draw_text(f"Predador: alvo={st.predator_memory.target} idade={st.predator_memory.age}", x0, y, COLOR_TEXT_DIM)
-        y = self._draw_text(f"Abrigo: alvo={st.shelter_memory.target} idade={st.shelter_memory.age}", x0, y, COLOR_TEXT_DIM)
-        y = self._draw_text(f"Fuga: alvo={st.escape_memory.target} idade={st.escape_memory.age}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_section_title("MEMORY", x0, y)
+        y = self._draw_text(f"Food: target={st.food_memory.target} age={st.food_memory.age}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(f"Predator: target={st.predator_memory.target} age={st.predator_memory.age}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(f"Shelter: target={st.shelter_memory.target} age={st.shelter_memory.age}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(f"Escape: target={st.escape_memory.target} age={st.escape_memory.age}", x0, y, COLOR_TEXT_DIM)
         if self.observation is not None:
             vision = self.observation["meta"]["vision"]
             y = self._draw_text(
-                f"Visão predador: c={vision['predator']['certainty']:.2f} occ={vision['predator']['occluded']:.0f}",
+                f"Predator vision: c={vision['predator']['certainty']:.2f} occ={vision['predator']['occluded']:.0f}",
                 x0,
                 y,
                 COLOR_TEXT_DIM,
             )
             y = self._draw_text(
-                f"Vetores: comida={self.observation['meta']['memory_vectors']['food']} abrigo={self.observation['meta']['memory_vectors']['shelter']}",
+                f"Vectors: food={self.observation['meta']['memory_vectors']['food']} shelter={self.observation['meta']['memory_vectors']['shelter']}",
                 x0,
                 y,
                 COLOR_TEXT_DIM,
             )
 
-        # --- Recompensa ---
+        # --- Reward ---
         y += 6
-        y = self._draw_section_title("RECOMPENSA", x0, y)
+        y = self._draw_section_title("REWARD", x0, y)
         rc = COLOR_REWARD_POS if self.last_reward >= 0 else COLOR_REWARD_NEG
-        y = self._draw_text(f"Última: {self.last_reward:+.3f}   Total: {self.episode_reward:.2f}", x0, y, rc)
+        y = self._draw_text(f"Last: {self.last_reward:+.3f}   Total: {self.episode_reward:.2f}", x0, y, rc)
         if self.last_info is not None:
             components = sorted(
                 self.last_info["reward_components"].items(),
@@ -674,13 +823,13 @@ class SpiderGUI:
                 color = COLOR_REWARD_POS if value >= 0.0 else COLOR_REWARD_NEG
                 y = self._draw_text(f"{name}: {value:+.3f}", x0, y, color)
 
-        # Mini gráfico de recompensa
+        # Mini reward chart
         y += 2
         y = self._draw_reward_chart(x0, y, pw, 40)
 
-        # --- Ação ---
+        # --- Current action ---
         y += 6
-        y = self._draw_section_title("AÇÃO ATUAL", x0, y)
+        y = self._draw_section_title("CURRENT ACTION", x0, y)
         if self.last_decision is not None:
             action_name = ACTIONS[self.last_decision.action_idx]
             for i, a in enumerate(ACTIONS):
@@ -690,11 +839,11 @@ class SpiderGUI:
                 marker = "▶" if is_selected else " "
                 y = self._draw_text(f" {marker} {a:<18} {prob:.3f}", x0, y, color)
         else:
-            y = self._draw_text("  (aguardando...)", x0, y, COLOR_TEXT_DIM)
+            y = self._draw_text("  (waiting...)", x0, y, COLOR_TEXT_DIM)
 
-        # --- Módulos neurais ---
+        # --- Neural modules ---
         y += 6
-        y = self._draw_section_title("MÓDULOS CORTICAIS", x0, y)
+        y = self._draw_section_title("CORTICAL MODULES", x0, y)
         if self.last_decision is not None:
             for i, result in enumerate(self.last_decision.module_results):
                 color = COLOR_MODULE_COLORS[i % len(COLOR_MODULE_COLORS)]
@@ -702,16 +851,16 @@ class SpiderGUI:
                 confidence = float(np.max(result.probs))
                 short_name = result.name.replace("_", " ").title()
                 y = self._draw_text(f"  {short_name}", x0, y, color)
-                reflex_text = "sem reflexo"
+                reflex_text = "no reflex"
                 if result.reflex is not None:
                     reflex_text = f"{result.reflex.action} · {result.reflex.reason}"
                 y = self._draw_text(
-                    f"    topo={best_action} ({confidence:.2f})  reflexo={reflex_text}",
+                    f"    top={best_action} ({confidence:.2f})  reflex={reflex_text}",
                     x0,
                     y,
                     COLOR_TEXT_DIM,
                 )
-                # Mini barras de probabilidade
+                # Mini probability bars
                 bar_y = y
                 bar_h = 8
                 for j, prob in enumerate(result.probs):
@@ -722,19 +871,19 @@ class SpiderGUI:
                     pygame.draw.rect(self.screen, color, pygame.Rect(bx, bar_y + bar_h - filled_h, bw, filled_h))
                 y = bar_y + bar_h + 4
 
-        # --- Progresso do treino ---
+        # --- Training progress ---
         if self.training_rewards:
             y += 4
-            y = self._draw_section_title("PROGRESSO", x0, y)
+            y = self._draw_section_title("PROGRESS", x0, y)
             window = self.training_rewards[-min(20, len(self.training_rewards)):]
             avg = sum(window) / len(window)
-            y = self._draw_text(f"Média últimos {len(window)} ep: {avg:.2f}", x0, y, COLOR_TEXT_DIM)
+            y = self._draw_text(f"Mean over last {len(window)} eps: {avg:.2f}", x0, y, COLOR_TEXT_DIM)
 
         y += 6
-        y = self._draw_section_title("MÉTRICAS", x0, y)
+        y = self._draw_section_title("METRICS", x0, y)
         role_dist = metric_snapshot["night_role_distribution"]
         y = self._draw_text(
-            "Noite: "
+            "Night: "
             f"out={role_dist['outside']:.2f} ent={role_dist['entrance']:.2f} "
             f"in={role_dist['inside']:.2f} deep={role_dist['deep']:.2f}",
             x0,
@@ -742,7 +891,7 @@ class SpiderGUI:
             COLOR_TEXT_DIM,
         )
         y = self._draw_text(
-            f"Latência predador: {metric_snapshot['mean_predator_response_latency']:.2f}  eventos={metric_snapshot['predator_response_events']}",
+            f"Predator latency: {metric_snapshot['mean_predator_response_latency']:.2f}  events={metric_snapshot['predator_response_events']}",
             x0,
             y,
             COLOR_TEXT_DIM,
@@ -755,6 +904,29 @@ class SpiderGUI:
                 y,
                 COLOR_TEXT_DIM,
             )
+
+        # Restore screen and blit the scrolled panel surface
+        self.screen = _orig_screen
+        self.panel_content_height = y + 10
+        # Clamp scroll
+        max_scroll = max(0, self.panel_content_height - grid_h)
+        self.panel_scroll = max(0, min(self.panel_scroll, max_scroll))
+        # Draw panel background and border on real screen
+        panel_rect = pygame.Rect(self.panel_x, self.panel_y, PANEL_WIDTH, grid_h)
+        pygame.draw.rect(self.screen, COLOR_PANEL_BG, panel_rect)
+        pygame.draw.line(self.screen, COLOR_PANEL_BORDER,
+                         (self.panel_x, self.panel_y),
+                         (self.panel_x, self.panel_y + grid_h))
+        # Blit the visible portion of the panel surface
+        source_rect = pygame.Rect(0, self.panel_scroll, PANEL_WIDTH, grid_h)
+        self.screen.blit(panel_surf, (self.panel_x, self.panel_y), source_rect)
+        # Scrollbar indicator
+        if self.panel_content_height > grid_h:
+            sb_x = self.panel_x + PANEL_WIDTH - 6
+            sb_h = max(20, int(grid_h * grid_h / self.panel_content_height))
+            sb_travel = grid_h - sb_h
+            sb_y = self.panel_y + int(sb_travel * self.panel_scroll / max_scroll) if max_scroll > 0 else self.panel_y
+            pygame.draw.rect(self.screen, (80, 80, 100), pygame.Rect(sb_x, sb_y, 4, sb_h), border_radius=2)
 
     def _draw_section_title(self, text: str, x: int, y: int) -> int:
         label = self.font_md.render(text, True, COLOR_TEXT_TITLE)
@@ -781,6 +953,20 @@ class SpiderGUI:
         return y + bar_h + 5
 
     def _draw_reward_chart(self, x: int, y: int, w: int, h: int) -> int:
+        """
+        Draws a compact reward history chart at the given panel rectangle and returns the vertical position after the chart.
+        
+        Renders a bordered chart background, a horizontal zero line, and vertical bars for recent rewards. Positive rewards are drawn above the zero line using the positive reward color; negative rewards are drawn below using the negative reward color. Bars are normalized by the largest absolute visible reward and clipped to the chart height.
+        
+        Parameters:
+            x (int): X coordinate of the chart's top-left corner.
+            y (int): Y coordinate of the chart's top-left corner.
+            w (int): Width of the chart in pixels.
+            h (int): Height of the chart in pixels.
+        
+        Returns:
+            int: The y coordinate immediately below the drawn chart (i.e., y + h).
+        """
         pygame.draw.rect(self.screen, (40, 40, 45), pygame.Rect(x, y, w, h), border_radius=3)
         if len(self.reward_history) < 2:
             return y + h
@@ -793,7 +979,7 @@ class SpiderGUI:
         if max_abs < 0.01:
             max_abs = 1.0
         mid_y = y + h // 2
-        # Linha zero
+        # Zero line
         pygame.draw.line(self.screen, COLOR_PANEL_BORDER, (x, mid_y), (x + w, mid_y))
 
         step_w = max(1, w / len(visible))
@@ -812,28 +998,33 @@ class SpiderGUI:
         return y + h
 
     def _draw_bottom_bar(self) -> None:
+        """
+        Draw the bottom control bar including interactive buttons, shortcut hints, and a transient status toast.
+        
+        Updates the pause button label to reflect current pause state, renders all bottom-bar buttons, displays left and right-aligned shortcut/help text, and if a toast is active renders a centered status message using explicit success or error styling.
+        """
         grid_h = self.world.height * CELL_SIZE
         bar_y = TOP_BAR_HEIGHT + grid_h
         rect = pygame.Rect(0, bar_y, self.win_w, BOTTOM_BAR_HEIGHT)
         pygame.draw.rect(self.screen, (40, 40, 48), rect)
 
-        self.btn_pause.text = "▶ Rodar" if self.paused else "⏸ Pausar"
+        self.btn_pause.text = "▶ Run" if self.paused else "⏸ Pause"
         for btn in self.buttons:
             btn.draw(self.screen, self.font_sm)
 
-        # Atalhos
-        help_text = "Espaço=pausar  →/N=passo  +/-=vel  V=visão  M=cheiro  S=pular treino  R=reiniciar  Q=sair"
+        # Shortcuts
+        help_text = "Space=pause  →/N=step  +/-=speed  V=vision  M=smell  S=skip training  R=restart  Q=quit"
         ht = self.font_sm.render(help_text, True, COLOR_TEXT_DIM)
         self.screen.blit(ht, (10, bar_y + 30))
 
-        help2 = "Ctrl+S=salvar cérebro  Ctrl+L=carregar cérebro"
+        help2 = "Ctrl+S=save brain  Ctrl+L=load brain"
         ht2 = self.font_sm.render(help2, True, COLOR_TEXT_DIM)
         self.screen.blit(ht2, (self.win_w - ht2.get_width() - 10, bar_y + 30))
 
-        # Toast de status
+        # Status toast
         if self.toast_timer > 0 and self.toast_text:
             alpha = min(1.0, self.toast_timer / 0.5)
-            toast_color = (100, 200, 130) if "Erro" not in self.toast_text else (220, 80, 80)
+            toast_color = (220, 80, 80) if self.toast_is_error else (100, 200, 130)
             toast_surf = self.font_md.render(self.toast_text, True, toast_color)
             tx = (self.win_w - toast_surf.get_width()) // 2
             ty = bar_y - 22
@@ -866,29 +1057,29 @@ def run_gui(
     load_modules: Sequence[str] | None = None,
 ) -> None:
     """
-    Launch a Pygame GUI for a SpiderSimulation configured with the given simulation and brain parameters.
+    Launch the interactive Pygame GUI and run training/evaluation using a configured SpiderSimulation.
     
-    Initializes a SpiderSimulation with the provided environment and learning hyperparameters, optionally loads a saved brain (or selected modules), then opens the interactive GUI and runs the specified number of training and evaluation episodes.
+    Initializes a SpiderSimulation with the provided environment and learning hyperparameters, optionally loads a saved brain (or selected modules), then starts the GUI and runs the requested number of training and evaluation episodes.
     
     Parameters:
+        width (int): Grid width of the simulated world in cells.
+        height (int): Grid height of the simulated world in cells.
         episodes (int): Number of training episodes to run before switching to evaluation.
         eval_episodes (int): Number of evaluation episodes to run during the evaluation phase.
-        width (int): World grid width in cells.
-        height (int): World grid height in cells.
-        food_count (int): Number of food items placed in the world at reset.
-        day_length (int): Duration of daytime in ticks.
-        night_length (int): Duration of nighttime in ticks.
-        max_steps (int): Maximum steps allowed per episode.
-        seed (int): Base random seed for environment and brain initialization.
-        gamma (float): Discount factor used by the brain.
-        module_lr (float): Learning rate for cortical/module parameters.
-        motor_lr (float): Learning rate for motor/action parameters.
-        module_dropout (float): Dropout probability applied to module outputs during training.
-        reward_profile (str): Named reward profile to configure reward components.
-        map_template (str): Identifier of the map template used for world layout.
-        operational_profile (str): Runtime profile name that configures simulation/brain behavior.
-        noise_profile (str | NoiseConfig): Noise configuration applied to environment stochasticity (accepts a profile name or a NoiseConfig).
-        load_brain (str | Path | None): Path to a saved brain state to load before launching; if None, no load is performed.
+        food_count (int): Number of food items spawned in the world.
+        day_length (int): Number of ticks in the day portion of the cycle.
+        night_length (int): Number of ticks in the night portion of the cycle.
+        max_steps (int): Maximum steps allowed per episode; episodes end early if this is reached.
+        seed (int): Base random seed used to initialize the simulation and episode sequence.
+        gamma (float): Discount factor used by the learning system.
+        module_lr (float): Learning rate for proposal modules.
+        motor_lr (float): Learning rate for the motor cortex.
+        module_dropout (float): Dropout probability applied to proposal modules during training.
+        reward_profile (str): Reward shaping profile name used by the simulator.
+        map_template (str): World layout template name used when constructing each episode.
+        operational_profile (str): Operational profile name controlling runtime behavior defaults.
+        noise_profile (str | NoiseConfig): Noise configuration for environment stochasticity; may be a profile name or a NoiseConfig object.
+        load_brain (str | Path | None): Path to a saved brain state to load before launching; if None, no brain is loaded.
         load_modules (Sequence[str] | None): Specific module names to load from the saved brain; if None, all modules are loaded.
     """
     sim = SpiderSimulation(
@@ -910,6 +1101,6 @@ def run_gui(
     )
     if load_brain is not None:
         loaded = sim.brain.load(load_brain, modules=load_modules)
-        print(f"Módulos carregados: {loaded}")
+        print(f"Loaded modules: {loaded}")
     gui = SpiderGUI(sim)
     gui.launch(train_episodes=episodes, eval_episodes=eval_episodes)

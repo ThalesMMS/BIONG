@@ -14,6 +14,7 @@ from .perception import (
     has_line_of_sight,
     lizard_detects_spider,
     observe_world,
+    predator_motion_salience,
     predator_visible_to_spider,
     smell_gradient,
     visible_object,
@@ -47,7 +48,7 @@ from .reward import (
     empty_reward_components,
     reward_total,
 )
-from .world_types import MemorySlot, SpiderState
+from .world_types import MemorySlot, PerceptTrace, SpiderState, TickContext, TickSnapshot
 
 
 ACTIONS: Sequence[str] = tuple(LOCOMOTION_ACTIONS)
@@ -61,10 +62,10 @@ SHELTER_ROLE_LEVELS = {
 
 
 class SpiderWorld:
-    """Mundo em grade com geometria explícita de abrigo, memórias e predador FSM.
+    """Grid world with explicit shelter geometry, memories, and a predator FSM.
 
-    A memória explícita é mantida pelo mundo e observável em traces/GUI.
-    O cérebro apenas consome esses sinais; não existe um segundo sistema de memória latente fora daqui.
+    Explicit memory is maintained by the world and is observable in traces and the GUI.
+    The brain only consumes those signals; there is no second latent memory system outside this module.
     """
 
     move_deltas = MOVE_DELTAS
@@ -115,9 +116,9 @@ class SpiderWorld:
             ValueError: If `reward_profile`, `map_template`, or a string `operational_profile` name is not recognized.
         """
         if reward_profile not in REWARD_PROFILES:
-            raise ValueError(f"Perfil de recompensa inválido: {reward_profile}")
+            raise ValueError(f"Invalid reward profile: {reward_profile}")
         if map_template not in MAP_TEMPLATE_NAMES:
-            raise ValueError(f"Template de mapa inválido: {map_template}")
+            raise ValueError(f"Invalid map template: {map_template}")
 
         self.width = width
         self.height = height
@@ -152,6 +153,8 @@ class SpiderWorld:
         self.lizard = self._spawn_lizard()
         self._last_on_shelter = False
         self._last_predator_visible = False
+        self._predator_threat_episode_active = False
+        self._predator_escape_bonus_pending = False
 
     def _reset_rngs(self, resolved_seed: int) -> None:
         """
@@ -187,7 +190,7 @@ class SpiderWorld:
             ValueError: If `name` is not a recognized map template.
         """
         if name not in MAP_TEMPLATE_NAMES:
-            raise ValueError(f"Template de mapa inválido: {name}")
+            raise ValueError(f"Invalid map template: {name}")
         self.map_template_name = name
         self.map_template = build_map_template(name, width=self.width, height=self.height)
         self.shelter_entrance_cells = set(self.map_template.shelter_entrance)
@@ -205,6 +208,162 @@ class SpiderWorld:
         """
         return empty_memory_slot()
 
+    @staticmethod
+    def _empty_percept_trace() -> PerceptTrace:
+        """
+        Create a new empty short-lived percept trace slot.
+        """
+        return PerceptTrace(target=None, age=0, certainty=0.0)
+
+    @staticmethod
+    def _heading_components_from_delta(dx: int, dy: int) -> tuple[int, int]:
+        """
+        Convert an arbitrary delta into a compact signed heading vector.
+        """
+        return int(np.sign(dx)), int(np.sign(dy))
+
+    def _heading_toward(
+        self,
+        target: Tuple[int, int] | None,
+        *,
+        origin: Tuple[int, int] | None = None,
+    ) -> tuple[int, int]:
+        """
+        Compute a signed heading vector pointing from origin to target.
+        """
+        if target is None:
+            return 0, 0
+        ox, oy = origin if origin is not None else self.spider_pos()
+        return self._heading_components_from_delta(target[0] - ox, target[1] - oy)
+
+    def _reset_heading_after_teleport(self) -> None:
+        """
+        Reinitialize heading after externally repositioning the spider.
+        """
+        heading_dx, heading_dy = self._heading_toward(
+            self.nearest_shelter_entrance(origin=self.spider_pos()),
+            origin=self.spider_pos(),
+        )
+        self.state.heading_dx = heading_dx
+        self.state.heading_dy = heading_dy
+
+    def _percept_trace_ttl(self) -> int:
+        """
+        Return the configured TTL for short percept traces.
+        """
+        return max(1, round(self.operational_profile.perception["percept_trace_ttl"]))
+
+    def _percept_trace_decay(self) -> float:
+        """
+        Return the configured multiplicative decay for short percept traces.
+        """
+        return float(np.clip(self.operational_profile.perception["percept_trace_decay"], 0.0, 1.0))
+
+    def _trace_strength(self, trace: PerceptTrace) -> float:
+        """
+        Compute the current decayed strength of a short percept trace.
+        """
+        if trace.target is None or trace.age >= self._percept_trace_ttl():
+            return 0.0
+        return float(np.clip(trace.certainty * (self._percept_trace_decay() ** trace.age), 0.0, 1.0))
+
+    def _trace_view(self, trace: PerceptTrace) -> dict[str, object]:
+        """
+        Serialize a percept trace with derived direction and strength metadata.
+        """
+        strength = self._trace_strength(trace)
+        if trace.target is None or strength <= 0.0:
+            dx = 0.0
+            dy = 0.0
+        else:
+            dx, dy, _ = self._relative(trace.target)
+        return {
+            "target": None if trace.target is None else [int(trace.target[0]), int(trace.target[1])],
+            "age": int(trace.age),
+            "certainty": float(trace.certainty),
+            "strength": float(strength),
+            "dx": float(dx),
+            "dy": float(dy),
+            "ttl": self._percept_trace_ttl(),
+            "decay": self._percept_trace_decay(),
+        }
+
+    def _advance_percept_trace(
+        self,
+        trace: PerceptTrace,
+        percept: PerceivedTarget,
+        positions: Iterable[Tuple[int, int]],
+    ) -> PerceptTrace:
+        """
+        Refresh or decay a short-lived `PerceptTrace` based on the latest raw percept.
+
+        A trace is refreshed only when a visible percept provides an explicit
+        `percept.position` that matches the candidate set and remains consistent
+        with the reported distance, current heading, and line of sight. On
+        refresh the returned trace resets to `age=0` and stores certainty
+        clipped to the unit interval; otherwise the existing trace ages or clears
+        through the normal decay path.
+        """
+        if percept.visible > 0.0 and percept.occluded <= 0.0 and percept.position is not None:
+            source = self.spider_pos()
+            candidate_set = {tuple(pos) for pos in positions}
+            percept_dist = int(percept.dist)
+            target = tuple(percept.position)
+            if target in candidate_set:
+                rel_x = int(target[0] - source[0])
+                rel_y = int(target[1] - source[1])
+                heading = (int(self.state.heading_dx), int(self.state.heading_dy))
+                heading_allows_target = heading == (0, 0) or (
+                    rel_x == 0
+                    and rel_y == 0
+                ) or (heading[0] * rel_x + heading[1] * rel_y) >= 0
+                if (
+                    self.manhattan(source, target) == percept_dist
+                    and heading_allows_target
+                    and has_line_of_sight(self, source, target)
+                ):
+                    return PerceptTrace(
+                        target=(int(target[0]), int(target[1])),
+                        age=0,
+                        certainty=float(np.clip(percept.certainty, 0.0, 1.0)),
+                    )
+
+        if trace.target is None:
+            return self._empty_percept_trace()
+        aged = PerceptTrace(
+            target=trace.target,
+            age=int(trace.age) + 1,
+            certainty=float(np.clip(trace.certainty, 0.0, 1.0)),
+        )
+        if self._trace_strength(aged) <= 0.0:
+            return self._empty_percept_trace()
+        return aged
+
+    def _refresh_perceptual_state(self) -> None:
+        """
+        Update world-owned perceptual traces after reset and each completed tick.
+        """
+        radius = visible_range(self)
+        food_view = visible_object(self, self.food_positions, radius=radius, apply_noise=False)
+        shelter_view = visible_object(self, self.shelter_cells, radius=radius, apply_noise=False)
+        predator_view = predator_visible_to_spider(self, apply_noise=False)
+
+        self.state.food_trace = self._advance_percept_trace(
+            self.state.food_trace,
+            food_view,
+            self.food_positions,
+        )
+        self.state.shelter_trace = self._advance_percept_trace(
+            self.state.shelter_trace,
+            shelter_view,
+            self.shelter_cells,
+        )
+        self.state.predator_trace = self._advance_percept_trace(
+            self.state.predator_trace,
+            predator_view,
+            [self.lizard_pos()],
+        )
+
     def _initial_spider_state(self, start_x: int, start_y: int) -> SpiderState:
         """
         Create a new SpiderState for a spider spawned or reset at the given coordinates.
@@ -218,6 +377,10 @@ class SpiderWorld:
         Returns:
             SpiderState: Initialized spider state with randomized initial physiology and defaulted counters, memory, and bookkeeping fields.
         """
+        initial_heading_dx, initial_heading_dy = self._heading_toward(
+            self.nearest_shelter_entrance(origin=(start_x, start_y)),
+            origin=(start_x, start_y),
+        )
         return SpiderState(
             x=start_x,
             y=start_y,
@@ -242,10 +405,15 @@ class SpiderWorld:
             last_action="STAY",
             last_move_dx=0,
             last_move_dy=0,
+            heading_dx=initial_heading_dx,
+            heading_dy=initial_heading_dy,
             food_memory=self._empty_memory_slot(),
             predator_memory=self._empty_memory_slot(),
             shelter_memory=self._empty_memory_slot(),
             escape_memory=self._empty_memory_slot(),
+            food_trace=self._empty_percept_trace(),
+            shelter_trace=self._empty_percept_trace(),
+            predator_trace=self._empty_percept_trace(),
         )
 
     def reset(self, seed: int | None = None) -> Dict[str, np.ndarray]:
@@ -266,6 +434,8 @@ class SpiderWorld:
         self.state = self._initial_spider_state(*self.map_template.spider_start)
         self._last_on_shelter = True
         self._last_predator_visible = False
+        self._predator_threat_episode_active = False
+        self._predator_escape_bonus_pending = False
         self.food_positions = []
         for _ in range(self.food_count):
             self.food_positions.append(self._random_food_cell())
@@ -681,6 +851,7 @@ class SpiderWorld:
             initial (bool): If True, perform an initial/baseline refresh (used on reset) that establishes memory state without normal decay.
         """
         refresh_memory(self, predator_escape=predator_escape, initial=initial)
+        self._refresh_perceptual_state()
 
     def observe(self) -> Dict[str, np.ndarray]:
         """
@@ -734,7 +905,7 @@ class SpiderWorld:
             positions = [self.lizard_pos()]
             radius = self.predator_smell_range
         else:
-            raise ValueError(f"Campo de cheiro desconhecido: {kind}")
+            raise ValueError(f"Unknown scent field: {kind}")
         field: List[List[float]] = []
         for y in range(self.height):
             row: List[float] = []
@@ -861,6 +1032,8 @@ class SpiderWorld:
         self.state.x, self.state.y = target
         self.state.last_move_dx = dx if moved else 0
         self.state.last_move_dy = dy if moved else 0
+        if moved and (dx != 0 or dy != 0):
+            self.state.heading_dx, self.state.heading_dy = self._heading_components_from_delta(dx, dy)
         return moved
 
     def _move_spider_action(self, action_name: str) -> bool:
@@ -878,10 +1051,13 @@ class SpiderWorld:
 
     def _apply_motor_noise(self, action_name: str) -> tuple[str, bool]:
         """
-        Possibly replaces the intended action with a randomly selected alternative based on the configured motor noise probability.
+        Selects the action to execute, optionally replacing the intended action with a randomly chosen alternative according to the configured motor-noise probability.
+        
+        Parameters:
+            action_name (str): The intended action name.
         
         Returns:
-            tuple[str, bool]: A pair `(executed_action, motor_noise_applied)` where `executed_action` is the action that should be executed (either the original `action_name` or a randomly chosen alternative) and `motor_noise_applied` is `True` if the action was flipped due to motor noise, `False` otherwise.
+            tuple[str, bool]: (executed_action, motor_noise_applied) where `executed_action` is the action to perform and `motor_noise_applied` is `True` if the action was replaced due to motor noise, `False` otherwise.
         """
         flip_prob = float(np.clip(self.noise_profile.motor["action_flip_prob"], 0.0, 1.0))
         if flip_prob <= 0.0 or len(ACTIONS) <= 1:
@@ -892,7 +1068,13 @@ class SpiderWorld:
         index = int(self.motor_rng.integers(0, len(alternatives)))
         return alternatives[index], True
 
-    def _apply_predator_contact(self, reward_components: Dict[str, float], info: Dict[str, object]) -> None:
+    def _apply_predator_contact(
+        self,
+        reward_components: Dict[str, float],
+        info: Dict[str, object],
+        *,
+        tick_context: TickContext | None = None,
+    ) -> None:
         """
         Apply the effects of an immediate predator contact to the spider, updating rewards and diagnostics.
         
@@ -902,7 +1084,9 @@ class SpiderWorld:
             reward_components (Dict[str, float]): Mapping of reward component names to their current values; this function will modify entries related to predator contact.
             info (Dict[str, object]): Diagnostic information dictionary that will be populated or updated with predator-contact flags and metadata.
         """
-        apply_predator_contact(self, reward_components, info)
+        apply_predator_contact(self, reward_components, info, tick_context=tick_context)
+        if tick_context is not None:
+            tick_context.predator_contact_applied = True
 
     def _apply_wakefulness(self, *, night: bool, exposed: bool, interrupted_rest: bool) -> None:
         """
@@ -926,6 +1110,401 @@ class SpiderWorld:
         """
         apply_restoration(self, sleep_phase, night=night, shelter_role=shelter_role)
 
+    def _capture_tick_snapshot(self) -> TickSnapshot:
+        """
+        Capture a lightweight snapshot of the current tick state for constructing a TickContext.
+        
+        The snapshot records current tick and positions, recent-distance metrics to food/shelter/predator,
+        whether the predator was visible, the spider's shelter membership and role, night flag, and the
+        current rest streak.
+        
+        Returns:
+            TickSnapshot: Fields populated are
+                - tick: current tick as int
+                - spider_pos: (x, y) spider position
+                - lizard_pos: (x, y) lizard position
+                - was_on_shelter: True if spider was on any shelter cell
+                - prev_shelter_role: shelter role string at the spider position
+                - prev_food_dist: Manhattan distance to nearest food as int
+                - prev_shelter_dist: Manhattan distance to nearest (deep or any) shelter as int
+                - prev_predator_dist: Manhattan distance to the lizard as int
+                - prev_predator_visible: True if predator visibility confidence > 0.5
+                - night: True if it is currently night
+                - rest_streak: current rest streak as int
+        """
+        _, prev_food_dist = self.nearest(self.food_positions)
+        _, prev_shelter_dist = self.nearest(self.shelter_deep_cells or self.shelter_cells)
+        prev_predator_dist = self.manhattan(self.spider_pos(), self.lizard_pos())
+        visibility_threshold = self.operational_profile.reward["predator_visibility_threshold"]
+        prev_predator_visible = self._predator_visible_to_spider().visible > visibility_threshold
+        return TickSnapshot(
+            tick=int(self.tick),
+            spider_pos=self.spider_pos(),
+            lizard_pos=self.lizard_pos(),
+            was_on_shelter=bool(self.on_shelter()),
+            prev_shelter_role=self.shelter_role_at(self.spider_pos()),
+            prev_food_dist=int(prev_food_dist),
+            prev_shelter_dist=int(prev_shelter_dist),
+            prev_predator_dist=int(prev_predator_dist),
+            prev_predator_visible=bool(prev_predator_visible),
+            night=bool(self.is_night()),
+            rest_streak=int(self.state.rest_streak),
+        )
+
+    def _new_tick_context(self, action_idx: int) -> TickContext:
+        """
+        Create and initialize a TickContext for a new simulation tick.
+        
+        The context contains the intended and executed actions (after motor-noise resolution), a pre-tick snapshot, an empty reward-components container, an initial info dictionary (booleans and placeholders for events), and records the initial `"pre_tick"` and `"action_resolved"` events on the context.
+        
+        Parameters:
+            action_idx (int): Index of the chosen action in ACTIONS.
+        
+        Returns:
+            TickContext: A fully initialized tick context ready for the per-stage pipeline.
+        """
+        if isinstance(action_idx, bool) or not isinstance(action_idx, (int, np.integer)):
+            raise TypeError(
+                f"Invalid action_idx {action_idx!r}; expected an integer in the range "
+                f"[0, {len(ACTIONS) - 1}]"
+            )
+        action_idx = int(action_idx)
+        if not 0 <= action_idx < len(ACTIONS):
+            raise ValueError(
+                f"Invalid action_idx {action_idx!r}; expected an integer in the range "
+                f"[0, {len(ACTIONS) - 1}]"
+            )
+        intended_action = ACTIONS[action_idx]
+        executed_action, motor_noise_applied = self._apply_motor_noise(intended_action)
+        snapshot = self._capture_tick_snapshot()
+        context = TickContext(
+            action_idx=int(action_idx),
+            intended_action=intended_action,
+            executed_action=executed_action,
+            motor_noise_applied=bool(motor_noise_applied),
+            snapshot=snapshot,
+            reward_components=self._empty_reward_components(),
+            info={
+                "action": executed_action,
+                "intended_action": intended_action,
+                "executed_action": executed_action,
+                "motor_noise_applied": bool(motor_noise_applied),
+                "ate": False,
+                "slept": False,
+                "pain": False,
+                "predator_contact": False,
+                "predator_transition": None,
+                "distance_deltas": {},
+            },
+        )
+        context.record_event("pre_tick", "snapshot", **snapshot.to_payload())
+        context.record_event(
+            "action",
+            "action_resolved",
+            action_index=int(action_idx),
+            intended_action=intended_action,
+            executed_action=executed_action,
+            motor_noise_applied=bool(motor_noise_applied),
+        )
+        return context
+
+    def _run_action_stage(self, context: TickContext) -> None:
+        """
+        Apply the current tick's resolved movement to the spider and record the resulting movement event.
+        
+        Updates context.moved to indicate whether the spider changed cells, moves the spider according to context.executed_action, and records an "action"/"movement_applied" event containing the spider's new position and last move deltas.
+        
+        Parameters:
+            context (TickContext): Tick context to update with the movement outcome and event entry.
+        """
+        context.moved = bool(self._move_spider_action(context.executed_action))
+        context.record_event(
+            "action",
+            "movement_applied",
+            moved=bool(context.moved),
+            spider_pos=[int(self.state.x), int(self.state.y)],
+            last_move_dx=int(self.state.last_move_dx),
+            last_move_dy=int(self.state.last_move_dy),
+        )
+
+    def _run_terrain_and_wakefulness_stage(self, context: TickContext) -> None:
+        """
+        Apply action and terrain effects, compute predator threat and exposure, and update wakefulness-related physiology and rewards for the current tick.
+        
+        Updates the provided TickContext with: `terrain_now`, `predator_threat`, `interrupted_rest`, and `exposed_at_night`. Calls wakefulness/restoration logic, increments `state.fatigue` and adjusts `context.reward_components` when exposed at night, applies pressure penalties, and records a terrain/wakefulness event in the context's event log.
+        
+        Parameters:
+            context (TickContext): Per-tick context to be mutated with terrain, threat, rest/exposure flags, and reward updates.
+        """
+        cfg = self.reward_config
+        context.terrain_now = apply_action_and_terrain_effects(
+            self,
+            action_name=context.executed_action,
+            moved=context.moved,
+            reward_components=context.reward_components,
+        )
+        context.predator_threat = bool(
+            compute_predator_threat(
+                self,
+                prev_predator_visible=context.snapshot.prev_predator_visible,
+                prev_predator_dist=context.snapshot.prev_predator_dist,
+            )
+        )
+        context.interrupted_rest = bool(
+            context.snapshot.rest_streak > 0
+            and (
+                context.executed_action != "STAY"
+                or context.predator_threat
+                or context.snapshot.prev_shelter_role == "outside"
+            )
+        )
+        context.exposed_at_night = bool(
+            context.snapshot.night and self.shelter_role_at(self.spider_pos()) == "outside"
+        )
+        self._apply_wakefulness(
+            night=context.snapshot.night,
+            exposed=context.exposed_at_night,
+            interrupted_rest=context.interrupted_rest,
+        )
+        if context.exposed_at_night:
+            self.state.fatigue += cfg["night_exposure_fatigue"]
+            context.reward_components["night_exposure"] -= cfg["night_exposure_reward"]
+        apply_pressure_penalties(self, context.reward_components)
+        context.record_event(
+            "terrain_and_wakefulness",
+            "effects_applied",
+            terrain=context.terrain_now,
+            predator_threat=bool(context.predator_threat),
+            interrupted_rest=bool(context.interrupted_rest),
+            exposed_at_night=bool(context.exposed_at_night),
+            sleep_debt=round(float(self.state.sleep_debt), 6),
+            fatigue=round(float(self.state.fatigue), 6),
+        )
+
+    def _run_immediate_predator_contact_stage(self, context: TickContext) -> None:
+        """
+        Check for immediate predator contact and handle it if present.
+        
+        If the spider occupies the same cell as the lizard, applies predator-contact effects by calling
+        _internal handler with the tick context's reward components and info. If no contact occurs,
+        records a `"predator_contact"` `"contact_check"` event on the provided TickContext.
+        
+        Parameters:
+        	context (TickContext): Per-tick context containing `reward_components`, `info`, and event logging.
+        """
+        if self.spider_pos() == self.lizard_pos() and not context.predator_contact_applied:
+            self._apply_predator_contact(
+                context.reward_components,
+                context.info,
+                tick_context=context,
+            )
+            context.predator_contact_applied = True
+            return
+        context.record_event(
+            "predator_contact",
+            "contact_check",
+            predator_contact=bool(context.predator_contact_applied),
+        )
+
+    def _run_autonomic_stage(self, context: TickContext) -> None:
+        """
+        Resolve and apply autonomic behaviors for the current tick, update rewards and info, and record an autonomic summary event.
+        
+        This evaluates feeding, sleeping, and other autonomic responses using the tick's executed action, predator threat, and day/night status; it updates context.reward_components and context.info accordingly. If the spider remains in place ("STAY") while not on shelter and not on food, an idle-open penalty is applied to reward_components and logged. Finally, an event summarizing whether the agent ate, slept, the current sleep phase, and rest streak is recorded on the context.
+        
+        Parameters:
+            context (TickContext): Per-tick mutable context containing executed_action, predator_threat, snapshot (including night flag), reward_components, info, and event recording utilities.
+        """
+        resolve_autonomic_behaviors(
+            self,
+            action_name=context.executed_action,
+            predator_threat=context.predator_threat,
+            night=context.snapshot.night,
+            reward_components=context.reward_components,
+            info=context.info,
+            tick_context=context,
+        )
+
+        if (
+            not self.on_shelter()
+            and not context.fed_this_tick
+            and not self.on_food()
+            and context.executed_action == "STAY"
+        ):
+            context.reward_components["action_cost"] -= self.reward_config["idle_open_penalty"]
+            context.record_event(
+                "autonomic",
+                "idle_open_penalty",
+                penalty=round(float(self.reward_config["idle_open_penalty"]), 6),
+            )
+
+        context.record_event(
+            "autonomic",
+            "autonomic_summary",
+            ate=bool(context.info["ate"]),
+            slept=bool(context.info["slept"]),
+            sleep_phase=self.state.sleep_phase,
+            rest_streak=int(self.state.rest_streak),
+        )
+
+    def _run_predator_update_stage(self, context: TickContext) -> None:
+        """
+        Advance the predator one update step, record its movement/mode transition in the tick context, and apply contact effects if the predator and spider collide.
+        
+        Parameters:
+            context (TickContext): Per-tick context that will be updated with:
+                - `predator_moved` (bool): whether the predator moved this tick.
+                - `info["predator_transition"]` (optional): dict with `"from"` and `"to"` modes when a mode change occurred.
+                - an event entry named `"predator_update"` added via `context.record_event`.
+                - `reward_components` and `info` may be mutated if predator contact occurs.
+        """
+        predator_mode_before = self.lizard.mode
+        context.predator_moved = bool(self.predator_controller.update(self))
+        predator_mode_after = self.lizard.mode
+        if predator_mode_before != predator_mode_after:
+            context.info["predator_transition"] = {
+                "from": predator_mode_before,
+                "to": predator_mode_after,
+            }
+        context.info["predator_moved"] = bool(context.predator_moved)
+        context.record_event(
+            "predator_update",
+            "predator_update",
+            moved=bool(context.predator_moved),
+            mode_before=predator_mode_before,
+            mode_after=predator_mode_after,
+            transition=context.info["predator_transition"],
+            lizard_pos=[int(self.lizard.x), int(self.lizard.y)],
+        )
+        if self.spider_pos() == self.lizard_pos() and not context.predator_contact_applied:
+            self._apply_predator_contact(
+                context.reward_components,
+                context.info,
+                tick_context=context,
+            )
+            context.predator_contact_applied = True
+
+    def _run_reward_stage(self, context: TickContext) -> None:
+        """
+        Apply progress- and event-based rewards to the current tick context.
+        
+        This updates the provided TickContext's reward components and any reward-derived flags via apply_progress_and_event_rewards. The final reward-summary event is emitted later, after postprocess adds any remaining reward components.
+        
+        Parameters:
+            context (TickContext): Per-tick context object whose reward_components and event log will be updated.
+        """
+        apply_progress_and_event_rewards(self, tick_context=context)
+
+    def _run_postprocess_stage(self, context: TickContext) -> None:
+        """
+        Finalize per-tick bookkeeping: apply state decays and homeostasis penalties, enforce state bounds, compute and store rewards, determine episode termination, and record postprocess info.
+        
+        This mutates the world and tick context: it decays recent contact and pain, applies homeostasis penalties to `context.reward_components`, clips physiological state values, sets `context.done` when health is <= 0, applies a death penalty, computes `context.reward` from reward components, updates cumulative state fields (`last_reward`, `total_reward`, `steps_alive`, `last_action`), updates internal visibility/shelter flags, advances `self.tick`, and records a `"postprocess_complete"` event on the context.
+        
+        Parameters:
+            context (TickContext): The per-tick context containing reward components, info flags, and event logging that will be updated with postprocess results.
+        """
+        if not context.info["predator_contact"]:
+            self.state.recent_contact *= 0.35
+        self.state.recent_pain *= 0.78
+
+        apply_homeostasis_penalties(self, context.reward_components)
+        clip_state(self)
+
+        context.done = bool(self.state.health <= 0.0)
+        if context.done:
+            context.reward_components["death_penalty"] -= 5.0
+
+        context.reward = float(self._reward_total(context.reward_components))
+        self.state.last_reward = context.reward
+        self.state.total_reward += context.reward
+        self.state.steps_alive += 1
+        self.state.last_action = context.executed_action
+        on_shelter_now = self.on_shelter()
+        self._last_on_shelter = on_shelter_now
+        self._last_predator_visible = bool(context.predator_visible_now)
+        self.tick += 1
+        context.record_event(
+            "reward",
+            "reward_summary",
+            predator_escape=bool(context.predator_escape),
+            predator_visible_now=bool(context.predator_visible_now),
+            reward=round(float(context.reward), 6),
+            reward_components=self._copy_reward_components(context.reward_components),
+        )
+        context.record_event(
+            "postprocess",
+            "postprocess_complete",
+            reward=round(float(context.reward), 6),
+            done=bool(context.done),
+            health=round(float(self.state.health), 6),
+            tick=int(self.tick),
+        )
+
+    def _run_memory_stage(self, context: TickContext) -> None:
+        """
+        Update episodic memory slots and record a memory refresh event on the tick context.
+        
+        Refreshes the world's food, predator, shelter, and escape memory slots, passing the
+        tick context's `predator_escape` flag to the memory update logic. Records a
+        `"memory_refreshed"` event on `context` that includes whether a predator escape
+        occurred and the current memory targets (each as a two-element [x, y] list or
+        `None` if absent).
+        
+        Parameters:
+            context (TickContext): Per-tick context used to read `predator_escape` and to
+                record the memory refresh event.
+        """
+        def _target(slot: MemorySlot) -> list[int] | None:
+            return list(slot.target) if slot.target is not None else None
+
+        self.refresh_memory(predator_escape=context.predator_escape)
+        context.record_event(
+            "memory",
+            "memory_refreshed",
+            predator_escape=bool(context.predator_escape),
+            food_memory_target=_target(self.state.food_memory),
+            predator_memory_target=_target(self.state.predator_memory),
+            shelter_memory_target=_target(self.state.shelter_memory),
+            escape_memory_target=_target(self.state.escape_memory),
+            tick=int(self.tick),
+        )
+
+    def _finalize_step_result(
+        self,
+        context: TickContext,
+    ) -> tuple[Dict[str, np.ndarray], float, bool, Dict[str, object]]:
+        """
+        Finalize the current tick by producing the next observation, recording a final event, and assembling the step result.
+        
+        Parameters:
+            context (TickContext): Per-tick context containing accumulated reward, done flag, event log, and the info dictionary to populate.
+        
+        Returns:
+            tuple:
+                - next_obs (Dict[str, np.ndarray]): Observation tensors for the next state.
+                - reward (float): Scalar reward for the tick.
+                - done (bool): Whether the episode has terminated.
+                - info (Dict[str, object]): Diagnostic dictionary including at least:
+                    - "reward_components": copied components breakdown,
+                    - "state": serialized spider/world state,
+                    - "predator_escape": boolean flag,
+                    - "event_log": serialized event log.
+        """
+        next_obs = self.observe()
+        context.record_event(
+            "finalize",
+            "tick_complete",
+            reward=round(float(context.reward), 6),
+            done=bool(context.done),
+            tick=int(self.tick),
+        )
+        context.info["reward_components"] = self._copy_reward_components(context.reward_components)
+        context.info["state"] = self.state_dict()
+        context.info["predator_escape"] = bool(context.predator_escape)
+        context.info["event_log"] = context.serialized_event_log()
+        return next_obs, float(context.reward), bool(context.done), context.info
+
     def step(self, action_idx: int) -> tuple[Dict[str, np.ndarray], float, bool, Dict[str, object]]:
         """
         Advance the simulation by one tick executing the selected action and updating world, spider, and predator state.
@@ -947,128 +1526,16 @@ class SpiderWorld:
                 - "reward_components": per-component reward breakdown used to compute `reward`
                 - "state": serialized snapshot of the current spider/world state
         """
-        intended_action = ACTIONS[action_idx]
-        executed_action, motor_noise_applied = self._apply_motor_noise(intended_action)
-        cfg = self.reward_config
-        was_on_shelter = self.on_shelter()
-        prev_shelter_role = self.shelter_role_at(self.spider_pos())
-        _, prev_food_dist = self.nearest(self.food_positions)
-        _, prev_shelter_dist = self.nearest(self.shelter_deep_cells or self.shelter_cells)
-        prev_predator_dist = self.manhattan(self.spider_pos(), self.lizard_pos())
-        prev_predator_visible = self._predator_visible_to_spider().visible > 0.5
-        night = self.is_night()
-        reward_components = self._empty_reward_components()
-        info: Dict[str, object] = {
-            "action": executed_action,
-            "intended_action": intended_action,
-            "executed_action": executed_action,
-            "motor_noise_applied": bool(motor_noise_applied),
-            "ate": False,
-            "slept": False,
-            "pain": False,
-            "predator_contact": False,
-            "predator_transition": None,
-            "distance_deltas": {},
-        }
-
-        moved = self._move_spider_action(executed_action)
-        terrain_now = apply_action_and_terrain_effects(
-            self,
-            action_name=executed_action,
-            moved=moved,
-            reward_components=reward_components,
-        )
-        predator_threat = compute_predator_threat(
-            self,
-            prev_predator_visible=prev_predator_visible,
-            prev_predator_dist=prev_predator_dist,
-        )
-        interrupted_rest = self.state.rest_streak > 0 and (
-            executed_action != "STAY" or predator_threat or prev_shelter_role == "outside"
-        )
-        exposed_at_night = night and self.shelter_role_at(self.spider_pos()) == "outside"
-        self._apply_wakefulness(
-            night=night,
-            exposed=bool(exposed_at_night),
-            interrupted_rest=bool(interrupted_rest),
-        )
-        if exposed_at_night:
-            self.state.fatigue += cfg["night_exposure_fatigue"]
-            reward_components["night_exposure"] -= cfg["night_exposure_reward"]
-
-        apply_pressure_penalties(self, reward_components)
-
-        if self.spider_pos() == self.lizard_pos():
-            self._apply_predator_contact(reward_components, info)
-
-        resolve_autonomic_behaviors(
-            self,
-            action_name=executed_action,
-            predator_threat=predator_threat,
-            night=night,
-            reward_components=reward_components,
-            info=info,
-        )
-
-        if not self.on_shelter() and not self.on_food() and executed_action == "STAY":
-            reward_components["action_cost"] -= cfg["idle_open_penalty"]
-
-        predator_mode_before = self.lizard.mode
-        predator_moved = self.predator_controller.update(self)
-        predator_mode_after = self.lizard.mode
-        if predator_mode_before != predator_mode_after:
-            info["predator_transition"] = {
-                "from": predator_mode_before,
-                "to": predator_mode_after,
-            }
-        info["predator_moved"] = bool(predator_moved)
-        if self.spider_pos() == self.lizard_pos():
-            self._apply_predator_contact(reward_components, info)
-
-        # resolve_autonomic_behaviors() may already have reset sleep state; reward processing
-        # intentionally rechecks/reset it here so predator-threat handling can override rest.
-        predator_escape, predator_visible_now = apply_progress_and_event_rewards(
-            self,
-            action_name=executed_action,
-            moved=moved,
-            night=night,
-            terrain_now=terrain_now,
-            was_on_shelter=was_on_shelter,
-            prev_food_dist=prev_food_dist,
-            prev_shelter_dist=prev_shelter_dist,
-            prev_predator_dist=prev_predator_dist,
-            prev_predator_visible=prev_predator_visible,
-            reward_components=reward_components,
-            info=info,
-        )
-
-        if not info["predator_contact"]:
-            self.state.recent_contact *= 0.35
-        self.state.recent_pain *= 0.78
-
-        apply_homeostasis_penalties(self, reward_components)
-        clip_state(self)
-
-        done = self.state.health <= 0.0
-        if done:
-            reward_components["death_penalty"] -= 5.0
-
-        reward = self._reward_total(reward_components)
-        self.state.last_reward = reward
-        self.state.total_reward += reward
-        self.state.steps_alive += 1
-        self.state.last_action = executed_action
-        on_shelter_now = self.on_shelter()
-        self._last_on_shelter = on_shelter_now
-        self._last_predator_visible = predator_visible_now
-        self.tick += 1
-        self.refresh_memory(predator_escape=predator_escape)
-
-        next_obs = self.observe()
-        info["reward_components"] = self._copy_reward_components(reward_components)
-        info["state"] = self.state_dict()
-        info["predator_escape"] = predator_escape
-        return next_obs, float(reward), bool(done), info
+        context = self._new_tick_context(action_idx)
+        self._run_action_stage(context)
+        self._run_terrain_and_wakefulness_stage(context)
+        self._run_immediate_predator_contact_stage(context)
+        self._run_autonomic_stage(context)
+        self._run_predator_update_stage(context)
+        self._run_reward_stage(context)
+        self._run_postprocess_stage(context)
+        self._run_memory_stage(context)
+        return self._finalize_step_result(context)
 
     def state_dict(self) -> Dict[str, object]:
         """
@@ -1081,11 +1548,11 @@ class SpiderWorld:
         """
         state = asdict(self.state)
         for key in ("food_memory", "predator_memory", "shelter_memory", "escape_memory"):
-            slot = state[key]
             ttl_name = key.replace("_memory", "")
-            if key == "shelter_memory":
-                ttl_name = "shelter"
             state[key]["ttl"] = MEMORY_TTLS[ttl_name]
+        for key in ("food_trace", "shelter_trace", "predator_trace"):
+            state[key] = self._trace_view(getattr(self.state, key))
+        predator_view = predator_visible_to_spider(self, apply_noise=False)
         state.update(
             {
                 "lizard_x": self.lizard.x,
@@ -1111,6 +1578,7 @@ class SpiderWorld:
                 "reward_profile": self.reward_profile,
                 "noise_profile": self.noise_profile.name,
                 "episode_seed": self.episode_seed,
+                "predator_motion_salience": predator_motion_salience(self, predator_view=predator_view),
             }
         )
         return state

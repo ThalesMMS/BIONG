@@ -4,7 +4,8 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Sequence
+from types import MappingProxyType
+from typing import Any, Dict, List, Mapping, Sequence
 
 import numpy as np
 
@@ -13,6 +14,7 @@ from .bus import MessageBus
 from .interfaces import (
     ACTION_CONTEXT_INTERFACE,
     ACTION_TO_INDEX,
+    MODULE_INTERFACE_BY_NAME,
     MODULE_INTERFACES,
     MOTOR_CONTEXT_INTERFACE,
     architecture_signature,
@@ -22,6 +24,105 @@ from .modules import MODULE_HIDDEN_DIMS, CorticalModuleBank, ModuleResult, Refle
 from .nn import MotorNetwork, ProposalNetwork, one_hot, softmax
 from .operational_profiles import OperationalProfile, resolve_operational_profile
 from .world import ACTIONS
+
+
+@dataclass(frozen=True)
+class ValenceScore:
+    name: str
+    score: float
+    evidence: Dict[str, float]
+
+    def to_payload(self) -> Dict[str, object]:
+        """
+        Serialize the valence score into a JSON-serializable payload with rounded numeric values.
+        
+        Returns:
+            payload (Dict[str, object]): Dictionary with keys:
+                - "name": the valence name (str).
+                - "score": the score rounded to six decimal places (float).
+                - "evidence": a dict mapping each evidence key (sorted) to its value rounded to six decimal places (float).
+        """
+        return {
+            "name": self.name,
+            "score": round(float(self.score), 6),
+            "evidence": {
+                key: round(float(value), 6)
+                for key, value in sorted(self.evidence.items())
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ArbitrationDecision:
+    strategy: str
+    winning_valence: str
+    valence_scores: Dict[str, float]
+    module_gates: Dict[str, float]
+    suppressed_modules: List[str]
+    evidence: Dict[str, Dict[str, float]]
+    intent_before_gating_idx: int
+    intent_after_gating_idx: int
+    module_contribution_share: Dict[str, float] = field(default_factory=dict)
+    dominant_module: str = ""
+    dominant_module_share: float = 0.0
+    effective_module_count: float = 0.0
+    module_agreement_rate: float = 0.0
+    module_disagreement_rate: float = 0.0
+
+    def to_payload(self) -> Dict[str, object]:
+        """
+        Convert the arbitration decision into a JSON-serializable dictionary suitable for telemetry or storage.
+
+        The returned payload includes the arbitration strategy and winning valence, per-valence normalized scores and per-module gate weights (both rounded to six decimal places), the list of suppressed module names, structured evidence dictionaries with values rounded to six decimal places, and the action names corresponding to the intent indices before and after gating.
+        
+        Returns:
+            payload (Dict[str, object]): Dictionary with keys:
+                - "strategy": arbitration strategy name.
+                - "winning_valence": name of the selected valence.
+                - "valence_scores": mapping of valence name -> score (rounded to 6 decimals).
+                - "module_gates": mapping of module name -> gate weight (rounded to 6 decimals).
+                - "module_contribution_share": mapping of module name -> normalized contribution share.
+                - "dominant_module": name of the dominant proposal source.
+                - "dominant_module_share": dominant proposal contribution share.
+                - "effective_module_count": effective number of active proposal sources.
+                - "module_agreement_rate": fraction of active modules whose gated argmax matches the final intent.
+                - "module_disagreement_rate": complement of module_agreement_rate.
+                - "suppressed_modules": list of suppressed module names.
+                - "evidence": mapping of valence name -> evidence dict (each value rounded to 6 decimals).
+                - "intent_before_gating": action name for the intent index before gating.
+                - "intent_after_gating": action name for the intent index after gating.
+        """
+        return {
+            "strategy": self.strategy,
+            "winning_valence": self.winning_valence,
+            "valence_scores": {
+                key: round(float(value), 6)
+                for key, value in sorted(self.valence_scores.items())
+            },
+            "module_gates": {
+                key: round(float(value), 6)
+                for key, value in sorted(self.module_gates.items())
+            },
+            "module_contribution_share": {
+                key: round(float(value), 6)
+                for key, value in sorted(self.module_contribution_share.items())
+            },
+            "dominant_module": self.dominant_module,
+            "dominant_module_share": round(float(self.dominant_module_share), 6),
+            "effective_module_count": round(float(self.effective_module_count), 6),
+            "module_agreement_rate": round(float(self.module_agreement_rate), 6),
+            "module_disagreement_rate": round(float(self.module_disagreement_rate), 6),
+            "suppressed_modules": list(self.suppressed_modules),
+            "evidence": {
+                key: {
+                    inner_key: round(float(inner_value), 6)
+                    for inner_key, inner_value in sorted(values.items())
+                }
+                for key, values in sorted(self.evidence.items())
+            },
+            "intent_before_gating": ACTIONS[self.intent_before_gating_idx],
+            "intent_after_gating": ACTIONS[self.intent_after_gating_idx],
+        }
 
 
 @dataclass
@@ -44,20 +145,76 @@ class BrainStep:
     action_center_input: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
     motor_input: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
     policy_mode: str = "normal"
+    arbitration_decision: ArbitrationDecision | None = None
 
 
 class SpiderBrain:
-    """Cérebro neuro-modular com propostas locomotoras padronizadas por interface.
+    """Neuro-modular brain with interface-standardized locomotion proposals.
 
-    A memória explícita permanece no mundo e chega aqui apenas como observação nomeada.
-    O mundo continua dono do estado ecológico e da memória explícita; `interfaces.py`
-    define os contratos nomeados; `modules.py` executa apenas os propositores neurais.
-    Aqui ficam os reflexos locais interpretáveis e a arbitragem motora final.
+    Explicit memory remains in the world and arrives here only as named observations.
+    The world remains the owner of ecological state and explicit memory; `interfaces.py`
+    defines the named contracts, while `modules.py` runs only the neural proposers.
+    This is where the interpretable local reflexes and final motor arbitration live.
     """
 
-    ARCHITECTURE_VERSION = 8
+    ARCHITECTURE_VERSION = 9
     MONOLITHIC_POLICY_NAME = "monolithic_policy"
     MONOLITHIC_HIDDEN_DIM = sum(MODULE_HIDDEN_DIMS.values())
+    VALENCE_ORDER = ("threat", "hunger", "sleep", "exploration")
+    MODULE_VALENCE_ROLES = MappingProxyType(
+        {
+            "alert_center": "threat",
+            "hunger_center": "hunger",
+            "sleep_center": "sleep",
+            "visual_cortex": "support",
+            "sensory_cortex": "support",
+            MONOLITHIC_POLICY_NAME: "integrated_policy",
+        }
+    )
+    PRIORITY_GATING_WEIGHTS = MappingProxyType(
+        {
+            "threat": MappingProxyType(
+                {
+                    "alert_center": 1.0,
+                    "hunger_center": 0.18,
+                    "sleep_center": 0.14,
+                    "visual_cortex": 0.58,
+                    "sensory_cortex": 0.68,
+                    MONOLITHIC_POLICY_NAME: 1.0,
+                }
+            ),
+            "hunger": MappingProxyType(
+                {
+                    "alert_center": 0.32,
+                    "hunger_center": 1.0,
+                    "sleep_center": 0.34,
+                    "visual_cortex": 0.74,
+                    "sensory_cortex": 0.7,
+                    MONOLITHIC_POLICY_NAME: 1.0,
+                }
+            ),
+            "sleep": MappingProxyType(
+                {
+                    "alert_center": 0.3,
+                    "hunger_center": 0.24,
+                    "sleep_center": 1.0,
+                    "visual_cortex": 0.48,
+                    "sensory_cortex": 0.56,
+                    MONOLITHIC_POLICY_NAME: 1.0,
+                }
+            ),
+            "exploration": MappingProxyType(
+                {
+                    "alert_center": 0.42,
+                    "hunger_center": 0.55,
+                    "sleep_center": 0.55,
+                    "visual_cortex": 0.96,
+                    "sensory_cortex": 0.92,
+                    MONOLITHIC_POLICY_NAME: 1.0,
+                }
+            ),
+        }
+    )
 
     def __init__(
         self,
@@ -211,9 +368,7 @@ class SpiderBrain:
         	np.ndarray: 1-D array formed by concatenating all module logits followed by the action context vector.
         """
         logits_flat = np.concatenate([result.logits for result in module_results], axis=0)
-        action_context_mapping = ACTION_CONTEXT_INTERFACE.bind_values(
-            observation[ACTION_CONTEXT_INTERFACE.observation_key]
-        )
+        action_context_mapping = self._bound_action_context(observation)
         action_context = ACTION_CONTEXT_INTERFACE.vector_from_mapping(action_context_mapping)
         return np.concatenate([logits_flat, action_context], axis=0)
 
@@ -233,7 +388,7 @@ class SpiderBrain:
         intent = np.nan_to_num(np.asarray(action_intent, dtype=float), nan=0.0, posinf=1.0, neginf=-1.0)
         if intent.shape != (self.action_dim,):
             raise ValueError(
-                f"action_intent esperado com shape {(self.action_dim,)}, recebido {intent.shape}."
+                f"action_intent expected shape {(self.action_dim,)}, received {intent.shape}."
             )
         motor_context_mapping = MOTOR_CONTEXT_INTERFACE.bind_values(
             observation[MOTOR_CONTEXT_INTERFACE.observation_key]
@@ -269,7 +424,7 @@ class SpiderBrain:
         """
         if self.config.is_modular:
             if self.module_bank is None:
-                raise RuntimeError("Banco de módulos indisponível para arquitetura modular.")
+                raise RuntimeError("Module bank unavailable for modular architecture.")
             return self.module_bank.forward(
                 observation,
                 store_cache=store_cache,
@@ -277,7 +432,7 @@ class SpiderBrain:
             )
 
         if self.monolithic_policy is None:
-            raise RuntimeError("Rede monolítica indisponível para arquitetura configurada.")
+            raise RuntimeError("Monolithic network unavailable for the configured architecture.")
         monolithic_observation = self._build_monolithic_observation(observation)
         logits = self.monolithic_policy.forward(monolithic_observation, store_cache=store_cache)
         return [
@@ -298,18 +453,45 @@ class SpiderBrain:
 
     def _apply_reflex_path(self, module_results: List[ModuleResult]) -> None:
         """
-        Apply per-module reflex adjustments in-place so proposal outputs match the act() decision path.
+        Apply per-module reflex decisions to the provided ModuleResult objects in place.
+        
+        If reflexes are enabled and the brain is modular, compute each active module's reflex decision (if any), scale its strengths, and apply reflex-induced changes to that module's logits and derived diagnostics. If reflexes are disabled or the architecture is not modular, initialize the same reflex-related bookkeeping fields without changing logits.
+        
+        The following ModuleResult fields are written/updated:
+        - neural_logits: copy of logits before any reflex is applied
+        - reflex_delta_logits: reflex-induced additive logit delta
+        - post_reflex_logits: neural_logits + reflex_delta_logits
+        - logits, probs: updated to reflect post_reflex_logits when a reflex is applied (otherwise unchanged)
+        - reflex: the ReflexDecision object or None
+        - reflex_applied: `true` if a non-trivial reflex delta was applied
+        - effective_reflex_scale: scalar applied to reflex strengths for this module
+        - module_reflex_override: `true` if reflex changed the module argmax
+        - module_reflex_dominance: relative L1 magnitude of reflex delta versus total absolute logits (small epsilon added)
+        - valence_role: semantic role for arbitration (from MODULE_VALENCE_ROLES or "support")
+        - gate_weight: default gate weight (left as 1.0 here)
+        - gated_logits: copy of logits after reflex application (or original logits when no reflex)
+        
+        No value is returned; the function mutates the ModuleResult instances in the input list.
         """
+        for result in module_results:
+            result.neural_logits = result.logits.copy()
+            result.reflex_delta_logits = np.zeros_like(result.logits)
+            result.post_reflex_logits = result.logits.copy()
+            result.reflex = None
+            result.reflex_applied = False
+            result.effective_reflex_scale = 0.0
+            result.module_reflex_override = False
+            result.module_reflex_dominance = 0.0
+            result.valence_role = self.MODULE_VALENCE_ROLES.get(result.name, "support")
+            result.gate_weight = 1.0
+            result.contribution_share = 0.0
+            result.gated_logits = result.logits.copy()
+            result.intent_before_gating = None
+            result.intent_after_gating = None
+
         should_compute_reflexes = self.config.is_modular and self.config.enable_reflexes
         if should_compute_reflexes:
             for result in module_results:
-                result.neural_logits = result.logits.copy()
-                result.reflex_delta_logits = np.zeros_like(result.logits)
-                result.post_reflex_logits = result.logits.copy()
-                result.reflex_applied = False
-                result.effective_reflex_scale = 0.0
-                result.module_reflex_override = False
-                result.module_reflex_dominance = 0.0
                 if not result.active:
                     continue
                 result.reflex = self._module_reflex_decision(result)
@@ -339,15 +521,366 @@ class SpiderBrain:
                 result.module_reflex_dominance = float(
                     np.sum(np.abs(result.reflex_delta_logits)) / denom
                 )
+                result.gated_logits = result.logits.copy()
+
+    @staticmethod
+    def _clamp_unit(value: float) -> float:
+        """
+        Clamp a numeric value into the unit interval [0.0, 1.0].
+        
+        Returns:
+            A float equal to the input value constrained to be no less than 0.0 and no greater than 1.0.
+        """
+        return float(min(1.0, max(0.0, value)))
+
+    def _bound_observation(
+        self,
+        interface_name: str,
+        observation: Dict[str, np.ndarray],
+    ) -> Dict[str, float]:
+        """
+        Bind and sanitize an interface's raw observation into a dictionary of bounded scalar evidence.
+
+        Parameters:
+            interface_name (str): Name of the interface to bind (must match one of MODULE_INTERFACES).
+            observation (Dict[str, np.ndarray]): Full observation mapping; the interface is looked up by its observation_key.
+
+        Returns:
+            Dict[str, float]: A mapping of the interface's bound observation fields to finite float values.
+
+        Raises:
+            KeyError: If no interface with the given name exists.
+        """
+        interface = MODULE_INTERFACE_BY_NAME.get(interface_name)
+        if interface is None:
+            raise KeyError(f"Unknown interface: {interface_name}")
+        sanitized_obs = np.nan_to_num(
+            np.asarray(observation[interface.observation_key], dtype=float),
+            nan=0.0,
+            posinf=1.0,
+            neginf=-1.0,
+        )
+        return interface.bind_values(sanitized_obs)
+
+    def _bound_action_context(self, observation: Dict[str, np.ndarray]) -> Dict[str, float]:
+        """Bind and sanitize the action context observation into finite scalar values."""
+        sanitized_obs = np.nan_to_num(
+            np.asarray(observation[ACTION_CONTEXT_INTERFACE.observation_key], dtype=float),
+            nan=0.0,
+            posinf=1.0,
+            neginf=-1.0,
+        )
+        return ACTION_CONTEXT_INTERFACE.bind_values(sanitized_obs)
+
+    @staticmethod
+    def _proposal_contribution_share(
+        module_results: List[ModuleResult],
+        gated_logits: Sequence[np.ndarray],
+    ) -> Dict[str, float]:
+        """
+        Compute normalized proposal-contribution shares from gated logits.
+
+        Uses the L1 magnitude of each active module's gated logits. When every
+        active proposal is exactly zero, the share falls back to a uniform split
+        across active proposal sources so the metric remains well-defined.
+        """
+        active_results = [result for result in module_results if result.active]
+        if not active_results:
+            return {
+                result.name: 0.0
+                for result in module_results
+            }
+        magnitudes = {
+            result.name: float(np.sum(np.abs(gated_logit)))
+            for result, gated_logit in zip(module_results, gated_logits, strict=True)
+            if result.active
+        }
+        total = float(sum(magnitudes.values()))
+        if total <= 1e-8:
+            uniform = 1.0 / float(len(active_results))
+            return {
+                result.name: (uniform if result.active else 0.0)
+                for result in module_results
+            }
+        return {
+            result.name: (
+                float(magnitudes.get(result.name, 0.0) / total)
+                if result.active
+                else 0.0
+            )
+            for result in module_results
+        }
+
+    def _compute_arbitration(
+        self,
+        module_results: List[ModuleResult],
+        observation: Dict[str, np.ndarray],
+    ) -> ArbitrationDecision:
+        """
+        Compute an arbitration decision that selects a dominant valence and per-module gate weights based on module proposals and the current observation.
+        
+        Parameters:
+            module_results (List[ModuleResult]): Ordered proposal outputs from each proposal source; each entry provides logits, activity state, and bound observations used for arbitration.
+            observation (Dict[str, np.ndarray]): Raw observation mapping interface keys to arrays; used to derive contextual evidence (visual, sensory, hunger, sleep, alert, and action context).
+        
+        Returns:
+            ArbitrationDecision: An object containing:
+                - strategy: arbitration strategy name ("priority_gating").
+                - winning_valence: the chosen valence category (e.g., "threat", "hunger", "sleep", "exploration").
+                - valence_scores: normalized valence weights that sum to 1.
+                - module_gates: per-module gate weights to be applied to proposal logits.
+                - suppressed_modules: list of active modules whose gate weight is effectively < 1.0.
+                - evidence: per-valence evidence dictionaries used to compute raw scores.
+                - intent_before_gating_idx: index of the highest-scoring action intent from raw (ungated) module logits.
+                - intent_after_gating_idx: index of the highest-scoring action intent after applying module gate weights.
+        """
+        action_context = self._bound_action_context(observation)
+        visual = self._bound_observation("visual_cortex", observation)
+        sensory = self._bound_observation("sensory_cortex", observation)
+        hunger = self._bound_observation("hunger_center", observation)
+        sleep = self._bound_observation("sleep_center", observation)
+        alert = self._bound_observation("alert_center", observation)
+
+        threat_evidence = {
+            "predator_visible": action_context["predator_visible"],
+            "predator_certainty": action_context["predator_certainty"],
+            "predator_proximity": self._clamp_unit(1.0 - action_context["predator_dist"]),
+            "recent_contact": action_context["recent_contact"],
+            "recent_pain": action_context["recent_pain"],
+            "predator_smell_strength": alert["predator_smell_strength"],
+        }
+        threat_raw = self._clamp_unit(
+            0.28 * threat_evidence["predator_visible"]
+            + 0.2 * threat_evidence["predator_certainty"]
+            + 0.2 * threat_evidence["predator_proximity"]
+            + 0.16 * threat_evidence["recent_contact"]
+            + 0.08 * threat_evidence["recent_pain"]
+            + 0.08 * threat_evidence["predator_smell_strength"]
+        )
+
+        hunger_memory_freshness = self._clamp_unit(1.0 - hunger["food_memory_age"])
+        hunger_evidence = {
+            "hunger": action_context["hunger"],
+            "on_food": action_context["on_food"],
+            "food_visible": hunger["food_visible"],
+            "food_certainty": hunger["food_certainty"],
+            "food_smell_strength": hunger["food_smell_strength"],
+            "food_memory_freshness": hunger_memory_freshness,
+        }
+        hunger_raw = self._clamp_unit(
+            0.38 * hunger_evidence["hunger"]
+            + 0.14 * hunger_evidence["on_food"]
+            + 0.16 * hunger_evidence["food_visible"]
+            + 0.1 * hunger_evidence["food_certainty"]
+            + 0.12 * hunger_evidence["food_smell_strength"]
+            + 0.1 * hunger_evidence["food_memory_freshness"]
+        )
+
+        sleep_home_pressure = self._clamp_unit(1.0 - sleep["home_dist"])
+        sleep_evidence = {
+            "fatigue": action_context["fatigue"],
+            "sleep_debt": action_context["sleep_debt"],
+            "night": action_context["night"],
+            "on_shelter": action_context["on_shelter"],
+            "shelter_role_level": action_context["shelter_role_level"],
+            "home_pressure": sleep_home_pressure,
+        }
+        sleep_raw = self._clamp_unit(
+            0.26 * sleep_evidence["fatigue"]
+            + 0.24 * sleep_evidence["sleep_debt"]
+            + 0.14 * sleep_evidence["night"]
+            + 0.12 * sleep_evidence["on_shelter"]
+            + 0.12 * sleep_evidence["shelter_role_level"]
+            + 0.12 * sleep_evidence["home_pressure"]
+        )
+
+        exploration_safety = self._clamp_unit(1.0 - threat_raw)
+        exploration_residual = self._clamp_unit(1.0 - max(threat_raw, hunger_raw, sleep_raw))
+        exploration_evidence = {
+            "safety_margin": exploration_safety,
+            "residual_drive": exploration_residual,
+            "day": action_context["day"],
+            "off_shelter": self._clamp_unit(1.0 - action_context["on_shelter"]),
+            "visual_openness": max(
+                visual["food_visible"],
+                visual["shelter_visible"],
+                visual["predator_visible"],
+            ),
+            "food_smell_directionality": self._clamp_unit(
+                abs(sensory["food_smell_dx"]) + abs(sensory["food_smell_dy"])
+            ),
+        }
+        exploration_raw = self._clamp_unit(
+            0.46 * exploration_evidence["residual_drive"]
+            + 0.18 * exploration_evidence["safety_margin"]
+            + 0.14 * exploration_evidence["day"]
+            + 0.1 * exploration_evidence["off_shelter"]
+            + 0.06 * exploration_evidence["visual_openness"]
+            + 0.06 * exploration_evidence["food_smell_directionality"]
+        )
+
+        raw_scores = {
+            "threat": threat_raw,
+            "hunger": hunger_raw,
+            "sleep": sleep_raw,
+            "exploration": exploration_raw,
+        }
+        total = float(sum(raw_scores.values()))
+        if total <= 1e-8:
+            normalized_scores = {
+                "threat": 0.0,
+                "hunger": 0.0,
+                "sleep": 0.0,
+                "exploration": 1.0,
+            }
         else:
-            for result in module_results:
-                result.neural_logits = result.logits.copy()
-                result.reflex_delta_logits = np.zeros_like(result.logits)
-                result.post_reflex_logits = result.logits.copy()
-                result.reflex_applied = False
-                result.effective_reflex_scale = 0.0
-                result.module_reflex_override = False
-                result.module_reflex_dominance = 0.0
+            normalized_scores = {
+                name: float(score / total)
+                for name, score in raw_scores.items()
+            }
+        # Earlier entries in self.VALENCE_ORDER win ties in normalized_scores, which
+        # keeps the arbitration survival-first: threat > hunger > sleep > exploration.
+        winning_valence = max(
+            self.VALENCE_ORDER,
+            key=lambda name: (normalized_scores[name], -self.VALENCE_ORDER.index(name)),
+        )
+
+        pre_gating_logits = np.sum(
+            np.stack([result.logits for result in module_results], axis=0),
+            axis=0,
+        )
+        intent_before_gating_idx = int(np.argmax(pre_gating_logits))
+        module_gates: Dict[str, float] = {}
+        for result in module_results:
+            module_gates[result.name] = self._priority_gate_weight_for(
+                winning_valence,
+                result.name,
+            )
+        suppressed_modules = [
+            result.name
+            for result in module_results
+            if result.active and module_gates[result.name] < 0.999
+        ]
+        gated_logits = [
+            module_gates[result.name] * result.logits
+            for result in module_results
+        ]
+        intent_after_gating_idx = int(
+            np.argmax(np.sum(np.stack(gated_logits, axis=0), axis=0))
+        )
+        module_contribution_share = self._proposal_contribution_share(
+            module_results,
+            gated_logits,
+        )
+        dominant_module = max(
+            module_results,
+            key=lambda result: (
+                module_contribution_share[result.name],
+                -module_results.index(result),
+            ),
+        ).name
+        dominant_module_share = float(module_contribution_share[dominant_module])
+        effective_module_count = 0.0
+        positive_shares = [
+            share
+            for share in module_contribution_share.values()
+            if share > 1e-8
+        ]
+        if positive_shares:
+            effective_module_count = float(
+                1.0 / sum(share * share for share in positive_shares)
+            )
+        active_results = [result for result in module_results if result.active]
+        if active_results:
+            agreeing_modules = sum(
+                1
+                for result, gated_logit in zip(module_results, gated_logits, strict=True)
+                if result.active and int(np.argmax(gated_logit)) == intent_after_gating_idx
+            )
+            module_agreement_rate = float(agreeing_modules / len(active_results))
+        else:
+            module_agreement_rate = 0.0
+        module_disagreement_rate = float(1.0 - module_agreement_rate) if active_results else 0.0
+        return ArbitrationDecision(
+            strategy="priority_gating",
+            winning_valence=winning_valence,
+            valence_scores=normalized_scores,
+            module_gates=module_gates,
+            module_contribution_share=module_contribution_share,
+            dominant_module=dominant_module,
+            dominant_module_share=dominant_module_share,
+            effective_module_count=effective_module_count,
+            module_agreement_rate=module_agreement_rate,
+            module_disagreement_rate=module_disagreement_rate,
+            suppressed_modules=suppressed_modules,
+            evidence={
+                "threat": threat_evidence,
+                "hunger": hunger_evidence,
+                "sleep": sleep_evidence,
+                "exploration": exploration_evidence,
+            },
+            intent_before_gating_idx=intent_before_gating_idx,
+            intent_after_gating_idx=intent_after_gating_idx,
+        )
+
+    def _priority_gate_weight_for(self, winning_valence: str, module_name: str) -> float:
+        """Return the configured gate weight for a module under the winning valence."""
+        valence_weights = self.PRIORITY_GATING_WEIGHTS.get(winning_valence)
+        if valence_weights is None:
+            raise ValueError(
+                f"Priority gating weights missing winning valence '{winning_valence}'."
+            )
+        if module_name not in valence_weights:
+            raise ValueError(
+                f"Priority gating weights missing module '{module_name}' "
+                f"for winning valence '{winning_valence}'."
+            )
+        return float(valence_weights[module_name])
+
+    def _arbitration_gate_weight_for(
+        self,
+        arbitration: ArbitrationDecision,
+        module_name: str,
+    ) -> float:
+        """Return the gate weight exported by an arbitration decision for one module."""
+        if module_name not in arbitration.module_gates:
+            raise ValueError(
+                f"Arbitration decision missing gate weight for module '{module_name}' "
+                f"under winning valence '{arbitration.winning_valence}'."
+            )
+        return float(arbitration.module_gates[module_name])
+
+    def _apply_priority_gating(
+        self,
+        module_results: List[ModuleResult],
+        arbitration: ArbitrationDecision,
+    ) -> None:
+        """
+        Apply per-module priority gating from an arbitration decision to each module's logits and probabilities.
+        
+        This updates each ModuleResult in place: assigns its valence role, gate weight,
+        computes gated logits (gate weight multiplied by the module's logits), replaces the
+        module's logits with the gated logits, recomputes the module's softmax probabilities,
+        and stamps the intents before and after gating for downstream debug export.
+        
+        Parameters:
+            module_results (List[ModuleResult]): Ordered list of module outputs to update.
+            arbitration (ArbitrationDecision): ArbitrationDecision providing per-module gate weights and winning valence.
+        """
+        intent_before_gating = ACTIONS[arbitration.intent_before_gating_idx]
+        intent_after_gating = ACTIONS[arbitration.intent_after_gating_idx]
+        for result in module_results:
+            result.valence_role = self.MODULE_VALENCE_ROLES.get(result.name, "support")
+            gate_weight = self._arbitration_gate_weight_for(arbitration, result.name)
+            result.gate_weight = gate_weight
+            result.contribution_share = float(
+                arbitration.module_contribution_share.get(result.name, 0.0)
+            )
+            result.gated_logits = gate_weight * result.logits
+            result.logits = result.gated_logits.copy()
+            result.probs = softmax(result.logits)
+            result.intent_before_gating = intent_before_gating
+            result.intent_after_gating = intent_after_gating
 
     def act(
         self,
@@ -358,30 +891,31 @@ class SpiderBrain:
         policy_mode: str = "normal",
     ) -> BrainStep:
         """
-        Select an action for the given observation and return a populated BrainStep.
-        
-        Runs the proposal stage and optionally applies per-module reflex adjustments. In the default `"normal"` mode it then computes action-center and motor-cortex corrections before selecting a final action. In `"reflex_only"` mode it skips `action_center` and `motor_cortex`, sums only the post-reflex proposal logits, and selects directly from that policy. The method can also publish per-module and final-selection diagnostics to a MessageBus.
+        Choose and execute an action for the provided observation and return a populated BrainStep.
         
         Parameters:
-            observation (Dict[str, np.ndarray]): Mapping of sensory/motor arrays consumed by proposal modules and context interfaces.
-            bus (MessageBus | None): Optional message bus for publishing module proposals and final selection; omit to disable publishing.
-            sample (bool): If True, sample an action from the final policy distribution; if False, choose the greedy argmax action.
-            policy_mode (str): `"normal"` for the standard learned action-center/motor path, or `"reflex_only"` to execute only the modular reflex-adjusted proposal path.
+            observation (Dict[str, np.ndarray]): Mapping of interface observation arrays consumed by proposal modules and context interfaces.
+            bus (MessageBus | None): Optional message bus for publishing per-module proposal diagnostics and final selection/execution diagnostics; pass None to disable publishing.
+            sample (bool): If True, sample the executed action from the final policy distribution; if False, select the greedy argmax action.
+            policy_mode (str): Execution mode, either "normal" to run the learned action-center and motor-cortex corrections, or "reflex_only" to skip learned controllers and select directly from the post-reflex modular proposals. "reflex_only" requires a modular architecture and reflexes enabled in the configuration.
         
         Returns:
-            BrainStep: Decision container populated with per-module ModuleResult entries and diagnostics, action-center logits and policy, motor-correction logits, combined logits (with and without reflexes), final policy, scalar value estimate, selected intent and action indices, override flags, and the action-center and motor-cortex input vectors.
+            BrainStep: Decision container filled with per-module ModuleResult entries, action-center and motor-cortex logits/policies, combined logits with and without reflexes, the final policy and value estimate, selected intent and action indices, override flags, controller input vectors, the active policy_mode, and the computed arbitration_decision.
+        
+        Raises:
+            ValueError: If policy_mode is invalid, or if "reflex_only" is requested but the brain is not modular or reflexes are disabled.
         """
         if policy_mode not in {"normal", "reflex_only"}:
             raise ValueError(
-                "policy_mode inválido. Use 'normal' ou 'reflex_only'."
+                "Invalid policy_mode. Use 'normal' or 'reflex_only'."
             )
         if policy_mode == "reflex_only" and not self.config.is_modular:
             raise ValueError(
-                "policy_mode='reflex_only' requer a arquitetura modular."
+                "policy_mode='reflex_only' requires the modular architecture."
             )
         if policy_mode == "reflex_only" and not self.config.enable_reflexes:
             raise ValueError(
-                "policy_mode='reflex_only' requer reflexos habilitados."
+                "policy_mode='reflex_only' requires reflexes to be enabled."
             )
 
         store_cache = sample and policy_mode == "normal"
@@ -390,8 +924,13 @@ class SpiderBrain:
             store_cache=store_cache,
             training=sample,
         )
+        arbitration_without_reflex = self._compute_arbitration(module_results, observation)
+        gated_logits_without_reflex = [
+            self._arbitration_gate_weight_for(arbitration_without_reflex, result.name) * result.logits
+            for result in module_results
+        ]
         proposal_sum_without_reflex = np.sum(
-            np.stack([result.logits for result in module_results], axis=0),
+            np.stack(gated_logits_without_reflex, axis=0),
             axis=0,
         )
         if policy_mode == "reflex_only":
@@ -401,9 +940,11 @@ class SpiderBrain:
             )
             total_logits_without_reflex = proposal_sum_without_reflex.copy()
         else:
-            action_input_without_reflex = self._build_action_input(
-                module_results,
-                observation,
+            action_context_mapping = self._bound_action_context(observation)
+            action_context = ACTION_CONTEXT_INTERFACE.vector_from_mapping(action_context_mapping)
+            action_input_without_reflex = np.concatenate(
+                [np.concatenate(gated_logits_without_reflex, axis=0), action_context],
+                axis=0,
             )
             action_center_correction_without_reflex, _ = self.action_center.forward(
                 action_input_without_reflex,
@@ -428,6 +969,8 @@ class SpiderBrain:
             )
 
         self._apply_reflex_path(module_results)
+        arbitration = self._compute_arbitration(module_results, observation)
+        self._apply_priority_gating(module_results, arbitration)
 
         if bus is not None:
             for result in module_results:
@@ -446,6 +989,12 @@ class SpiderBrain:
                         "module_reflex_override": bool(result.module_reflex_override),
                         "module_reflex_dominance": round(float(result.module_reflex_dominance), 6),
                         "reflex": result.reflex.to_payload() if result.reflex is not None else None,
+                        "valence_role": result.valence_role,
+                        "gate_weight": round(float(result.gate_weight), 6),
+                        "contribution_share": round(float(result.contribution_share), 6),
+                        "gated_logits": result.gated_logits.round(6).tolist() if result.gated_logits is not None else None,
+                        "intent_before_gating": result.intent_before_gating,
+                        "intent_after_gating": result.intent_after_gating,
                     },
                 )
 
@@ -503,6 +1052,7 @@ class SpiderBrain:
             )
 
         if bus is not None:
+            arbitration_payload = arbitration.to_payload()
             bus.publish(
                 sender="action_center",
                 topic="action.selection",
@@ -515,6 +1065,7 @@ class SpiderBrain:
                     "selected_intent": ACTIONS[action_intent_idx],
                     "selected_intent_without_reflex": ACTIONS[action_intent_without_reflex_idx],
                     "value_estimate": round(float(value), 6),
+                    **arbitration_payload,
                 },
             )
             bus.publish(
@@ -552,6 +1103,7 @@ class SpiderBrain:
             action_center_input=action_center_input,
             motor_input=motor_input,
             policy_mode=policy_mode,
+            arbitration_decision=arbitration,
         )
 
     def estimate_value(self, observation: Dict[str, np.ndarray]) -> float:
@@ -572,6 +1124,8 @@ class SpiderBrain:
             training=False,
         )
         self._apply_reflex_path(module_results)
+        arbitration = self._compute_arbitration(module_results, observation)
+        self._apply_priority_gating(module_results, arbitration)
         action_input = self._build_action_input(module_results, observation)
         _, value = self.action_center.forward(action_input, store_cache=False)
         return float(value)
@@ -1239,35 +1793,33 @@ class SpiderBrain:
 
     def learn(self, decision: BrainStep, reward: float, next_observation: Dict[str, np.ndarray], done: bool) -> Dict[str, float]:
         """
-        Update model parameters using a temporal-difference policy-gradient update and return training metrics.
-        
-        Performs a TD(0)-style update: computes TD target and clipped advantage, forms policy-gradient logits, applies optional auxiliary gradients for proposal modules (when enabled), updates either the modular module bank or the monolithic proposal network, and updates the motor/value network.
+        Perform a temporal-difference policy-gradient update that trains the policy, proposal modules (or monolithic proposal), and motor/value networks.
         
         Parameters:
-            decision (BrainStep): Recorded action decision containing module results, motor/value outputs, selected action index, and policy.
+            decision (BrainStep): Recorded action decision containing module results, selected action index, policy, and controller outputs.
             reward (float): Observed scalar reward following the decision.
-            next_observation (Dict[str, np.ndarray]): Environment observation after taking the action, used to estimate the next state's value.
+            next_observation (Dict[str, np.ndarray]): Observation after the action used to estimate the next state's value.
             done (bool): Whether the episode terminated after the action.
         
         Returns:
-            metrics (Dict[str, float]): Scalar training diagnostics including:
+            metrics (Dict[str, float]): Training diagnostics with the following keys:
                 - "reward": the provided reward.
                 - "td_target": computed TD target (reward + gamma * next_value).
                 - "td_error": clipped advantage used for the policy update.
                 - "value": the value estimate from the provided decision.
                 - "next_value": the estimated value of the next observation (0.0 if done).
-                - "entropy": policy entropy computed from the decision.policy.
+                - "entropy": policy entropy computed from decision.policy.
                 - "aux_modules": number of modules that received auxiliary gradients.
         """
         if decision.policy_mode != "normal":
             raise ValueError(
-                "learn() só suporta decisões produzidas com policy_mode='normal'."
+                "learn() only supports decisions produced with policy_mode='normal'."
             )
         next_value = 0.0 if done else self.estimate_value(next_observation)
         td_target = reward + self.gamma * next_value
         advantage = float(np.clip(td_target - decision.value, -4.0, 4.0))
         grad_policy_logits = advantage * (decision.policy - one_hot(decision.action_idx, self.action_dim))
-        aux_grads = {
+        reflex_aux_grads = {
             name: np.asarray(grad, dtype=float).copy()
             for name, grad in self._auxiliary_module_gradients(decision.module_results).items()
         }
@@ -1283,9 +1835,10 @@ class SpiderBrain:
             dtype=float,
         )
 
+        module_total_grads: Dict[str, np.ndarray] = {}
         if self.config.is_modular:
             if self.module_bank is None:
-                raise RuntimeError("Banco de módulos indisponível para arquitetura modular.")
+                raise RuntimeError("Module bank unavailable for modular architecture.")
             per_module_input_grads = proposal_input_grads.reshape(
                 len(decision.module_results),
                 self.action_dim,
@@ -1295,14 +1848,29 @@ class SpiderBrain:
                 per_module_input_grads,
                 strict=True,
             ):
-                aux_grads[result.name] = aux_grads.get(
+                gate_weight = float(result.gate_weight)
+                total_grad = gate_weight * np.asarray(
+                    reflex_aux_grads.get(
+                        result.name,
+                        np.zeros(self.action_dim, dtype=float),
+                    ),
+                    dtype=float,
+                )
+                if not self.config.uses_local_credit_only:
+                    total_grad += gate_weight * grad_policy_logits
+                total_grad += gate_weight * np.asarray(extra_grad, dtype=float)
+                module_total_grads[result.name] = module_total_grads.get(
                     result.name,
                     np.zeros(self.action_dim, dtype=float),
-                ) + extra_grad
-            self.module_bank.backward(grad_policy_logits, lr=self.module_lr, aux_grads=aux_grads)
+                ) + total_grad
+            self.module_bank.backward(
+                np.zeros(self.action_dim, dtype=float),
+                lr=self.module_lr,
+                aux_grads=module_total_grads,
+            )
         else:
             if self.monolithic_policy is None:
-                raise RuntimeError("Rede monolítica indisponível para arquitetura configurada.")
+                raise RuntimeError("Monolithic network unavailable for the configured architecture.")
             grad_for_monolithic = grad_policy_logits + proposal_input_grads
             self.monolithic_policy.backward(grad_for_monolithic, lr=self.module_lr)
         self.motor_cortex.backward(grad_policy_logits, lr=self.motor_lr)
@@ -1315,7 +1883,7 @@ class SpiderBrain:
             "value": float(decision.value),
             "next_value": float(next_value),
             "entropy": entropy,
-            "aux_modules": float(len(aux_grads)),
+            "aux_modules": float(len(reflex_aux_grads)),
         }
 
     def parameter_norms(self) -> Dict[str, float]:
@@ -1453,14 +2021,14 @@ class SpiderBrain:
         directory = Path(directory)
         meta_path = directory / self._METADATA_FILE
         if not meta_path.exists():
-            raise FileNotFoundError(f"Arquivo de metadados não encontrado: {meta_path}")
+            raise FileNotFoundError(f"Metadata file not found: {meta_path}")
 
         metadata = json.loads(meta_path.read_text(encoding="utf-8"))
         saved_architecture_version = metadata.get("architecture_version")
         if saved_architecture_version != self.ARCHITECTURE_VERSION:
             raise ValueError(
-                "O cérebro salvo usa uma versão de arquitetura incompatível com a versão atual "
-                f"do simulador (save={saved_architecture_version}, atual={self.ARCHITECTURE_VERSION})."
+                "The saved brain uses an architecture version incompatible with the current "
+                f"simulator version (save={saved_architecture_version}, current={self.ARCHITECTURE_VERSION})."
             )
         saved_architecture = metadata.get("architecture")
         expected_architecture = self._architecture_signature()
@@ -1471,30 +2039,30 @@ class SpiderBrain:
             if isinstance(saved_architecture, dict):
                 saved_registry_fingerprint = saved_architecture.get("registry_fingerprint")
             raise ValueError(
-                "O cérebro salvo usa um registry de interfaces incompatível com o registry atual. "
+                "The saved brain uses an interface registry incompatible with the current registry. "
                 f"(save_registry_fingerprint={saved_registry_fingerprint}, "
-                f"atual={expected_architecture.get('registry_fingerprint')}). "
-                "Não há migração automática de checkpoints para mudanças de contrato."
+                f"current={expected_architecture.get('registry_fingerprint')}). "
+                "There is no automatic checkpoint migration for contract changes."
             )
         if saved_architecture != expected_architecture:
             raise ValueError(
-                "O cérebro salvo usa uma assinatura arquitetural incompatível com a topologia atual "
+                "The saved brain uses an architecture signature incompatible with the current topology "
                 f"(save_fingerprint={metadata.get('architecture_fingerprint')}, "
-                f"atual={self._architecture_fingerprint()}). "
-                "Não há migração automática de checkpoints para esta mudança; treine ou carregue "
-                "um cérebro compatível com a versão atual do simulador."
+                f"current={self._architecture_fingerprint()}). "
+                "There is no automatic checkpoint migration for this change; train or load "
+                "a brain compatible with the current simulator version."
             )
         saved_config = metadata.get("ablation_config")
         expected_config = self.config.to_summary()
         if saved_config != expected_config:
             raise ValueError(
-                "O cérebro salvo usa uma configuração de ablação diferente da configuração atual."
+                "The saved brain uses an ablation configuration different from the current configuration."
             )
         saved_operational_profile = metadata.get("operational_profile")
         expected_operational_profile = self.operational_profile.to_summary()
         if saved_operational_profile != expected_operational_profile:
             raise ValueError(
-                "O cérebro salvo usa um perfil operacional diferente do perfil operacional atual."
+                "The saved brain uses an operational profile different from the current operational profile."
             )
 
         available = list(metadata.get("modules", {}).keys())
@@ -1506,12 +2074,12 @@ class SpiderBrain:
         for name in targets:
             if name not in available:
                 raise KeyError(
-                    f"Módulo '{name}' não encontrado no save. "
-                    f"Disponíveis: {available}"
+                    f"Module '{name}' not found in the save. "
+                    f"Available: {available}"
                 )
             npz_path = directory / f"{name}.npz"
             if not npz_path.exists():
-                raise FileNotFoundError(f"Arquivo de pesos não encontrado: {npz_path}")
+                raise FileNotFoundError(f"Weight file not found: {npz_path}")
 
             mod_meta = metadata["modules"][name]
             arrays = dict(np.load(npz_path))
@@ -1542,7 +2110,7 @@ class SpiderBrain:
         elif bank_state and self.monolithic_policy is not None:
             monolithic_name = self.MONOLITHIC_POLICY_NAME
             if monolithic_name not in bank_state:
-                raise KeyError("Save incompatível: pesos monolíticos ausentes.")
+                raise KeyError("Incompatible save: monolithic weights are missing.")
             self.monolithic_policy.load_state_dict(bank_state[monolithic_name])
 
         return loaded

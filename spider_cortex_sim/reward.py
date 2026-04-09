@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import TYPE_CHECKING, Sequence
 
 from .maps import CLUTTER, NARROW
 
 if TYPE_CHECKING:
     from .world import SpiderWorld
+    from .world_types import TickContext
 
 
 REWARD_COMPONENT_NAMES: Sequence[str] = (
@@ -111,15 +113,333 @@ REWARD_PROFILES = {
         "sleep_debt_overdue_threshold": 0.65,
         "sleep_debt_health_penalty": 0.34,
     },
+    "austere": {
+        "action_cost_stay": 0.010,
+        "action_cost_move": 0.016,
+        "base_hunger_cost": 0.010,
+        "move_hunger_cost": 0.006,
+        "idle_hunger_cost": 0.002,
+        "base_fatigue_cost": 0.007,
+        "move_fatigue_cost": 0.006,
+        "idle_fatigue_cost": 0.002,
+        "idle_open_penalty": 0.030,
+        "clutter_fatigue": 0.006,
+        "clutter_cost": 0.020,
+        "narrow_fatigue": 0.005,
+        "narrow_cost": 0.016,
+        "narrow_predator_risk": 0.065,
+        "night_exposure_fatigue": 0.020,
+        "night_exposure_debt": 0.030,
+        "night_exposure_reward": 0.110,
+        "hunger_pressure": 0.18,
+        "fatigue_pressure": 0.11,
+        "sleep_debt_pressure": 0.12,
+        "food_progress": 0.0,
+        "shelter_progress": 0.0,
+        "threat_shelter_progress": 0.0,
+        "predator_escape": 0.0,
+        "predator_escape_bonus": 0.0,
+        "predator_escape_stay_penalty": 0.0,
+        "day_exploration_hungry": 0.0,
+        "day_exploration_calm": 0.0,
+        "shelter_entry": 0.0,
+        "night_shelter_bonus": 0.0,
+        "sleep_debt_night_awake": 0.024,
+        "sleep_debt_day_awake": 0.005,
+        "sleep_debt_interrupt": 0.120,
+        "sleep_debt_resting_night": 0.16,
+        "sleep_debt_resting_day": 0.07,
+        "sleep_debt_deep_night": 0.24,
+        "sleep_debt_deep_day": 0.10,
+        "sleep_debt_overdue_threshold": 0.60,
+        "sleep_debt_health_penalty": 0.38,
+    },
 }
+
+
+REWARD_COMPONENT_AUDIT = {
+    "action_cost": {
+        "category": "event",
+        "source": "spider_cortex_sim.reward.apply_action_and_terrain_effects",
+        "gates": ["always", "scaled by action_name == STAY vs locomotion"],
+        "config_keys": ["action_cost_stay", "action_cost_move"],
+        "configured_weight_keys": ["action_cost_stay", "action_cost_move"],
+        "shaping_risk": "low",
+        "notes": "Penaliza cada passo; funciona mais como custo universal do que como trilha guiada.",
+    },
+    "terrain_cost": {
+        "category": "event",
+        "source": "spider_cortex_sim.reward.apply_action_and_terrain_effects",
+        "gates": ["terrain == CLUTTER or NARROW", "extra branch when NARROW and predator is close"],
+        "config_keys": ["clutter_cost", "narrow_cost", "narrow_predator_risk"],
+        "configured_weight_keys": ["clutter_cost", "narrow_cost", "narrow_predator_risk"],
+        "shaping_risk": "medium",
+        "notes": "Encodes explicit environmental cost and pushes the agent away from dangerous bottlenecks.",
+    },
+    "night_exposure": {
+        "category": "event",
+        "source": "spider_cortex_sim.world.SpiderWorld.step",
+        "gates": ["night", "not on shelter"],
+        "config_keys": ["night_exposure_reward"],
+        "configured_weight_keys": ["night_exposure_reward"],
+        "shaping_risk": "medium",
+        "notes": "Dense penalty for nighttime exposure outside shelter.",
+    },
+    "hunger_pressure": {
+        "category": "internal_pressure",
+        "source": "spider_cortex_sim.reward.apply_pressure_penalties",
+        "gates": ["always, scaled by state.hunger"],
+        "config_keys": ["hunger_pressure"],
+        "configured_weight_keys": ["hunger_pressure"],
+        "shaping_risk": "medium",
+        "notes": "Continuous homeostatic pressure rather than a terminal event.",
+    },
+    "fatigue_pressure": {
+        "category": "internal_pressure",
+        "source": "spider_cortex_sim.reward.apply_pressure_penalties",
+        "gates": ["always, scaled by state.fatigue"],
+        "config_keys": ["fatigue_pressure"],
+        "configured_weight_keys": ["fatigue_pressure"],
+        "shaping_risk": "medium",
+        "notes": "Continuous internal pressure to seek rest.",
+    },
+    "sleep_debt_pressure": {
+        "category": "internal_pressure",
+        "source": "spider_cortex_sim.reward.apply_pressure_penalties",
+        "gates": ["always, scaled by state.sleep_debt"],
+        "config_keys": ["sleep_debt_pressure"],
+        "configured_weight_keys": ["sleep_debt_pressure"],
+        "shaping_risk": "medium",
+        "notes": "Pushes shelter-seeking behavior even before clear behavioral failures appear.",
+    },
+    "predator_contact": {
+        "category": "event",
+        "source": "spider_cortex_sim.physiology.apply_predator_contact",
+        "gates": ["predator contact"],
+        "config_keys": [],
+        "configured_weight_keys": [],
+        "hardcoded_weight": 2.4,
+        "shaping_risk": "low",
+        "notes": "Acute event anchored in real predator-inflicted damage.",
+    },
+    "feeding": {
+        "category": "event",
+        "source": "spider_cortex_sim.physiology.resolve_autonomic_behaviors",
+        "gates": ["world.on_food()"],
+        "config_keys": [],
+        "configured_weight_keys": [],
+        "hardcoded_weight": 3.48,
+        "shaping_risk": "low",
+        "notes": "Event-level reinforcement when the spider actually reaches food.",
+    },
+    "resting": {
+        "category": "event",
+        "source": "spider_cortex_sim.physiology.resolve_autonomic_behaviors",
+        "gates": ["world.on_shelter()", "rest conditions satisfied"],
+        "config_keys": [
+            "sleep_debt_resting_night",
+            "sleep_debt_resting_day",
+            "sleep_debt_deep_night",
+            "sleep_debt_deep_day",
+        ],
+        "configured_weight_keys": [
+            "sleep_debt_resting_night",
+            "sleep_debt_resting_day",
+            "sleep_debt_deep_night",
+            "sleep_debt_deep_day",
+        ],
+        "hardcoded_weight": 2.2,
+        "shaping_risk": "medium",
+        "notes": "Combines a legitimate ecological event with dense shaping for intermediate rest phases.",
+    },
+    "food_progress": {
+        "category": "progress",
+        "source": "spider_cortex_sim.reward.apply_progress_and_event_rewards",
+        "gates": ["hunger above threshold", "not already on food"],
+        "config_keys": ["food_progress"],
+        "configured_weight_keys": ["food_progress"],
+        "shaping_risk": "high",
+        "notes": "Approach reward for food; reduces the need for long-horizon temporal credit assignment.",
+    },
+    "shelter_progress": {
+        "category": "progress",
+        "source": "spider_cortex_sim.reward.apply_progress_and_event_rewards",
+        "gates": ["fatigue or sleep_debt high, or night", "not already in deep shelter", "extra threat branch"],
+        "config_keys": ["shelter_progress", "threat_shelter_progress"],
+        "configured_weight_keys": ["shelter_progress", "threat_shelter_progress"],
+        "shaping_risk": "high",
+        "notes": "Provides an explicit direction toward shelter even without full perception or planning.",
+    },
+    "predator_escape": {
+        "category": "progress",
+        "source": "spider_cortex_sim.reward.apply_progress_and_event_rewards",
+        "gates": ["predator visible or recent contact", "distance gain and escape bonus branches"],
+        "config_keys": [
+            "predator_escape",
+            "predator_escape_bonus",
+            "predator_escape_stay_penalty",
+        ],
+        "configured_weight_keys": [
+            "predator_escape",
+            "predator_escape_bonus",
+            "predator_escape_stay_penalty",
+        ],
+        "shaping_risk": "high",
+        "notes": "Incremental reward for increasing distance from the predator and a penalty for remaining exposed and still.",
+    },
+    "day_exploration": {
+        "category": "progress",
+        "source": "spider_cortex_sim.reward.apply_progress_and_event_rewards",
+        "gates": ["moved", "not night", "predator branch inactive"],
+        "config_keys": ["day_exploration_hungry", "day_exploration_calm"],
+        "configured_weight_keys": ["day_exploration_hungry", "day_exploration_calm"],
+        "shaping_risk": "medium",
+        "notes": "Auxiliary bonus for daytime exploration; explicit and not ecological on its own.",
+    },
+    "shelter_entry": {
+        "category": "event",
+        "source": "spider_cortex_sim.reward.apply_progress_and_event_rewards",
+        "gates": ["crossed into shelter this step"],
+        "config_keys": ["shelter_entry"],
+        "configured_weight_keys": ["shelter_entry"],
+        "shaping_risk": "medium",
+        "notes": "Clear event, but it still guides navigation toward the shelter edge.",
+    },
+    "night_shelter_bonus": {
+        "category": "event",
+        "source": "spider_cortex_sim.reward.apply_progress_and_event_rewards",
+        "gates": ["night", "on shelter"],
+        "config_keys": ["night_shelter_bonus"],
+        "configured_weight_keys": ["night_shelter_bonus"],
+        "shaping_risk": "medium",
+        "notes": "Recurring bonus for occupying shelter at night.",
+    },
+    "homeostasis_penalty": {
+        "category": "internal_pressure",
+        "source": "spider_cortex_sim.physiology.apply_homeostasis_penalties",
+        "gates": ["hunger/fatigue/sleep_debt above thresholds"],
+        "config_keys": ["sleep_debt_overdue_threshold", "sleep_debt_health_penalty"],
+        "configured_weight_keys": ["sleep_debt_health_penalty"],
+        "hardcoded_weight": 0.72,
+        "shaping_risk": "medium",
+        "notes": "Penalizes progressive physiological degradation; part of the weight is hardcoded.",
+    },
+    "death_penalty": {
+        "category": "event",
+        "source": "spider_cortex_sim.world.SpiderWorld.step",
+        "gates": ["health <= 0"],
+        "config_keys": [],
+        "configured_weight_keys": [],
+        "hardcoded_weight": 5.0,
+        "shaping_risk": "low",
+        "notes": "Explicit and rare terminal event.",
+    },
+}
+
+
+def reward_component_audit() -> dict[str, dict[str, object]]:
+    """
+    Provide a defensive copy of the reward-component audit catalog.
+    
+    The catalog maps each reward component name to metadata describing its category
+    (`event`, `progress`, or `internal_pressure`), source code locations, activation
+    gates, which reward-profile keys influence its weight, and any hardcoded weight.
+    
+    Returns:
+        dict[str, dict[str, object]]: A deep copy of `REWARD_COMPONENT_AUDIT` where
+        each key is a reward component name and each value is its audit metadata.
+    """
+    return deepcopy(REWARD_COMPONENT_AUDIT)
+
+
+def reward_profile_audit(profile_name: str) -> dict[str, object]:
+    """
+    Produce a human-readable audit summary for the named reward profile.
+    
+    The result reports a per-component "weight proxy" (sum of absolute configured weights from the profile plus any hardcoded weight), aggregated category proxies for both configurable-only and total mass, the chosen dominant category (preferring configurable mass when present), a list of components that have no configurable weight keys, and the total hardcoded mass. Intended for diagnostics and profile comparison rather than exact reward decomposition.
+    
+    Parameters:
+        profile_name (str): Name of the reward profile to audit.
+    
+    Returns:
+        dict[str, object]: An audit mapping containing:
+            - "profile": the requested profile name.
+            - "component_weight_proxy": mapping of component -> proxy weight (float).
+            - "category_weight_proxy": mapping of category -> total proxy mass (float).
+            - "configurable_category_weight_proxy": mapping of category -> configurable-only proxy mass (float).
+            - "dominant_category": category with the largest chosen proxy mass.
+            - "hardcoded_mass": total hardcoded weight summed across components (float).
+            - "non_configurable_components": sorted list of component names without configurable weight keys.
+            - "notes": list of explanatory strings.
+    
+    Raises:
+        KeyError: If `profile_name` is not a key in REWARD_PROFILES.
+    """
+    if profile_name not in REWARD_PROFILES:
+        raise KeyError(f"Unknown reward profile: {profile_name!r}.")
+    profile = REWARD_PROFILES[profile_name]
+    category_weights = {
+        "event": 0.0,
+        "progress": 0.0,
+        "internal_pressure": 0.0,
+    }
+    configurable_category_weights = {
+        "event": 0.0,
+        "progress": 0.0,
+        "internal_pressure": 0.0,
+    }
+    component_weights: dict[str, float] = {}
+    non_configurable_components: list[str] = []
+    hardcoded_mass = 0.0
+    for component_name, metadata in REWARD_COMPONENT_AUDIT.items():
+        configured_weight = sum(
+            abs(float(profile[key]))
+            for key in metadata.get("configured_weight_keys", [])
+        )
+        hardcoded_weight = float(metadata.get("hardcoded_weight", 0.0))
+        proxy_weight = configured_weight + hardcoded_weight
+        component_weights[component_name] = round(proxy_weight, 6)
+        category_name = str(metadata["category"])
+        category_weights[category_name] += proxy_weight
+        configurable_category_weights[category_name] += configured_weight
+        hardcoded_mass += hardcoded_weight
+        if not metadata.get("configured_weight_keys"):
+            non_configurable_components.append(component_name)
+    dominant_weight_source = configurable_category_weights
+    if not any(value > 0.0 for value in dominant_weight_source.values()):
+        dominant_weight_source = category_weights
+    dominant_category = max(
+        dominant_weight_source.items(),
+        key=lambda item: item[1],
+    )[0]
+    return {
+        "profile": profile_name,
+        "component_weight_proxy": component_weights,
+        "category_weight_proxy": {
+            name: round(float(value), 6)
+            for name, value in sorted(category_weights.items())
+        },
+        "configurable_category_weight_proxy": {
+            name: round(float(value), 6)
+            for name, value in sorted(configurable_category_weights.items())
+        },
+        "dominant_category": dominant_category,
+        "hardcoded_mass": round(float(hardcoded_mass), 6),
+        "non_configurable_components": sorted(non_configurable_components),
+        "notes": [
+            "The weight proxy sums configurable per-component coefficients plus a few stable hardcoded weights.",
+            "dominant_category prioritizes configurable mass only; when that is zero, it falls back to total mass.",
+            "It is meant to compare how much each profile still depends on explicit shaping, not to reproduce total reward per episode.",
+        ],
+    }
 
 
 def empty_reward_components() -> dict[str, float]:
     """
-    Create a dictionary mapping every reward component name to 0.0.
+    Create a mapping of every defined reward component name to 0.0.
     
     Returns:
-        dict[str, float]: A dictionary with each key from REWARD_COMPONENT_NAMES initialized to 0.0.
+        dict[str, float]: A dictionary whose keys are the names from REWARD_COMPONENT_NAMES and whose values are all 0.0.
     """
     return {name: 0.0 for name in REWARD_COMPONENT_NAMES}
 
@@ -241,18 +561,8 @@ def apply_pressure_penalties(world: "SpiderWorld", reward_components: dict[str, 
 def apply_progress_and_event_rewards(
     world: "SpiderWorld",
     *,
-    action_name: str,
-    moved: bool,
-    night: bool,
-    terrain_now: str,
-    was_on_shelter: bool,
-    prev_food_dist: int,
-    prev_shelter_dist: int,
-    prev_predator_dist: int,
-    prev_predator_visible: bool,
-    reward_components: dict[str, float],
-    info: dict[str, object],
-) -> tuple[bool, bool]:
+    tick_context: "TickContext",
+) -> None:
     """
     Update reward components and world event counters based on movement, distances to food/shelter/predator, terrain, and physiology.
     
@@ -260,24 +570,24 @@ def apply_progress_and_event_rewards(
     
     Parameters:
         world: The simulation world object whose state and configuration are read and updated.
-        action_name (str): The action taken this step (e.g., "STAY", movement actions).
-        moved (bool): Whether the agent changed position this step.
-        night (bool): Whether it is currently night.
-        terrain_now (str): Terrain label at the agent's current position.
-        was_on_shelter (bool): Whether the agent was on shelter at the start of the step.
-        prev_food_dist (int): Previous step's nearest food distance.
-        prev_shelter_dist (int): Previous step's nearest shelter distance.
-        prev_predator_dist (int): Previous step's predator (lizard) Manhattan distance.
-        prev_predator_visible (bool): Whether the predator was visible in the previous step.
-        reward_components (dict[str, float]): Mutable mapping of reward component names to values; updated in-place.
-        info (dict[str, object]): Mutable info dictionary; `info["distance_deltas"]` will be set to the integer deltas for food, shelter, and predator.
-    
-    Returns:
-        tuple[bool, bool]: `(predator_escape, predator_visible_now)` where `predator_escape` is `true` if an escape event was counted this step, and `predator_visible_now` is `true` if the predator is currently detected as visible.
+        tick_context (TickContext): Tick-level context carrying the pre-tick snapshot, mutable reward
+            accumulator, info payload, and event log to be updated in place.
     """
     from .perception import predator_visible_to_spider
     from .physiology import reset_sleep_state
 
+    snapshot = tick_context.snapshot
+    action_name = tick_context.executed_action
+    moved = tick_context.moved
+    night = snapshot.night
+    terrain_now = tick_context.terrain_now
+    was_on_shelter = snapshot.was_on_shelter
+    prev_food_dist = snapshot.prev_food_dist
+    prev_shelter_dist = snapshot.prev_shelter_dist
+    prev_predator_dist = snapshot.prev_predator_dist
+    prev_predator_visible = snapshot.prev_predator_visible
+    reward_components = tick_context.reward_components
+    info = tick_context.info
     cfg = world.reward_config
     profile = world.operational_profile.reward
 
@@ -293,6 +603,13 @@ def apply_progress_and_event_rewards(
         "shelter": int(prev_shelter_dist - new_shelter_dist),
         "predator": int(new_predator_dist - prev_predator_dist),
     }
+    tick_context.record_event(
+        "reward",
+        "distance_deltas",
+        food=int(food_progress),
+        shelter=int(shelter_progress),
+        predator=int(predator_distance_gain),
+    )
 
     if (
         terrain_now == NARROW
@@ -302,6 +619,12 @@ def apply_progress_and_event_rewards(
         max_distance = profile["narrow_predator_risk_max_distance"]
         risk = ((max_distance + 1.0) - new_predator_dist) / max_distance
         reward_components["terrain_cost"] -= cfg["narrow_predator_risk"] * risk
+        tick_context.record_event(
+            "reward",
+            "narrow_predator_risk",
+            risk=round(float(risk), 6),
+            predator_distance=int(new_predator_dist),
+        )
 
     if world.state.hunger > profile["food_progress_hunger_threshold"] and not world.on_food():
         reward_components["food_progress"] += (
@@ -340,23 +663,55 @@ def apply_progress_and_event_rewards(
     if on_shelter_now and not was_on_shelter:
         world.state.shelter_entries += 1
         reward_components["shelter_entry"] += cfg["shelter_entry"]
+        tick_context.record_event(
+            "reward",
+            "shelter_entry",
+            shelter_role=world.shelter_role_at(world.spider_pos()),
+        )
     if night and on_shelter_now:
         reward_components["night_shelter_bonus"] += cfg["night_shelter_bonus"] * world.shelter_role_level()
 
     predator_visible_now = (
         predator_visible_to_spider(world).visible > profile["predator_visibility_threshold"]
     )
+    tick_context.predator_visible_now = bool(predator_visible_now)
     predator_escape = False
+    escape_context_active = bool(
+        prev_predator_visible
+        or world.state.recent_contact > profile["predator_escape_contact_threshold"]
+    )
+    threat_episode_active_now = bool(
+        escape_context_active
+        or predator_visible_now
+        or world.state.recent_pain > profile["reset_sleep_recent_pain_threshold"]
+    )
+    if threat_episode_active_now and not world._predator_threat_episode_active:
+        world._predator_escape_bonus_pending = True
+    elif not threat_episode_active_now:
+        world._predator_escape_bonus_pending = False
+    world._predator_threat_episode_active = threat_episode_active_now
     if predator_visible_now:
         world.state.alert_events += 1
         world.state.predator_sightings += 1
-    if (prev_predator_visible or world.state.recent_contact > profile["predator_escape_contact_threshold"]) and (
+        tick_context.record_event(
+            "reward",
+            "predator_sighting",
+            predator_distance=int(new_predator_dist),
+        )
+    if world._predator_escape_bonus_pending and escape_context_active and (
         world.inside_shelter()
         or (new_predator_dist - prev_predator_dist) >= profile["predator_escape_distance_gain_threshold"]
     ):
         world.state.predator_escapes += 1
         reward_components["predator_escape"] += cfg["predator_escape_bonus"]
         predator_escape = True
+        world._predator_escape_bonus_pending = False
+        tick_context.record_event(
+            "reward",
+            "predator_escape",
+            predator_distance_gain=round(float(predator_distance_gain), 6),
+            inside_shelter=bool(world.inside_shelter()),
+        )
 
     if (
         new_predator_dist <= profile["reset_sleep_predator_distance_threshold"]
@@ -364,5 +719,12 @@ def apply_progress_and_event_rewards(
         or world.state.recent_pain > profile["reset_sleep_recent_pain_threshold"]
     ):
         reset_sleep_state(world)
+        tick_context.record_event(
+            "reward",
+            "sleep_reset_due_to_threat",
+            predator_distance=int(new_predator_dist),
+            recent_contact=round(float(world.state.recent_contact), 6),
+            recent_pain=round(float(world.state.recent_pain), 6),
+        )
 
-    return predator_escape, predator_visible_now
+    tick_context.predator_escape = bool(predator_escape)

@@ -31,16 +31,28 @@ def _normalize_noise_section(
     section_name: str,
     values: Mapping[str, float],
 ) -> Mapping[str, float]:
-    """Validate, coerce, and freeze one NoiseConfig channel section."""
+    """
+    Validate, coerce, and return an immutable mapping for a named noise section.
+    
+    Parameters:
+        section_name (str): Canonical section name (e.g., "visual", "olfactory", "motor", "spawn", "predator").
+        values (Mapping[str, float]): Mapping of section keys to numeric values; keys will be coerced to strings and values to floats.
+    
+    Returns:
+        Mapping[str, float]: An immutable mapping containing the section keys (as `str`) and values (as `float`).
+    
+    Raises:
+        ValueError: If `values` is not a Mapping; if any key or value cannot be coerced to the required types; if required keys for `section_name` are missing; or if unknown extra keys are present.
+    """
     if not isinstance(values, Mapping):
         raise ValueError(
-            f"NoiseConfig seção '{section_name}' inválida: esperado Mapping[str, float]."
+            f"Invalid NoiseConfig section '{section_name}': expected Mapping[str, float]."
         )
     try:
         copied = _copy_float_mapping(values)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"NoiseConfig seção '{section_name}' inválida: valores devem ser coercíveis para float."
+            f"Invalid NoiseConfig section '{section_name}': values must be coercible to float."
         ) from exc
     required = set(_NOISE_SECTION_KEYS[section_name])
     present = set(copied.keys())
@@ -48,11 +60,11 @@ def _normalize_noise_section(
     unknown = sorted(present - required)
     if missing:
         raise ValueError(
-            f"NoiseConfig seção '{section_name}' inválida: faltando chaves obrigatórias {missing}."
+            f"Invalid NoiseConfig section '{section_name}': missing required keys {missing}."
         )
     if unknown:
         raise ValueError(
-            f"NoiseConfig seção '{section_name}' inválida: chaves desconhecidas {unknown}."
+            f"Invalid NoiseConfig section '{section_name}': unknown keys {unknown}."
         )
     return MappingProxyType(copied)
 
@@ -117,7 +129,7 @@ class NoiseConfig:
         missing = [key for key in required if key not in summary]
         if missing:
             raise ValueError(
-                "NoiseConfig resumo inválido: faltando chaves obrigatórias "
+                "Invalid NoiseConfig summary: missing required keys "
                 f"{missing}."
             )
         sections: dict[str, Mapping[str, float]] = {}
@@ -125,12 +137,12 @@ class NoiseConfig:
             value = summary[key]
             if not isinstance(value, Mapping):
                 raise ValueError(
-                    f"NoiseConfig resumo inválido: '{key}' deve ser Mapping."
+                    f"Invalid NoiseConfig summary: '{key}' must be a Mapping."
                 )
             sections[key] = value
         name = summary["name"]
         if not isinstance(name, str):
-            raise ValueError("NoiseConfig resumo inválido: 'name' deve ser str.")
+            raise ValueError("Invalid NoiseConfig summary: 'name' must be str.")
         return cls(
             name=name,
             visual=sections["visual"],
@@ -251,13 +263,13 @@ def resolve_noise_profile(
     profile: str | NoiseConfig | None,
 ) -> NoiseConfig:
     """
-    Resolve a noise profile specifier into a NoiseConfig.
+    Resolve a noise profile specifier to a canonical noise profile.
     
     Parameters:
         profile: A profile name (string key), a NoiseConfig instance, or `None`. If `None`, the canonical "none" profile is used. If a string, it must match one of the available canonical profile names.
     
     Returns:
-        The matching NoiseConfig instance.
+        The resolved `NoiseConfig` corresponding to the requested profile.
     
     Raises:
         ValueError: If `profile` is a string that does not match any known profile key.
@@ -268,5 +280,5 @@ def resolve_noise_profile(
         return NoiseConfig.from_summary(profile.to_summary())
     key = str(profile)
     if key not in _NOISE_PROFILES:
-        raise ValueError(f"Perfil de ruído inválido: {profile}")
+        raise ValueError(f"Invalid noise profile: {profile}")
     return NoiseConfig.from_summary(_NOISE_PROFILES[key].to_summary())

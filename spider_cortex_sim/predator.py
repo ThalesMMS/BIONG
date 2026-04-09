@@ -36,7 +36,7 @@ class LizardState:
 
 
 class PredatorController:
-    """FSM explícita do lagarto, mantendo a lógica fora de `world.py`."""
+    """Explicit lizard FSM that keeps the logic outside `world.py`."""
 
     ORIENT_TICKS = 1
     INVESTIGATE_MOVES = 4
@@ -107,23 +107,23 @@ class PredatorController:
 
     def _set_mode(self, lizard: LizardState, mode: str) -> None:
         """
-        Set the lizard's FSM mode and clear or reset state fields that depend on the new mode.
+        Set the lizard's finite-state mode and reset or clear state fields that depend on the new mode.
         
-        Validates that `mode` is one of PREDATOR_STATES and raises ValueError for an invalid mode. If `mode` equals the lizard's current mode, no changes are made. Otherwise this sets `lizard.mode` and resets `lizard.mode_ticks` to 0, then updates dependent fields:
-        - If the new mode is not "PATROL", clears `lizard.patrol_target`.
-        - If the new mode is not "WAIT" or "RECOVER", clears `lizard.wait_target`.
-        - If the new mode is not "WAIT", resets `lizard.ambush_ticks` to 0.
-        - If the new mode is not "INVESTIGATE", resets `lizard.investigate_ticks` to 0 and clears `lizard.investigate_target`.
+        If `mode` is different from the current mode, updates `lizard.mode` and resets `lizard.mode_ticks` to 0, then:
+        - clears `lizard.patrol_target` when the new mode is not "PATROL";
+        - clears `lizard.wait_target` when the new mode is not "WAIT" or "RECOVER";
+        - resets `lizard.ambush_ticks` to 0 when the new mode is not "WAIT";
+        - resets `lizard.investigate_ticks` to 0 and clears `lizard.investigate_target` when the new mode is not "INVESTIGATE".
         
         Parameters:
             lizard (LizardState): The lizard state to modify.
-            mode (str): The target FSM mode; must be a member of PREDATOR_STATES.
+            mode (str): Target FSM mode; must be one of PREDATOR_STATES.
         
         Raises:
             ValueError: If `mode` is not a valid predator state.
         """
         if mode not in PREDATOR_STATES:
-            raise ValueError(f"Modo do predador inválido: {mode}")
+            raise ValueError(f"Invalid predator mode: {mode}")
         if lizard.mode != mode:
             lizard.mode = mode
             lizard.mode_ticks = 0

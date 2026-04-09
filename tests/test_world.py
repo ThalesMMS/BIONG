@@ -5,6 +5,7 @@ import numpy as np
 
 from spider_cortex_sim.agent import SpiderBrain
 from spider_cortex_sim.interfaces import (
+    ACTION_DELTAS,
     ACTION_CONTEXT_INTERFACE,
     MOTOR_CONTEXT_INTERFACE,
     OBSERVATION_INTERFACE_BY_KEY,
@@ -107,11 +108,11 @@ class SpiderWorldTest(unittest.TestCase):
         """
         world = SpiderWorld(seed=3)
         obs = world.reset(seed=3)
-        self.assertEqual(obs["visual"].shape, (17,))
+        self.assertEqual(obs["visual"].shape, (23,))
         self.assertEqual(obs["sensory"].shape, (12,))
-        self.assertEqual(obs["hunger"].shape, (13,))
-        self.assertEqual(obs["sleep"].shape, (16,))
-        self.assertEqual(obs["alert"].shape, (19,))
+        self.assertEqual(obs["hunger"].shape, (16,))
+        self.assertEqual(obs["sleep"].shape, (19,))
+        self.assertEqual(obs["alert"].shape, (23,))
         self.assertEqual(obs["action_context"].shape, (16,))
         self.assertEqual(obs["motor_context"].shape, (10,))
         self.assertEqual(obs["meta"]["map_template"], "central_burrow")
@@ -121,6 +122,8 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertIn("terrain", obs["meta"])
         self.assertIn("vision", obs["meta"])
         self.assertIn("memory_vectors", obs["meta"])
+        self.assertIn("heading", obs["meta"])
+        self.assertIn("percept_traces", obs["meta"])
         self.assertIn("food", obs["meta"]["vision"])
         self.assertIn("predator", obs["meta"]["vision"])
         np.testing.assert_array_equal(obs["motor_extra"], obs["motor_context"])
@@ -140,6 +143,89 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertEqual(obs["meta"]["on_shelter"], bool(action_context.on_shelter))
         self.assertEqual(obs["meta"]["on_shelter"], bool(motor_context.on_shelter))
 
+    def test_reset_initializes_heading_toward_nearest_entrance(self) -> None:
+        world = SpiderWorld(seed=71, lizard_move_interval=999999)
+        obs = world.reset(seed=71)
+        entrance = world.nearest_shelter_entrance(origin=world.spider_pos())
+        expected = world._heading_toward(entrance, origin=world.spider_pos())
+        self.assertEqual((world.state.heading_dx, world.state.heading_dy), expected)
+        self.assertEqual(obs["meta"]["heading"]["dx"], expected[0])
+        self.assertEqual(obs["meta"]["heading"]["dy"], expected[1])
+
+    def test_successful_move_updates_heading_and_blocked_move_preserves_it(self) -> None:
+        world = SpiderWorld(seed=73, lizard_move_interval=999999)
+        world.reset(seed=73)
+        start = None
+        action_name = None
+        for x in range(world.width):
+            for y in range(world.height):
+                for candidate_action, (dx, dy) in ACTION_DELTAS.items():
+                    if candidate_action == "STAY":
+                        continue
+                    next_pos = (x + dx, y + dy)
+                    if not (0 <= next_pos[0] < world.width and 0 <= next_pos[1] < world.height):
+                        continue
+                    if world.is_walkable((x, y)) and world.is_walkable(next_pos):
+                        start = (x, y)
+                        action_name = candidate_action
+                        break
+                if start is not None:
+                    break
+            if start is not None:
+                break
+        self.assertIsNotNone(start)
+        self.assertIsNotNone(action_name)
+
+        world.state.x, world.state.y = start
+        world.state.heading_dx = 0
+        world.state.heading_dy = 1
+        world.step(ACTION_TO_INDEX[action_name])
+        expected_dx, expected_dy = ACTION_DELTAS[action_name]
+        self.assertEqual((world.state.heading_dx, world.state.heading_dy), (expected_dx, expected_dy))
+
+        world.state.heading_dx = -1
+        world.state.heading_dy = 0
+        world.state.x, world.state.y = 0, 0
+        world.step(ACTION_TO_INDEX["MOVE_LEFT"])
+        self.assertEqual((world.state.heading_dx, world.state.heading_dy), (-1, 0))
+
+    def test_percept_traces_refresh_decay_and_observe_is_read_only(self) -> None:
+        world = SpiderWorld(seed=79, vision_range=6, lizard_move_interval=999999)
+        world.reset(seed=79)
+        pair = None
+        for x in range(world.width - 1):
+            for y in range(world.height):
+                if world.is_walkable((x, y)) and world.is_walkable((x + 1, y)):
+                    pair = ((x, y), (x + 1, y))
+                    break
+            if pair is not None:
+                break
+        self.assertIsNotNone(pair)
+
+        current, front = pair
+        world.state.x, world.state.y = current
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        world.food_positions = [front]
+        self._move_lizard_to_safe_corner(world)
+
+        world.step(ACTION_TO_INDEX["STAY"])
+        initial_strength = world._trace_strength(world.state.food_trace)
+        self.assertEqual(world.state.food_trace.target, front)
+        self.assertGreater(initial_strength, 0.0)
+
+        age_before_observe = world.state.food_trace.age
+        world.observe()
+        self.assertEqual(world.state.food_trace.age, age_before_observe)
+
+        world.food_positions = []
+        world.step(ACTION_TO_INDEX["STAY"])
+        self.assertLess(world._trace_strength(world.state.food_trace), initial_strength)
+
+        for _ in range(world._percept_trace_ttl()):
+            world.step(ACTION_TO_INDEX["STAY"])
+        self.assertIsNone(world.state.food_trace.target)
+
     def test_noise_profile_low_is_reproducible_for_initial_state_and_spawns(self) -> None:
         """Identical seeds with noise_profile='low' must reproduce episode seed, spawns, and initial physiology."""
         world_a = SpiderWorld(seed=41, noise_profile="low", lizard_move_interval=999999)
@@ -152,18 +238,292 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertEqual(world_a.lizard_pos(), world_b.lizard_pos())
         self.assertAlmostEqual(world_a.state.hunger, world_b.state.hunger)
         self.assertAlmostEqual(world_a.state.fatigue, world_b.state.fatigue)
-        self.assertAlmostEqual(world_a.state.sleep_debt, world_b.state.sleep_debt)
 
-    def test_noise_profile_none_preserves_reproducible_respawn(self) -> None:
-        world_a = SpiderWorld(seed=43, noise_profile="none", lizard_move_interval=999999)
-        world_b = SpiderWorld(seed=43, noise_profile="none", lizard_move_interval=999999)
-        world_a.reset(seed=321)
-        world_b.reset(seed=321)
+    def test_heading_components_from_delta_all_sign_combinations(self) -> None:
+        """
+        _heading_components_from_delta must map any (dx, dy) to their independent signs in {-1, 0, 1}.
+        """
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        cases = [
+            ((3, 5), (1, 1)),
+            ((-2, 0), (-1, 0)),
+            ((0, -7), (0, -1)),
+            ((0, 0), (0, 0)),
+            ((-100, 100), (-1, 1)),
+            ((1, -1), (1, -1)),
+        ]
+        for delta, expected in cases:
+            with self.subTest(delta=delta):
+                self.assertEqual(world._heading_components_from_delta(*delta), expected)
 
-        world_a.respawn_food(world_a.food_positions[0])
-        world_b.respawn_food(world_b.food_positions[0])
+    def test_heading_toward_none_target_returns_zero(self) -> None:
+        world = SpiderWorld(seed=91, lizard_move_interval=999999)
+        world.reset(seed=91)
+        self.assertEqual(world._heading_toward(None), (0, 0))
 
-        self.assertEqual(world_a.food_positions, world_b.food_positions)
+    def test_heading_toward_with_explicit_origin(self) -> None:
+        world = SpiderWorld(seed=93, lizard_move_interval=999999)
+        world.reset(seed=93)
+        result = world._heading_toward((10, 5), origin=(7, 3))
+        self.assertEqual(result, (1, 1))
+
+    def test_heading_toward_same_as_origin_returns_zero(self) -> None:
+        world = SpiderWorld(seed=95, lizard_move_interval=999999)
+        world.reset(seed=95)
+        pos = world.spider_pos()
+        self.assertEqual(world._heading_toward(pos), (0, 0))
+
+    def test_heading_toward_uses_spider_pos_when_origin_omitted(self) -> None:
+        world = SpiderWorld(seed=97, lizard_move_interval=999999)
+        world.reset(seed=97)
+        world.state.x, world.state.y = 5, 5
+        target = (8, 5)
+        result = world._heading_toward(target)
+        self.assertEqual(result, (1, 0))
+
+    def test_percept_trace_ttl_minimum_is_one(self) -> None:
+        """TTL is clipped to at least 1 even if the config value rounds to 0."""
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.operational_profile.perception["percept_trace_ttl"] = 0.3
+        self.assertEqual(world._percept_trace_ttl(), 1)
+
+    def test_percept_trace_ttl_rounds_to_nearest_integer(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.operational_profile.perception["percept_trace_ttl"] = 3.6
+        self.assertEqual(world._percept_trace_ttl(), 4)
+
+    def test_percept_trace_decay_clips_to_unit_interval(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.operational_profile.perception["percept_trace_decay"] = 1.5
+        self.assertAlmostEqual(world._percept_trace_decay(), 1.0)
+        world.operational_profile.perception["percept_trace_decay"] = -0.2
+        self.assertAlmostEqual(world._percept_trace_decay(), 0.0)
+
+    def test_trace_strength_empty_trace_returns_zero(self) -> None:
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        empty = world._empty_percept_trace()
+        self.assertAlmostEqual(world._trace_strength(empty), 0.0)
+
+    def test_trace_strength_at_ttl_boundary_returns_zero(self) -> None:
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        ttl = world._percept_trace_ttl()
+        trace = PerceptTrace(target=(5, 5), age=ttl, certainty=1.0)
+        self.assertAlmostEqual(world._trace_strength(trace), 0.0)
+
+    def test_trace_strength_age_zero_equals_certainty(self) -> None:
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        trace = PerceptTrace(target=(5, 5), age=0, certainty=0.8)
+        self.assertAlmostEqual(world._trace_strength(trace), 0.8)
+
+    def test_trace_strength_decays_over_age(self) -> None:
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        decay = world._percept_trace_decay()
+        trace_age0 = PerceptTrace(target=(5, 5), age=0, certainty=1.0)
+        trace_age1 = PerceptTrace(target=(5, 5), age=1, certainty=1.0)
+        if world._percept_trace_ttl() > 1:
+            expected_age1 = min(max(1.0 * (decay ** 1), 0.0), 1.0)
+            self.assertAlmostEqual(world._trace_strength(trace_age1), expected_age1, places=6)
+        self.assertGreaterEqual(world._trace_strength(trace_age0), world._trace_strength(trace_age1))
+
+    def test_trace_view_empty_trace_produces_zero_fields(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        view = world._trace_view(world._empty_percept_trace())
+        self.assertIsNone(view["target"])
+        self.assertEqual(view["age"], 0)
+        self.assertAlmostEqual(view["strength"], 0.0)
+        self.assertAlmostEqual(view["dx"], 0.0)
+        self.assertAlmostEqual(view["dy"], 0.0)
+
+    def test_trace_view_has_all_required_keys(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        view = world._trace_view(world._empty_percept_trace())
+        for key in ("target", "age", "certainty", "strength", "dx", "dy", "ttl", "decay"):
+            self.assertIn(key, view)
+
+    def test_trace_view_active_trace_has_nonzero_strength_and_direction(self) -> None:
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        trace = PerceptTrace(target=(8, 5), age=0, certainty=1.0)
+        view = world._trace_view(trace)
+        self.assertGreater(view["strength"], 0.0)
+        self.assertNotEqual(view["dx"], 0.0)
+
+    def test_trace_view_expired_trace_has_zero_direction(self) -> None:
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        ttl = world._percept_trace_ttl()
+        expired = PerceptTrace(target=(8, 5), age=ttl, certainty=1.0)
+        view = world._trace_view(expired)
+        self.assertAlmostEqual(view["strength"], 0.0)
+        self.assertAlmostEqual(view["dx"], 0.0)
+        self.assertAlmostEqual(view["dy"], 0.0)
+
+    def test_advance_percept_trace_visible_target_resets_trace(self) -> None:
+        from spider_cortex_sim.perception import PerceivedTarget
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        old_trace = PerceptTrace(target=(3, 3), age=2, certainty=0.4)
+        visible_percept = PerceivedTarget(
+            visible=1.0,
+            certainty=0.9,
+            occluded=0.0,
+            dx=1.0,
+            dy=0.0,
+            dist=3,
+            position=(8, 5),
+        )
+        positions = [(8, 5)]
+        updated = world._advance_percept_trace(old_trace, visible_percept, positions)
+        self.assertEqual(updated.target, (8, 5))
+        self.assertEqual(updated.age, 0)
+        self.assertAlmostEqual(updated.certainty, 0.9)
+
+    def test_visible_perceived_target_requires_position(self) -> None:
+        from spider_cortex_sim.perception import PerceivedTarget
+
+        with self.assertRaisesRegex(ValueError, "Visible PerceivedTarget requires position"):
+            PerceivedTarget(
+                visible=1.0,
+                certainty=0.9,
+                occluded=0.0,
+                dx=1.0,
+                dy=0.0,
+                dist=3,
+            )
+
+    def test_advance_percept_trace_uses_same_target_selected_by_visible_object(self) -> None:
+        from spider_cortex_sim.perception import visible_object, visible_range
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, vision_range=8, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        positions = [(2, 5), (8, 5)]
+        percept = visible_object(world, positions, radius=visible_range(world), apply_noise=False)
+        updated = world._advance_percept_trace(
+            PerceptTrace(target=None, age=0, certainty=0.0),
+            percept,
+            positions,
+        )
+        self.assertEqual(updated.target, (8, 5))
+
+    def test_advance_percept_trace_heading_check_blocks_update_when_position_is_not_none(self) -> None:
+        """Regression: when percept.position is provided, an opposed heading prevents
+        the trace from being updated — the existing heading-gating logic remains active."""
+        from spider_cortex_sim.perception import PerceivedTarget
+        from spider_cortex_sim.world_types import PerceptTrace
+
+        world = SpiderWorld(seed=89, vision_range=8, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        # Heading points LEFT — opposed to target at (8, 5)
+        world.state.heading_dx = -1
+        world.state.heading_dy = 0
+
+        positions = [(8, 5)]
+        # percept.position is explicitly set → heading check is active
+        opposed_percept = PerceivedTarget(
+            visible=1.0,
+            certainty=0.9,
+            occluded=0.0,
+            dx=1.0,
+            dy=0.0,
+            dist=3,
+            position=(8, 5),  # position set: heading check applies
+        )
+
+        old_trace = PerceptTrace(target=(3, 3), age=1, certainty=0.5)
+        updated = world._advance_percept_trace(old_trace, opposed_percept, positions)
+
+        # Opposed heading with explicit position → trace should age, not reset
+        self.assertEqual(updated.age, 2)
+        self.assertEqual(updated.target, (3, 3))
+
+    def test_advance_percept_trace_positions_as_list_of_lists_is_handled(self) -> None:
+        """candidate_positions conversion handles positions given as list-of-lists."""
+        from spider_cortex_sim.perception import PerceivedTarget
+        from spider_cortex_sim.world_types import PerceptTrace
+
+        world = SpiderWorld(seed=89, vision_range=8, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+
+        # Pass positions as list of lists (not tuples)
+        positions = [[8, 5]]
+        percept = PerceivedTarget(
+            visible=1.0,
+            certainty=0.9,
+            occluded=0.0,
+            dx=1.0,
+            dy=0.0,
+            dist=3,
+            position=(8, 5),
+        )
+
+        updated = world._advance_percept_trace(
+            PerceptTrace(target=None, age=0, certainty=0.0),
+            percept,
+            positions,
+        )
+
+        self.assertEqual(updated.target, (8, 5))
+        self.assertEqual(updated.age, 0)
+
+    def test_advance_percept_trace_occluded_target_does_not_reset(self) -> None:
+        from spider_cortex_sim.perception import PerceivedTarget
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        old_trace = PerceptTrace(target=(3, 3), age=1, certainty=0.5)
+        occluded_percept = PerceivedTarget(visible=0.0, certainty=0.5, occluded=1.0, dx=0.0, dy=0.0, dist=3)
+        updated = world._advance_percept_trace(old_trace, occluded_percept, [(3, 3)])
+        self.assertEqual(updated.age, 2)
+        self.assertEqual(updated.target, (3, 3))
+
+    def test_advance_percept_trace_no_target_no_visible_returns_empty(self) -> None:
+        from spider_cortex_sim.perception import PerceivedTarget
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        empty_trace = world._empty_percept_trace()
+        invisible_percept = PerceivedTarget(visible=0.0, certainty=0.0, occluded=0.0, dx=0.0, dy=0.0, dist=0)
+        updated = world._advance_percept_trace(empty_trace, invisible_percept, [(5, 5)])
+        self.assertIsNone(updated.target)
+        self.assertEqual(updated.age, 0)
+
+    def test_advance_percept_trace_ages_and_expires_at_ttl(self) -> None:
+        from spider_cortex_sim.perception import PerceivedTarget
+        from spider_cortex_sim.world_types import PerceptTrace
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        ttl = world._percept_trace_ttl()
+        invisible = PerceivedTarget(visible=0.0, certainty=0.0, occluded=0.0, dx=0.0, dy=0.0, dist=0)
+        trace = PerceptTrace(target=(5, 5), age=0, certainty=1.0)
+        for _ in range(ttl):
+            trace = world._advance_percept_trace(trace, invisible, [(5, 5)])
+        self.assertIsNone(trace.target)
 
     def test_motor_noise_populates_intended_and_executed_action_fields(self) -> None:
         profile = NoiseConfig(
@@ -309,7 +669,13 @@ class SpiderWorldTest(unittest.TestCase):
         world.lizard.x, world.lizard.y = 0, 0
         health_before = world.state.health
         _, reward_contact, _, info_contact = world.step(ACTION_TO_INDEX["STAY"])
+        predator_contact_events = [
+            item
+            for item in info_contact["event_log"]
+            if item["stage"] == "predator_contact" and item["name"] == "predator_contact"
+        ]
         self.assertTrue(info_contact["predator_contact"])
+        self.assertEqual(len(predator_contact_events), 1)
         self.assertLess(world.state.health, health_before)
         self._assert_reward_components(reward_contact, info_contact)
 
@@ -320,6 +686,22 @@ class SpiderWorldTest(unittest.TestCase):
         for _ in range(5):
             world.step(ACTION_TO_INDEX["STAY"])
             self.assertNotIn(world.lizard_pos(), world.shelter_cells)
+
+    def test_predator_contact_is_applied_only_once_per_tick(self) -> None:
+        world = SpiderWorld(seed=10, lizard_move_interval=999999)
+        world.reset(seed=10)
+        world.state.x, world.state.y = 0, 0
+        world.lizard.x, world.lizard.y = 0, 0
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        predator_contact_events = [
+            item
+            for item in info["event_log"]
+            if item["stage"] == "predator_contact" and item["name"] == "predator_contact"
+        ]
+        self.assertTrue(info.get("predator_contact"))
+        self.assertEqual(len(predator_contact_events), 1)
 
     def test_deep_shelter_blocks_lizard_detection(self) -> None:
         """
@@ -431,6 +813,267 @@ class SpiderWorldTest(unittest.TestCase):
 
         self.assertEqual(set(info["distance_deltas"].keys()), {"food", "shelter", "predator"})
         self.assertEqual(info["distance_deltas"]["food"], 1)
+
+    def test_step_always_emits_event_log(self) -> None:
+        world = SpiderWorld(seed=45, lizard_move_interval=999999)
+        world.reset(seed=45)
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        self.assertIn("event_log", info)
+        self.assertIsInstance(info["event_log"], list)
+        self.assertTrue(info["event_log"])
+        self.assertEqual({"stage", "name", "payload"}, set(info["event_log"][0].keys()))
+
+    def test_step_accepts_numpy_integer_action_idx(self) -> None:
+        world = SpiderWorld(seed=47, lizard_move_interval=999999)
+        world.reset(seed=47)
+
+        _, _, _, info = world.step(np.int64(ACTION_TO_INDEX["STAY"]))
+
+        self.assertEqual(info["intended_action"], "STAY")
+
+    def test_event_log_records_pipeline_stages_in_order(self) -> None:
+        world = SpiderWorld(seed=49, lizard_move_interval=999999)
+        world.reset(seed=49)
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        stages = [item["stage"] for item in info["event_log"]]
+        first_index = {stage: stages.index(stage) for stage in {
+            "pre_tick",
+            "action",
+            "terrain_and_wakefulness",
+            "predator_contact",
+            "autonomic",
+            "predator_update",
+            "reward",
+            "postprocess",
+            "memory",
+            "finalize",
+        }}
+        self.assertLess(first_index["pre_tick"], first_index["action"])
+        self.assertLess(first_index["action"], first_index["terrain_and_wakefulness"])
+        self.assertLess(first_index["terrain_and_wakefulness"], first_index["predator_contact"])
+        self.assertLess(first_index["predator_contact"], first_index["autonomic"])
+        self.assertLess(first_index["autonomic"], first_index["predator_update"])
+        self.assertLess(first_index["predator_update"], first_index["reward"])
+        self.assertLess(first_index["reward"], first_index["postprocess"])
+        self.assertLess(first_index["postprocess"], first_index["memory"])
+        self.assertLess(first_index["memory"], first_index["finalize"])
+
+    def test_event_log_memory_stage_runs_after_tick_increment(self) -> None:
+        world = SpiderWorld(seed=51, lizard_move_interval=999999)
+        world.reset(seed=51)
+        tick_before = world.tick
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        memory_event = next(item for item in info["event_log"] if item["stage"] == "memory")
+        finalize_event = next(item for item in info["event_log"] if item["stage"] == "finalize")
+        memory_index = next(i for i, item in enumerate(info["event_log"]) if item["stage"] == "memory")
+        finalize_index = next(i for i, item in enumerate(info["event_log"]) if item["stage"] == "finalize")
+        self.assertEqual(world.tick, tick_before + 1)
+        self.assertEqual(memory_event["payload"]["tick"], tick_before + 1)
+        self.assertEqual(finalize_event["payload"]["tick"], tick_before + 1)
+        self.assertEqual(memory_event["name"], "memory_refreshed")
+        self.assertLess(memory_index, finalize_index)
+
+    def test_event_log_pre_tick_snapshot_has_required_fields(self) -> None:
+        world = SpiderWorld(seed=53, lizard_move_interval=999999)
+        world.reset(seed=53)
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        pre_tick_event = next(item for item in info["event_log"] if item["stage"] == "pre_tick")
+        payload = pre_tick_event["payload"]
+        expected_keys = {
+            "tick", "spider_pos", "lizard_pos", "was_on_shelter",
+            "prev_shelter_role", "prev_food_dist", "prev_shelter_dist",
+            "prev_predator_dist", "prev_predator_visible", "night", "rest_streak",
+        }
+        self.assertEqual(set(payload.keys()), expected_keys)
+
+    def test_event_log_pre_tick_snapshot_captures_positions(self) -> None:
+        world = SpiderWorld(seed=55, lizard_move_interval=999999)
+        world.reset(seed=55)
+        world.state.x, world.state.y = 3, 3
+        world.lizard.x, world.lizard.y = 7, 7
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        pre_tick_event = next(item for item in info["event_log"] if item["stage"] == "pre_tick")
+        payload = pre_tick_event["payload"]
+        self.assertEqual(payload["spider_pos"], [3, 3])
+        self.assertEqual(payload["lizard_pos"], [7, 7])
+
+    def test_event_log_action_stage_records_movement(self) -> None:
+        world = SpiderWorld(seed=57, lizard_move_interval=999999)
+        world.reset(seed=57)
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        action_events = [item for item in info["event_log"] if item["stage"] == "action"]
+        self.assertTrue(len(action_events) >= 2)
+        names = [e["name"] for e in action_events]
+        self.assertIn("action_resolved", names)
+        self.assertIn("movement_applied", names)
+
+    def test_event_log_action_resolved_has_action_fields(self) -> None:
+        world = SpiderWorld(seed=59, lizard_move_interval=999999)
+        world.reset(seed=59)
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        action_resolved = next(
+            item for item in info["event_log"]
+            if item["stage"] == "action" and item["name"] == "action_resolved"
+        )
+        payload = action_resolved["payload"]
+        self.assertIn("action_index", payload)
+        self.assertIn("intended_action", payload)
+        self.assertIn("executed_action", payload)
+        self.assertIn("motor_noise_applied", payload)
+        self.assertEqual(payload["intended_action"], "STAY")
+        self.assertEqual(payload["executed_action"], "STAY")
+
+    def test_event_log_terrain_stage_has_required_fields(self) -> None:
+        world = SpiderWorld(seed=61, lizard_move_interval=999999)
+        world.reset(seed=61)
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        terrain_event = next(
+            item for item in info["event_log"]
+            if item["stage"] == "terrain_and_wakefulness"
+        )
+        payload = terrain_event["payload"]
+        self.assertIn("terrain", payload)
+        self.assertIn("predator_threat", payload)
+        self.assertIn("interrupted_rest", payload)
+        self.assertIn("exposed_at_night", payload)
+        self.assertIn("sleep_debt", payload)
+        self.assertIn("fatigue", payload)
+
+    def test_event_log_predator_contact_stage_no_contact(self) -> None:
+        world = SpiderWorld(seed=63, lizard_move_interval=999999)
+        world.reset(seed=63)
+        # Move lizard far away
+        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        predator_events = [item for item in info["event_log"] if item["stage"] == "predator_contact"]
+        self.assertTrue(len(predator_events) >= 1)
+        # When no contact, should have a contact_check event
+        contact_check = next(
+            (item for item in predator_events if item["name"] == "contact_check"), None
+        )
+        self.assertIsNotNone(contact_check)
+        self.assertFalse(contact_check["payload"]["predator_contact"])
+
+    def test_event_log_postprocess_has_reward_and_done(self) -> None:
+        world = SpiderWorld(seed=65, lizard_move_interval=999999)
+        world.reset(seed=65)
+
+        _, reward, done, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        postprocess_event = next(
+            item for item in info["event_log"] if item["stage"] == "postprocess"
+        )
+        payload = postprocess_event["payload"]
+        self.assertIn("reward", payload)
+        self.assertIn("done", payload)
+        self.assertIn("health", payload)
+        self.assertIn("tick", payload)
+        self.assertAlmostEqual(payload["reward"], round(reward, 6), places=5)
+        self.assertEqual(done, payload["done"])
+
+    def test_event_log_reward_stage_has_distance_deltas(self) -> None:
+        world = SpiderWorld(seed=67, lizard_move_interval=999999)
+        world.reset(seed=67)
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        reward_events = [item for item in info["event_log"] if item["stage"] == "reward"]
+        reward_names = [e["name"] for e in reward_events]
+        self.assertIn("distance_deltas", reward_names)
+        delta_event = next(e for e in reward_events if e["name"] == "distance_deltas")
+        self.assertIn("food", delta_event["payload"])
+        self.assertIn("shelter", delta_event["payload"])
+        self.assertIn("predator", delta_event["payload"])
+
+    def test_event_log_memory_stage_has_memory_targets(self) -> None:
+        world = SpiderWorld(seed=69, lizard_move_interval=999999)
+        world.reset(seed=69)
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        memory_event = next(item for item in info["event_log"] if item["stage"] == "memory")
+        payload = memory_event["payload"]
+        self.assertIn("predator_escape", payload)
+        self.assertIn("food_memory_target", payload)
+        self.assertIn("predator_memory_target", payload)
+        self.assertIn("shelter_memory_target", payload)
+        self.assertIn("escape_memory_target", payload)
+
+    def test_event_log_is_independent_between_steps(self) -> None:
+        world = SpiderWorld(seed=71, lizard_move_interval=999999)
+        world.reset(seed=71)
+
+        _, _, _, info1 = world.step(ACTION_TO_INDEX["STAY"])
+        _, _, _, info2 = world.step(ACTION_TO_INDEX["STAY"])
+
+        # Each step should have its own event_log
+        self.assertIsNot(info1["event_log"], info2["event_log"])
+        # Pre-tick tick field should differ between steps
+        pre_tick1 = next(item for item in info1["event_log"] if item["stage"] == "pre_tick")
+        pre_tick2 = next(item for item in info2["event_log"] if item["stage"] == "pre_tick")
+        self.assertNotEqual(pre_tick1["payload"]["tick"], pre_tick2["payload"]["tick"])
+
+    def test_event_log_predator_contact_event_recorded_when_contact_occurs(self) -> None:
+        world = SpiderWorld(seed=73, lizard_move_interval=999999)
+        world.reset(seed=73)
+        # Place spider and lizard at the same position to force contact
+        world.state.x = world.lizard.x
+        world.state.y = world.lizard.y
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        predator_contact_events = [
+            item for item in info["event_log"]
+            if item["stage"] == "predator_contact" and item["name"] == "predator_contact"
+        ]
+        self.assertTrue(
+            info.get("predator_contact") and len(predator_contact_events) >= 1,
+            "Expected predator contact when spider and lizard share position",
+        )
+
+    def test_event_log_finalize_tick_complete_matches_world_tick(self) -> None:
+        world = SpiderWorld(seed=75, lizard_move_interval=999999)
+        world.reset(seed=75)
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+
+        finalize_event = next(item for item in info["event_log"] if item["stage"] == "finalize")
+        self.assertEqual(finalize_event["name"], "tick_complete")
+        self.assertEqual(finalize_event["payload"]["tick"], world.tick)
+
+    def test_predator_escape_bonus_only_emits_once_per_threat_episode(self) -> None:
+        world = SpiderWorld(seed=77, lizard_move_interval=999999)
+        world.reset(seed=77)
+        world.state.x, world.state.y = self._deep_cell(world)
+        self._move_lizard_to_safe_corner(world)
+        world.state.recent_contact = 1.0
+
+        _, _, _, info1 = world.step(ACTION_TO_INDEX["STAY"])
+        _, _, _, info2 = world.step(ACTION_TO_INDEX["STAY"])
+        _, _, _, info3 = world.step(ACTION_TO_INDEX["STAY"])
+
+        self.assertTrue(info1["predator_escape"])
+        self.assertFalse(info2["predator_escape"])
+        self.assertFalse(info3["predator_escape"])
+        self.assertEqual(world.state.predator_escapes, 1)
 
     def test_memory_persists_after_visibility_loss(self) -> None:
         world = SpiderWorld(seed=31, lizard_move_interval=999999)

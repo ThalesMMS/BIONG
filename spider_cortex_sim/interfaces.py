@@ -56,21 +56,20 @@ def _validate_exact_keys(label: str, expected_names: Sequence[str], values: Mapp
     	ValueError: If any expected names are missing or any extra keys are present; the error message lists missing and/or extra keys and includes `label`.
     """
     expected = tuple(expected_names)
-    received_keys = tuple(values.keys())
-    received = set(received_keys)
+    received = set(values.keys())
     expected_set = set(expected)
 
     missing = [name for name in expected if name not in received]
-    extra = sorted(name for name in received_keys if name not in expected_set)
+    extra = sorted(name for name in values.keys() if name not in expected_set)
     if not missing and not extra:
         return
 
     details = []
     if missing:
-        details.append(f"faltando {missing}")
+        details.append(f"missing {missing}")
     if extra:
-        details.append(f"extras {extra}")
-    raise ValueError(f"{label} recebeu sinais incompatíveis: {'; '.join(details)}.")
+        details.append(f"unexpected {extra}")
+    raise ValueError(f"{label} received incompatible signals: {'; '.join(details)}.")
 
 
 _ObservationViewT = TypeVar("_ObservationViewT", bound="ObservationView")
@@ -141,6 +140,12 @@ class VisualObservation(ObservationView):
     predator_occluded: float
     predator_dx: float
     predator_dy: float
+    heading_dx: float
+    heading_dy: float
+    food_trace_strength: float
+    shelter_trace_strength: float
+    predator_trace_strength: float
+    predator_motion_salience: float
     day: float
     night: float
 
@@ -177,6 +182,9 @@ class HungerObservation(ObservationView):
     food_smell_strength: float
     food_smell_dx: float
     food_smell_dy: float
+    food_trace_dx: float
+    food_trace_dy: float
+    food_trace_strength: float
     food_memory_dx: float
     food_memory_dy: float
     food_memory_age: float
@@ -199,6 +207,9 @@ class SleepObservation(ObservationView):
     rest_streak_norm: float
     sleep_debt: float
     shelter_role_level: float
+    shelter_trace_dx: float
+    shelter_trace_dy: float
+    shelter_trace_strength: float
     shelter_memory_dx: float
     shelter_memory_dy: float
     shelter_memory_age: float
@@ -215,12 +226,16 @@ class AlertObservation(ObservationView):
     predator_dy: float
     predator_dist: float
     predator_smell_strength: float
+    predator_motion_salience: float
     home_dx: float
     home_dy: float
     recent_pain: float
     recent_contact: float
     on_shelter: float
     night: float
+    predator_trace_dx: float
+    predator_trace_dy: float
+    predator_trace_strength: float
     predator_memory_dx: float
     predator_memory_dy: float
     predator_memory_age: float
@@ -269,7 +284,7 @@ class MotorContextObservation(ObservationView):
 
 @dataclass(frozen=True)
 class ModuleInterface:
-    """Contrato nomeado entre o mundo e um subsistema cortical."""
+    """Named contract between the world and a cortical subsystem."""
 
     name: str
     observation_key: str
@@ -280,8 +295,8 @@ class ModuleInterface:
     description: str = ""
     save_compatibility: str = "exact_match_required"
     compatibility_notes: tuple[str, ...] = (
-        "Mudanças em nome, observation_key, ordem dos sinais, versões ou outputs exigem incompatibilidade explícita.",
-        "Checkpoints antigos são rejeitados; não há migração automática.",
+        "Changes to the name, observation_key, signal order, version, or outputs require explicit incompatibility handling.",
+        "Older checkpoints are rejected; there is no automatic migration.",
     )
 
     @property
@@ -316,21 +331,21 @@ class ModuleInterface:
 
     def bind_values(self, values: Sequence[float]) -> dict[str, float]:
         """
-        Bind an ordered sequence of input scalars to the interface's input signal names.
+        Bind an ordered sequence of input scalars to this interface's input signal names.
         
         Parameters:
-            values (Sequence[float]): Sequence of numeric input values whose length must equal the interface's input_dim.
+            values (Sequence[float]): Numeric inputs in the order of the interface's `inputs`; length must equal `input_dim`.
         
         Returns:
             dict[str, float]: Mapping from each input signal name to its corresponding scalar value.
         
         Raises:
-            ValueError: If the provided sequence does not have the expected length (shape must equal (input_dim,)).
+            ValueError: If `values` does not have length equal to `input_dim`.
         """
         array = np.asarray(values, dtype=float)
         if array.shape != (self.input_dim,):
             raise ValueError(
-                f"Interface '{self.name}' esperava shape {(self.input_dim,)}, recebeu {array.shape}."
+                f"Interface '{self.name}' expected shape {(self.input_dim,)}, received {array.shape}."
             )
         return {
             signal.name: float(array[idx])
@@ -380,117 +395,137 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
         name="visual_cortex",
         observation_key="visual",
         role="proposal",
-        description="Propositor visual orientado por comida, abrigo e predador dentro do campo visual local.",
+        version=2,
+        description="Visual proposer driven by food, shelter, and predator cues inside the local visual field.",
         inputs=(
-            SignalSpec("food_visible", "1 se há comida detectada com confiança suficiente no campo visual."),
-            SignalSpec("food_certainty", "Confiança visual na comida percebida.", 0.0, 1.0),
-            SignalSpec("food_occluded", "1 se a comida mais próxima está em alcance, mas ocluída.", 0.0, 1.0),
-            SignalSpec("food_dx", "Deslocamento horizontal relativo da comida detectada."),
-            SignalSpec("food_dy", "Deslocamento vertical relativo da comida detectada."),
-            SignalSpec("shelter_visible", "1 se o abrigo está visível com confiança suficiente."),
-            SignalSpec("shelter_certainty", "Confiança visual no abrigo percebido.", 0.0, 1.0),
-            SignalSpec("shelter_occluded", "1 se o abrigo está em alcance visual, mas ocluído.", 0.0, 1.0),
-            SignalSpec("shelter_dx", "Deslocamento horizontal relativo do abrigo detectado."),
-            SignalSpec("shelter_dy", "Deslocamento vertical relativo do abrigo detectado."),
-            SignalSpec("predator_visible", "1 se o predador está visível com confiança suficiente."),
-            SignalSpec("predator_certainty", "Confiança visual no predador percebido.", 0.0, 1.0),
-            SignalSpec("predator_occluded", "1 se o predador está em alcance visual, mas ocluído.", 0.0, 1.0),
-            SignalSpec("predator_dx", "Deslocamento horizontal relativo do predador detectado."),
-            SignalSpec("predator_dy", "Deslocamento vertical relativo do predador detectado."),
-            SignalSpec("day", "1 durante o dia."),
-            SignalSpec("night", "1 durante a noite."),
+            SignalSpec("food_visible", "1 when food is detected with sufficient confidence in the visual field."),
+            SignalSpec("food_certainty", "Visual confidence in the perceived food target.", 0.0, 1.0),
+            SignalSpec("food_occluded", "1 when the nearest food is within range but occluded.", 0.0, 1.0),
+            SignalSpec("food_dx", "Relative horizontal offset of the detected food."),
+            SignalSpec("food_dy", "Relative vertical offset of the detected food."),
+            SignalSpec("shelter_visible", "1 when the shelter is visible with sufficient confidence."),
+            SignalSpec("shelter_certainty", "Visual confidence in the perceived shelter.", 0.0, 1.0),
+            SignalSpec("shelter_occluded", "1 when the shelter is within visual range but occluded.", 0.0, 1.0),
+            SignalSpec("shelter_dx", "Relative horizontal offset of the detected shelter."),
+            SignalSpec("shelter_dy", "Relative vertical offset of the detected shelter."),
+            SignalSpec("predator_visible", "1 when the predator is visible with sufficient confidence."),
+            SignalSpec("predator_certainty", "Visual confidence in the perceived predator.", 0.0, 1.0),
+            SignalSpec("predator_occluded", "1 when the predator is within visual range but occluded.", 0.0, 1.0),
+            SignalSpec("predator_dx", "Relative horizontal offset of the detected predator."),
+            SignalSpec("predator_dy", "Relative vertical offset of the detected predator."),
+            SignalSpec("heading_dx", "Current horizontal body or gaze orientation."),
+            SignalSpec("heading_dy", "Current vertical body or gaze orientation."),
+            SignalSpec("food_trace_strength", "Decayed strength of the short food trace.", 0.0, 1.0),
+            SignalSpec("shelter_trace_strength", "Decayed strength of the short shelter trace.", 0.0, 1.0),
+            SignalSpec("predator_trace_strength", "Decayed strength of the short predator trace.", 0.0, 1.0),
+            SignalSpec("predator_motion_salience", "Explicit motion salience of the predator.", 0.0, 1.0),
+            SignalSpec("day", "1 during daytime."),
+            SignalSpec("night", "1 during nighttime."),
         ),
     ),
     ModuleInterface(
         name="sensory_cortex",
         observation_key="sensory",
         role="proposal",
-        description="Propositor sensorial que integra dor, estado corporal, cheiro e luminosidade.",
+        description="Sensory proposer that integrates pain, body state, smell, and light.",
         inputs=(
-            SignalSpec("recent_pain", "Dor recente causada por ataque do predador.", 0.0, 1.0),
-            SignalSpec("recent_contact", "Contato físico recente com o predador.", 0.0, 1.0),
-            SignalSpec("health", "Saúde corporal.", 0.0, 1.0),
-            SignalSpec("hunger", "Fome corporal.", 0.0, 1.0),
-            SignalSpec("fatigue", "Fadiga corporal.", 0.0, 1.0),
-            SignalSpec("food_smell_strength", "Intensidade do cheiro de alimento.", 0.0, 1.0),
-            SignalSpec("food_smell_dx", "Gradiente horizontal do cheiro de alimento."),
-            SignalSpec("food_smell_dy", "Gradiente vertical do cheiro de alimento."),
-            SignalSpec("predator_smell_strength", "Intensidade do cheiro do predador.", 0.0, 1.0),
-            SignalSpec("predator_smell_dx", "Gradiente horizontal do cheiro do predador."),
-            SignalSpec("predator_smell_dy", "Gradiente vertical do cheiro do predador."),
-            SignalSpec("light", "Nível simples de luminosidade.", 0.0, 1.0),
+            SignalSpec("recent_pain", "Recent pain caused by a predator attack.", 0.0, 1.0),
+            SignalSpec("recent_contact", "Recent physical contact with the predator.", 0.0, 1.0),
+            SignalSpec("health", "Body health.", 0.0, 1.0),
+            SignalSpec("hunger", "Body hunger.", 0.0, 1.0),
+            SignalSpec("fatigue", "Body fatigue.", 0.0, 1.0),
+            SignalSpec("food_smell_strength", "Intensity of the food scent.", 0.0, 1.0),
+            SignalSpec("food_smell_dx", "Horizontal gradient of the food scent."),
+            SignalSpec("food_smell_dy", "Vertical gradient of the food scent."),
+            SignalSpec("predator_smell_strength", "Intensity of the predator scent.", 0.0, 1.0),
+            SignalSpec("predator_smell_dx", "Horizontal gradient of the predator scent."),
+            SignalSpec("predator_smell_dy", "Vertical gradient of the predator scent."),
+            SignalSpec("light", "Simple light level.", 0.0, 1.0),
         ),
     ),
     ModuleInterface(
         name="hunger_center",
         observation_key="hunger",
         role="proposal",
-        description="Propositor homeostático voltado a forrageio e retorno à última comida percebida.",
+        version=2,
+        description="Homeostatic proposer aimed at foraging and returning to the last perceived food.",
         inputs=(
-            SignalSpec("hunger", "Estado interno de fome.", 0.0, 1.0),
-            SignalSpec("on_food", "1 se a aranha está sobre alimento.", 0.0, 1.0),
-            SignalSpec("food_visible", "1 se há alimento visível.", 0.0, 1.0),
-            SignalSpec("food_certainty", "Confiança visual no alimento percebido.", 0.0, 1.0),
-            SignalSpec("food_occluded", "1 se há alimento próximo, mas ocluído.", 0.0, 1.0),
-            SignalSpec("food_dx", "Direção horizontal do alimento detectado."),
-            SignalSpec("food_dy", "Direção vertical do alimento detectado."),
-            SignalSpec("food_smell_strength", "Intensidade do cheiro do alimento.", 0.0, 1.0),
-            SignalSpec("food_smell_dx", "Gradiente horizontal do cheiro do alimento."),
-            SignalSpec("food_smell_dy", "Gradiente vertical do cheiro do alimento."),
-            SignalSpec("food_memory_dx", "Direção horizontal da última comida vista."),
-            SignalSpec("food_memory_dy", "Direção vertical da última comida vista."),
-            SignalSpec("food_memory_age", "Idade normalizada da memória de comida.", 0.0, 1.0),
+            SignalSpec("hunger", "Internal hunger state.", 0.0, 1.0),
+            SignalSpec("on_food", "1 when the spider is standing on food.", 0.0, 1.0),
+            SignalSpec("food_visible", "1 when food is visible.", 0.0, 1.0),
+            SignalSpec("food_certainty", "Visual confidence in the perceived food.", 0.0, 1.0),
+            SignalSpec("food_occluded", "1 when nearby food exists but is occluded.", 0.0, 1.0),
+            SignalSpec("food_dx", "Horizontal direction of the detected food."),
+            SignalSpec("food_dy", "Vertical direction of the detected food."),
+            SignalSpec("food_smell_strength", "Intensity of the food scent.", 0.0, 1.0),
+            SignalSpec("food_smell_dx", "Horizontal gradient of the food scent."),
+            SignalSpec("food_smell_dy", "Vertical gradient of the food scent."),
+            SignalSpec("food_trace_dx", "Horizontal direction of the short food trace."),
+            SignalSpec("food_trace_dy", "Vertical direction of the short food trace."),
+            SignalSpec("food_trace_strength", "Decayed strength of the short food trace.", 0.0, 1.0),
+            SignalSpec("food_memory_dx", "Horizontal direction of the last seen food."),
+            SignalSpec("food_memory_dy", "Vertical direction of the last seen food."),
+            SignalSpec("food_memory_age", "Normalized age of the food memory.", 0.0, 1.0),
         ),
     ),
     ModuleInterface(
         name="sleep_center",
         observation_key="sleep",
         role="proposal",
-        description="Propositor homeostático voltado a retorno ao abrigo, repouso e profundidade segura.",
+        version=2,
+        description="Homeostatic proposer aimed at returning to shelter, resting, and seeking safe depth.",
         inputs=(
-            SignalSpec("fatigue", "Estado interno de fadiga.", 0.0, 1.0),
-            SignalSpec("hunger", "Estado interno de fome.", 0.0, 1.0),
-            SignalSpec("on_shelter", "1 se a aranha está no abrigo.", 0.0, 1.0),
-            SignalSpec("night", "1 durante a noite.", 0.0, 1.0),
-            SignalSpec("home_dx", "Vetor interno horizontal até o abrigo."),
-            SignalSpec("home_dy", "Vetor interno vertical até o abrigo."),
-            SignalSpec("home_dist", "Distância normalizada até o abrigo.", 0.0, 1.0),
-            SignalSpec("health", "Saúde corporal.", 0.0, 1.0),
-            SignalSpec("recent_pain", "Dor recente.", 0.0, 1.0),
-            SignalSpec("sleep_phase_level", "Nível atual da fase de sono.", 0.0, 1.0),
-            SignalSpec("rest_streak_norm", "Continuidade recente do repouso.", 0.0, 1.0),
-            SignalSpec("sleep_debt", "Dívida acumulada de sono.", 0.0, 1.0),
-            SignalSpec("shelter_role_level", "Profundidade atual no abrigo.", 0.0, 1.0),
-            SignalSpec("shelter_memory_dx", "Direção horizontal do abrigo seguro memorizado."),
-            SignalSpec("shelter_memory_dy", "Direção vertical do abrigo seguro memorizado."),
-            SignalSpec("shelter_memory_age", "Idade normalizada da memória do abrigo.", 0.0, 1.0),
+            SignalSpec("fatigue", "Internal fatigue state.", 0.0, 1.0),
+            SignalSpec("hunger", "Internal hunger state.", 0.0, 1.0),
+            SignalSpec("on_shelter", "1 when the spider is on the shelter.", 0.0, 1.0),
+            SignalSpec("night", "1 during nighttime.", 0.0, 1.0),
+            SignalSpec("home_dx", "Internal horizontal vector toward the shelter."),
+            SignalSpec("home_dy", "Internal vertical vector toward the shelter."),
+            SignalSpec("home_dist", "Normalized distance to the shelter.", 0.0, 1.0),
+            SignalSpec("health", "Body health.", 0.0, 1.0),
+            SignalSpec("recent_pain", "Recent pain.", 0.0, 1.0),
+            SignalSpec("sleep_phase_level", "Current sleep phase level.", 0.0, 1.0),
+            SignalSpec("rest_streak_norm", "Recent rest continuity.", 0.0, 1.0),
+            SignalSpec("sleep_debt", "Accumulated sleep debt.", 0.0, 1.0),
+            SignalSpec("shelter_role_level", "Current depth inside the shelter.", 0.0, 1.0),
+            SignalSpec("shelter_trace_dx", "Horizontal direction of the short shelter trace."),
+            SignalSpec("shelter_trace_dy", "Vertical direction of the short shelter trace."),
+            SignalSpec("shelter_trace_strength", "Decayed strength of the short shelter trace.", 0.0, 1.0),
+            SignalSpec("shelter_memory_dx", "Horizontal direction of the remembered safe shelter."),
+            SignalSpec("shelter_memory_dy", "Vertical direction of the remembered safe shelter."),
+            SignalSpec("shelter_memory_age", "Normalized age of the shelter memory.", 0.0, 1.0),
         ),
     ),
     ModuleInterface(
         name="alert_center",
         observation_key="alert",
         role="proposal",
-        description="Propositor defensivo voltado a ameaça, fuga e priorização do abrigo sob risco.",
+        version=2,
+        description="Defensive proposer aimed at threat response, escape, and shelter prioritization under risk.",
         inputs=(
-            SignalSpec("predator_visible", "1 se o predador está visível.", 0.0, 1.0),
-            SignalSpec("predator_certainty", "Confiança visual no predador percebido.", 0.0, 1.0),
-            SignalSpec("predator_occluded", "1 se o predador está em alcance, mas ocluído.", 0.0, 1.0),
-            SignalSpec("predator_dx", "Direção horizontal do predador detectado."),
-            SignalSpec("predator_dy", "Direção vertical do predador detectado."),
-            SignalSpec("predator_dist", "Distância normalizada ao predador.", 0.0, 1.0),
-            SignalSpec("predator_smell_strength", "Intensidade do cheiro do predador.", 0.0, 1.0),
-            SignalSpec("home_dx", "Vetor interno horizontal até o abrigo."),
-            SignalSpec("home_dy", "Vetor interno vertical até o abrigo."),
-            SignalSpec("recent_pain", "Dor recente.", 0.0, 1.0),
-            SignalSpec("recent_contact", "Contato físico recente.", 0.0, 1.0),
-            SignalSpec("on_shelter", "1 se a aranha está no abrigo.", 0.0, 1.0),
-            SignalSpec("night", "1 durante a noite.", 0.0, 1.0),
-            SignalSpec("predator_memory_dx", "Direção horizontal da última posição vista do predador."),
-            SignalSpec("predator_memory_dy", "Direção vertical da última posição vista do predador."),
-            SignalSpec("predator_memory_age", "Idade normalizada da memória do predador.", 0.0, 1.0),
-            SignalSpec("escape_memory_dx", "Direção horizontal da rota recente de fuga."),
-            SignalSpec("escape_memory_dy", "Direção vertical da rota recente de fuga."),
-            SignalSpec("escape_memory_age", "Idade normalizada da memória de fuga.", 0.0, 1.0),
+            SignalSpec("predator_visible", "1 when the predator is visible.", 0.0, 1.0),
+            SignalSpec("predator_certainty", "Visual confidence in the perceived predator.", 0.0, 1.0),
+            SignalSpec("predator_occluded", "1 when the predator is within range but occluded.", 0.0, 1.0),
+            SignalSpec("predator_dx", "Horizontal direction of the detected predator."),
+            SignalSpec("predator_dy", "Vertical direction of the detected predator."),
+            SignalSpec("predator_dist", "Normalized distance to the predator.", 0.0, 1.0),
+            SignalSpec("predator_smell_strength", "Intensity of the predator scent.", 0.0, 1.0),
+            SignalSpec("predator_motion_salience", "Explicit motion salience of the predator.", 0.0, 1.0),
+            SignalSpec("home_dx", "Internal horizontal vector toward the shelter."),
+            SignalSpec("home_dy", "Internal vertical vector toward the shelter."),
+            SignalSpec("recent_pain", "Recent pain.", 0.0, 1.0),
+            SignalSpec("recent_contact", "Recent physical contact.", 0.0, 1.0),
+            SignalSpec("on_shelter", "1 when the spider is on the shelter.", 0.0, 1.0),
+            SignalSpec("night", "1 during nighttime.", 0.0, 1.0),
+            SignalSpec("predator_trace_dx", "Horizontal direction of the short predator trace."),
+            SignalSpec("predator_trace_dy", "Vertical direction of the short predator trace."),
+            SignalSpec("predator_trace_strength", "Decayed strength of the short predator trace.", 0.0, 1.0),
+            SignalSpec("predator_memory_dx", "Horizontal direction of the last seen predator position."),
+            SignalSpec("predator_memory_dy", "Vertical direction of the last seen predator position."),
+            SignalSpec("predator_memory_age", "Normalized age of the predator memory.", 0.0, 1.0),
+            SignalSpec("escape_memory_dx", "Horizontal direction of the recent escape route."),
+            SignalSpec("escape_memory_dy", "Vertical direction of the recent escape route."),
+            SignalSpec("escape_memory_age", "Normalized age of the escape memory.", 0.0, 1.0),
         ),
     ),
 )
@@ -500,24 +535,24 @@ ACTION_CONTEXT_INTERFACE = ModuleInterface(
     name="action_center_context",
     observation_key="action_context",
     role="context",
-    description="Contexto bruto usado pelo action_center para arbitrar propostas locomotoras concorrentes.",
+    description="Raw context used by the action_center to arbitrate competing locomotion proposals.",
     inputs=(
-        SignalSpec("hunger", "Fome corporal.", 0.0, 1.0),
-        SignalSpec("fatigue", "Fadiga corporal.", 0.0, 1.0),
-        SignalSpec("health", "Saúde corporal.", 0.0, 1.0),
-        SignalSpec("recent_pain", "Dor recente.", 0.0, 1.0),
-        SignalSpec("recent_contact", "Contato recente com o predador.", 0.0, 1.0),
-        SignalSpec("on_food", "1 se está sobre comida.", 0.0, 1.0),
-        SignalSpec("on_shelter", "1 se está sobre o abrigo.", 0.0, 1.0),
-        SignalSpec("predator_visible", "1 se o predador está visível.", 0.0, 1.0),
-        SignalSpec("predator_certainty", "Confiança visual no predador.", 0.0, 1.0),
-        SignalSpec("predator_dist", "Distância normalizada ao predador.", 0.0, 1.0),
-        SignalSpec("day", "1 durante o dia.", 0.0, 1.0),
-        SignalSpec("night", "1 durante a noite.", 0.0, 1.0),
-        SignalSpec("last_move_dx", "Último deslocamento horizontal realizado."),
-        SignalSpec("last_move_dy", "Último deslocamento vertical realizado."),
-        SignalSpec("sleep_debt", "Dívida acumulada de sono.", 0.0, 1.0),
-        SignalSpec("shelter_role_level", "Profundidade atual no abrigo.", 0.0, 1.0),
+        SignalSpec("hunger", "Body hunger.", 0.0, 1.0),
+        SignalSpec("fatigue", "Body fatigue.", 0.0, 1.0),
+        SignalSpec("health", "Body health.", 0.0, 1.0),
+        SignalSpec("recent_pain", "Recent pain.", 0.0, 1.0),
+        SignalSpec("recent_contact", "Recent contact with the predator.", 0.0, 1.0),
+        SignalSpec("on_food", "1 when standing on food.", 0.0, 1.0),
+        SignalSpec("on_shelter", "1 when standing on the shelter.", 0.0, 1.0),
+        SignalSpec("predator_visible", "1 when the predator is visible.", 0.0, 1.0),
+        SignalSpec("predator_certainty", "Visual confidence in the predator.", 0.0, 1.0),
+        SignalSpec("predator_dist", "Normalized distance to the predator.", 0.0, 1.0),
+        SignalSpec("day", "1 during daytime.", 0.0, 1.0),
+        SignalSpec("night", "1 during nighttime.", 0.0, 1.0),
+        SignalSpec("last_move_dx", "Last executed horizontal displacement."),
+        SignalSpec("last_move_dy", "Last executed vertical displacement."),
+        SignalSpec("sleep_debt", "Accumulated sleep debt.", 0.0, 1.0),
+        SignalSpec("shelter_role_level", "Current depth inside the shelter.", 0.0, 1.0),
     ),
 )
 
@@ -526,18 +561,18 @@ MOTOR_CONTEXT_INTERFACE = ModuleInterface(
     name="motor_cortex_context",
     observation_key="motor_context",
     role="context",
-    description="Contexto bruto usado pelo motor_cortex para corrigir e executar a intenção locomotora.",
+    description="Raw context used by the motor_cortex to correct and execute the locomotion intent.",
     inputs=(
-        SignalSpec("on_food", "1 se está sobre comida.", 0.0, 1.0),
-        SignalSpec("on_shelter", "1 se está sobre o abrigo.", 0.0, 1.0),
-        SignalSpec("predator_visible", "1 se o predador está visível.", 0.0, 1.0),
-        SignalSpec("predator_certainty", "Confiança visual no predador.", 0.0, 1.0),
-        SignalSpec("predator_dist", "Distância normalizada ao predador.", 0.0, 1.0),
-        SignalSpec("day", "1 durante o dia.", 0.0, 1.0),
-        SignalSpec("night", "1 durante a noite.", 0.0, 1.0),
-        SignalSpec("last_move_dx", "Último deslocamento horizontal realizado."),
-        SignalSpec("last_move_dy", "Último deslocamento vertical realizado."),
-        SignalSpec("shelter_role_level", "Profundidade atual no abrigo.", 0.0, 1.0),
+        SignalSpec("on_food", "1 when standing on food.", 0.0, 1.0),
+        SignalSpec("on_shelter", "1 when standing on the shelter.", 0.0, 1.0),
+        SignalSpec("predator_visible", "1 when the predator is visible.", 0.0, 1.0),
+        SignalSpec("predator_certainty", "Visual confidence in the predator.", 0.0, 1.0),
+        SignalSpec("predator_dist", "Normalized distance to the predator.", 0.0, 1.0),
+        SignalSpec("day", "1 during daytime.", 0.0, 1.0),
+        SignalSpec("night", "1 during nighttime.", 0.0, 1.0),
+        SignalSpec("last_move_dx", "Last executed horizontal displacement."),
+        SignalSpec("last_move_dy", "Last executed vertical displacement."),
+        SignalSpec("shelter_role_level", "Current depth inside the shelter.", 0.0, 1.0),
     ),
 )
 
@@ -554,13 +589,26 @@ OBSERVATION_INTERFACE_BY_KEY: Dict[str, ModuleInterface] = {
 
 
 def _build_observation_view_registry() -> Dict[str, type[ObservationView]]:
+    """
+    Collects all ObservationView subclasses and indexes them by their declared observation_key.
+    
+    Scans direct subclasses of ObservationView and builds a mapping from each subclass's non-empty
+    observation_key to the subclass type.
+    
+    Returns:
+        Dict[str, type[ObservationView]]: Mapping from observation_key to the corresponding ObservationView subclass.
+    
+    Raises:
+        ValueError: If any subclass does not declare a non-empty `observation_key`, or if multiple subclasses
+            declare the same `observation_key`.
+    """
     registry: Dict[str, type[ObservationView]] = {}
     for view_cls in ObservationView.__subclasses__():
         key = view_cls.observation_key
         if not key:
-            raise ValueError(f"ObservationView '{view_cls.__name__}' precisa declarar observation_key.")
+            raise ValueError(f"ObservationView '{view_cls.__name__}' must declare observation_key.")
         if key in registry:
-            raise ValueError(f"ObservationView duplicada para observation_key '{key}'.")
+            raise ValueError(f"Duplicate ObservationView for observation_key '{key}'.")
         registry[key] = view_cls
     return registry
 
@@ -622,11 +670,16 @@ def interface_registry_fingerprint() -> str:
 
 def render_interfaces_markdown() -> str:
     """
-    Render the interface registry into the generated documentation page.
+    Render a Markdown document describing the interface registry.
+    
+    The document includes the schema version and fingerprint, lists of proposal and context interfaces, a compatibility policy section, and one section per interface with its metadata and a table of input signals (index, min, max, description).
+    
+    Returns:
+        markdown (str): The rendered Markdown string (ends with a single trailing newline).
     """
     registry = interface_registry()
     lines: list[str] = [
-        "# Interfaces Padronizadas",
+        "# Standardized Interfaces",
         "",
         "<!-- Generated from spider_cortex_sim.interfaces.render_interfaces_markdown(); do not edit manually. -->",
         "",
@@ -635,11 +688,11 @@ def render_interfaces_markdown() -> str:
         f"- Proposal interfaces: `{', '.join(registry['proposal_interfaces'])}`",
         f"- Context interfaces: `{', '.join(registry['context_interfaces'])}`",
         "",
-        "## Compatibilidade",
+        "## Compatibility",
         "",
-        "- A política atual é `exact_match_required` para save/load.",
-        "- Mudanças em nome, `observation_key`, ordem dos sinais, outputs ou versão exigem incompatibilidade explícita.",
-        "- Não existe migração automática de checkpoints antigos.",
+        "- The current policy is `exact_match_required` for save/load.",
+        "- Changes to the name, `observation_key`, signal order, outputs, or version require explicit incompatibility handling.",
+        "- There is no automatic migration for older checkpoints.",
         "",
     ]
     for spec in ALL_INTERFACES:
@@ -674,33 +727,58 @@ def architecture_signature(
     proposal_order: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """
-    Return a JSON-serializable description of the agent architecture.
+    Generate a JSON-serializable signature describing the agent's observation/action architecture.
     
     Parameters:
-        proposal_backend (str): Proposal stage topology. Supported values are `"modular"` and `"monolithic"`.
-        proposal_order (Sequence[str] | None): Ordered proposal sources injected into the action-center input. When omitted,
-            the modular layout defaults to all `MODULE_INTERFACES` names and the monolithic layout defaults to `["monolithic_policy"]`.
-
-    The returned dictionary includes:
-    - "actions": list of locomotion action names.
-    - "modules": mapping from each module interface name to its observation key, ordered input signal names, and outputs.
-    - "proposal_order": deterministic proposal slot order used when concatenating proposal logits into the action-center input.
-    - "action_center": the action-center context specification with its observation key, raw context input names,
-      inter-stage proposal inputs, locomotion outputs, proposal slot metadata, and `value_head` set to True.
-    - "motor_cortex": the motor-cortex context specification with its observation key, raw context input names,
-      inter-stage intent input metadata, and locomotion outputs with `value_head` set to False.
+        proposal_backend (str): Proposal-stage topology; must be "modular" or "monolithic".
+        proposal_order (Sequence[str] | None): Ordered proposal sources for the action-center input. If omitted,
+            "modular" uses all MODULE_INTERFACES names in declaration order and "monolithic" uses ["monolithic_policy"].
     
     Returns:
-        dict[str, object]: Top-level architecture signature containing "actions", "modules", "proposal_order", "action_center", and "motor_cortex" as described above.
+        dict[str, object]: Top-level architecture description containing at least:
+            - "schema_version": registry schema version.
+            - "proposal_backend": the chosen proposal backend.
+            - "registry_fingerprint": fingerprint of the current interface registry.
+            - "actions": list of locomotion action names.
+            - "modules": mapping from proposal interface name to its summary (observation key, inputs, outputs, etc.).
+            - "contexts": summaries for action and motor context interfaces.
+            - "interface_versions": mapping of interface name to its numeric version.
+            - "proposal_order": resolved ordered list of proposal sources.
+            - "action_center": action-center specification including context interface, raw input names,
+              an "arbitration" object (strategy, valences, and module_roles), inter-stage proposal inputs,
+              proposal slot metadata, outputs, and "value_head": True.
+            - "motor_cortex": motor-cortex specification including context interface, raw input names,
+              inter-stage intent input metadata, outputs, and "value_head": False.
+            - "fingerprint": SHA-256 fingerprint of the returned payload.
     """
     if proposal_backend not in {"modular", "monolithic"}:
-        raise ValueError("proposal_backend deve ser 'modular' ou 'monolithic'.")
+        raise ValueError("proposal_backend must be 'modular' or 'monolithic'.")
     if proposal_order is None:
         if proposal_backend == "modular":
             proposal_order = [spec.name for spec in MODULE_INTERFACES]
         else:
             proposal_order = ["monolithic_policy"]
     proposal_order = [str(name) for name in proposal_order]
+    arbitration_module_roles = {
+        "alert_center": "threat",
+        "hunger_center": "hunger",
+        "sleep_center": "sleep",
+        "visual_cortex": "support",
+        "sensory_cortex": "support",
+        "monolithic_policy": "integrated_policy",
+    }
+    if proposal_backend == "monolithic":
+        filtered_module_roles = (
+            {"monolithic_policy": arbitration_module_roles["monolithic_policy"]}
+            if "monolithic_policy" in proposal_order
+            else {}
+        )
+    else:
+        filtered_module_roles = {
+            name: arbitration_module_roles[name]
+            for name in proposal_order
+            if name in arbitration_module_roles
+        }
     registry = interface_registry()
     proposal_interfaces = registry["interfaces"]
     payload = {
@@ -726,6 +804,11 @@ def architecture_signature(
             "observation_key": ACTION_CONTEXT_INTERFACE.observation_key,
             "version": ACTION_CONTEXT_INTERFACE.version,
             "inputs": [signal.name for signal in ACTION_CONTEXT_INTERFACE.inputs],
+            "arbitration": {
+                "strategy": "priority_gating",
+                "valences": ["threat", "hunger", "sleep", "exploration"],
+                "module_roles": filtered_module_roles,
+            },
             "inter_stage_inputs": [
                 {
                     "name": "proposal_logits",

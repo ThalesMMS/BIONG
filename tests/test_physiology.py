@@ -17,6 +17,7 @@ from spider_cortex_sim.physiology import (
 )
 from spider_cortex_sim.reward import REWARD_COMPONENT_NAMES
 from spider_cortex_sim.world import SpiderWorld
+from spider_cortex_sim.world_types import TickContext, TickSnapshot
 
 
 class PhysiologyModuleTest(unittest.TestCase):
@@ -295,3 +296,248 @@ class PhysiologyModuleTest(unittest.TestCase):
         world.reset(seed=1)
         set_sleep_state(world, "AWAKE", -5)
         self.assertEqual(world.state.rest_streak, 0)
+
+    # --- tick_context parameter tests ---
+
+    def _make_tick_context(self, world: SpiderWorld) -> TickContext:
+        return TickContext(
+            action_idx=0,
+            intended_action="STAY",
+            executed_action="STAY",
+            motor_noise_applied=False,
+            snapshot=TickSnapshot(
+                tick=int(world.tick),
+                spider_pos=world.spider_pos(),
+                lizard_pos=world.lizard_pos(),
+                was_on_shelter=False,
+                prev_shelter_role="outside",
+                prev_food_dist=5,
+                prev_shelter_dist=5,
+                prev_predator_dist=10,
+                prev_predator_visible=False,
+                night=False,
+                rest_streak=0,
+            ),
+            reward_components={name: 0.0 for name in REWARD_COMPONENT_NAMES},
+            info={"ate": False, "slept": False},
+        )
+
+    def test_apply_predator_contact_without_tick_context_no_event_logged(self) -> None:
+        world = SpiderWorld(seed=1, lizard_move_interval=999999)
+        world.reset(seed=1)
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info: dict = {}
+        # Should not raise and should work without tick_context
+        apply_predator_contact(world, reward_components, info)
+        self.assertTrue(info.get("predator_contact"))
+
+    def test_apply_predator_contact_with_tick_context_records_event(self) -> None:
+        world = SpiderWorld(seed=1, lizard_move_interval=999999)
+        world.reset(seed=1)
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info: dict = {}
+        ctx = self._make_tick_context(world)
+        apply_predator_contact(world, reward_components, info, tick_context=ctx)
+        event_names = [e.name for e in ctx.event_log]
+        self.assertIn("predator_contact", event_names)
+
+    def test_apply_predator_contact_tick_context_event_has_required_fields(self) -> None:
+        world = SpiderWorld(seed=7, lizard_move_interval=999999)
+        world.reset(seed=7)
+        world.state.health = 1.0
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info: dict = {}
+        ctx = self._make_tick_context(world)
+        apply_predator_contact(world, reward_components, info, tick_context=ctx)
+        event = next(e for e in ctx.event_log if e.name == "predator_contact")
+        self.assertIn("damage", event.payload)
+        self.assertIn("health", event.payload)
+        self.assertIn("recent_pain", event.payload)
+        self.assertIn("recent_contact", event.payload)
+        self.assertGreater(event.payload["damage"], 0.0)
+        self.assertLess(event.payload["health"], 1.0)
+        self.assertEqual(event.stage, "predator_contact")
+
+    def test_apply_predator_contact_tick_context_damage_reflects_world_state(self) -> None:
+        world = SpiderWorld(seed=11, lizard_move_interval=999999)
+        world.reset(seed=11)
+        world.state.health = 1.0
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info: dict = {}
+        ctx = self._make_tick_context(world)
+        apply_predator_contact(world, reward_components, info, tick_context=ctx)
+        event = next(e for e in ctx.event_log if e.name == "predator_contact")
+        self.assertAlmostEqual(event.payload["health"], round(float(world.state.health), 6))
+
+    def test_resolve_autonomic_behaviors_feeding_records_event(self) -> None:
+        world = SpiderWorld(seed=5, lizard_move_interval=999999)
+        world.reset(seed=5)
+        world.state.x, world.state.y = world.food_positions[0]
+        world.state.hunger = 0.9
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+        ctx = self._make_tick_context(world)
+        resolve_autonomic_behaviors(
+            world,
+            action_name="STAY",
+            predator_threat=False,
+            night=False,
+            reward_components=reward_components,
+            info=info,
+            tick_context=ctx,
+        )
+        event_names = [e.name for e in ctx.event_log]
+        self.assertIn("feeding", event_names)
+        event = next(e for e in ctx.event_log if e.name == "feeding")
+        self.assertIn("hunger_before", event.payload)
+        self.assertIn("hunger_after", event.payload)
+        self.assertIn("action", event.payload)
+        self.assertAlmostEqual(event.payload["hunger_before"], 0.9, places=4)
+        self.assertLess(event.payload["hunger_after"], 0.9)
+
+    def test_resolve_autonomic_behaviors_off_shelter_records_sleep_reset_event(self) -> None:
+        world = SpiderWorld(seed=5, lizard_move_interval=999999)
+        world.reset(seed=5)
+        # Place spider in open area (not on shelter, not on food)
+        for x in range(world.width):
+            for y in range(world.height):
+                if (
+                    world.shelter_role_at((x, y)) == "outside"
+                    and (x, y) not in world.food_positions
+                ):
+                    world.state.x, world.state.y = x, y
+                    break
+            else:
+                continue
+            break
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+        ctx = self._make_tick_context(world)
+        resolve_autonomic_behaviors(
+            world,
+            action_name="STAY",
+            predator_threat=False,
+            night=False,
+            reward_components=reward_components,
+            info=info,
+            tick_context=ctx,
+        )
+        event_names = [e.name for e in ctx.event_log]
+        self.assertIn("sleep_reset_off_shelter", event_names)
+        event = next(e for e in ctx.event_log if e.name == "sleep_reset_off_shelter")
+        self.assertIn("action", event.payload)
+        self.assertEqual(event.stage, "autonomic")
+
+    def test_resolve_autonomic_behaviors_rest_phase_records_event(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        deep_cells = list(world.shelter_deep_cells)
+        if not deep_cells:
+            self.skipTest("No deep shelter cells available")
+        world.state.x, world.state.y = sorted(deep_cells)[0]
+        world.state.fatigue = 0.6
+        world.state.sleep_debt = 0.5
+        world.state.hunger = 0.1
+        world.state.rest_streak = 0
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+        ctx = self._make_tick_context(world)
+        resolve_autonomic_behaviors(
+            world,
+            action_name="STAY",
+            predator_threat=False,
+            night=True,
+            reward_components=reward_components,
+            info=info,
+            tick_context=ctx,
+        )
+        event_names = [e.name for e in ctx.event_log]
+        self.assertIn("rest_phase", event_names)
+        event = next(e for e in ctx.event_log if e.name == "rest_phase")
+        self.assertIn("phase", event.payload)
+        self.assertIn("rest_streak", event.payload)
+        self.assertIn("sleep_drive", event.payload)
+        self.assertIn("shelter_role", event.payload)
+        self.assertEqual(event.stage, "autonomic")
+
+    def test_resolve_autonomic_behaviors_rest_blocked_records_event(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        deep_cells = list(world.shelter_deep_cells)
+        if not deep_cells:
+            self.skipTest("No deep shelter cells available")
+        world.state.x, world.state.y = sorted(deep_cells)[0]
+        world.state.fatigue = 0.1
+        world.state.sleep_debt = 0.0
+        world.state.hunger = 0.7  # Above hunger threshold for rest
+        world.state.rest_streak = 0
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+        ctx = self._make_tick_context(world)
+        resolve_autonomic_behaviors(
+            world,
+            action_name="STAY",
+            predator_threat=False,
+            night=False,
+            reward_components=reward_components,
+            info=info,
+            tick_context=ctx,
+        )
+        event_names = [e.name for e in ctx.event_log]
+        self.assertIn("rest_blocked", event_names)
+        event = next(e for e in ctx.event_log if e.name == "rest_blocked")
+        self.assertIn("action", event.payload)
+        self.assertIn("predator_threat", event.payload)
+        self.assertIn("shelter_role", event.payload)
+        self.assertIn("fatigue_before", event.payload)
+        self.assertIn("sleep_debt", event.payload)
+        self.assertIn("hunger", event.payload)
+        self.assertEqual(event.stage, "autonomic")
+
+    def test_resolve_autonomic_behaviors_without_tick_context_still_works(self) -> None:
+        world = SpiderWorld(seed=5, lizard_move_interval=999999)
+        world.reset(seed=5)
+        world.state.x, world.state.y = world.food_positions[0]
+        world.state.hunger = 0.9
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+        # No tick_context - should work exactly as before
+        resolve_autonomic_behaviors(
+            world,
+            action_name="STAY",
+            predator_threat=False,
+            night=False,
+            reward_components=reward_components,
+            info=info,
+        )
+        self.assertTrue(info["ate"])
+        self.assertLess(world.state.hunger, 0.9)
+
+    def test_resolve_autonomic_behaviors_predator_threat_blocks_rest(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        deep_cells = list(world.shelter_deep_cells)
+        if not deep_cells:
+            self.skipTest("No deep shelter cells available")
+        world.state.x, world.state.y = sorted(deep_cells)[0]
+        world.state.fatigue = 0.6
+        world.state.sleep_debt = 0.5
+        world.state.hunger = 0.1
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+        ctx = self._make_tick_context(world)
+        resolve_autonomic_behaviors(
+            world,
+            action_name="STAY",
+            predator_threat=True,  # Predator threat prevents rest
+            night=True,
+            reward_components=reward_components,
+            info=info,
+            tick_context=ctx,
+        )
+        event_names = [e.name for e in ctx.event_log]
+        # With predator threat, rest_phase should NOT be recorded, rest_blocked should be
+        self.assertNotIn("rest_phase", event_names)
+        self.assertIn("rest_blocked", event_names)
+        blocked_event = next(e for e in ctx.event_log if e.name == "rest_blocked")
+        self.assertTrue(blocked_event.payload["predator_threat"])

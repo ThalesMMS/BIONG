@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 from statistics import mean
 from typing import Any, Dict, List, Mapping, Sequence
 
-from .ablations import REFLEX_MODULE_NAMES
+from .ablations import PROPOSAL_SOURCE_NAMES, REFLEX_MODULE_NAMES
 
 SHELTER_ROLES: Sequence[str] = ("outside", "entrance", "inside", "deep")
 
@@ -80,6 +80,12 @@ class EpisodeStats:
     module_reflex_usage_rates: Dict[str, float] = field(default_factory=dict)
     module_reflex_override_rates: Dict[str, float] = field(default_factory=dict)
     module_reflex_dominance: Dict[str, float] = field(default_factory=dict)
+    module_contribution_share: Dict[str, float] = field(default_factory=dict)
+    dominant_module: str = ""
+    dominant_module_share: float = 0.0
+    effective_module_count: float = 0.0
+    module_agreement_rate: float = 0.0
+    module_disagreement_rate: float = 0.0
 
 
 @dataclass
@@ -106,6 +112,12 @@ class EpisodeMetricAccumulator:
     module_reflex_usage_steps: Dict[str, int] = field(default_factory=dict)
     module_reflex_override_steps: Dict[str, int] = field(default_factory=dict)
     module_reflex_dominance_sums: Dict[str, float] = field(default_factory=dict)
+    module_contribution_share_sums: Dict[str, float] = field(default_factory=dict)
+    dominant_module_counts: Dict[str, int] = field(default_factory=dict)
+    dominant_module_share_sum: float = 0.0
+    effective_module_count_sum: float = 0.0
+    module_agreement_rate_sum: float = 0.0
+    module_disagreement_rate_sum: float = 0.0
 
     def __post_init__(self) -> None:
         """
@@ -135,6 +147,9 @@ class EpisodeMetricAccumulator:
             self.module_reflex_usage_steps.setdefault(name, 0)
             self.module_reflex_override_steps.setdefault(name, 0)
             self.module_reflex_dominance_sums.setdefault(name, 0.0)
+        for name in PROPOSAL_SOURCE_NAMES:
+            self.module_contribution_share_sums.setdefault(name, 0.0)
+            self.dominant_module_counts.setdefault(name, 0)
 
     def record_decision(self, decision: object) -> None:
         """
@@ -164,6 +179,30 @@ class EpisodeMetricAccumulator:
             self.reflex_steps += 1
         if bool(getattr(decision, "final_reflex_override", False)):
             self.final_reflex_override_steps += 1
+        arbitration = getattr(decision, "arbitration_decision", None)
+        if arbitration is None:
+            return
+        contribution_share = getattr(arbitration, "module_contribution_share", {})
+        if isinstance(contribution_share, dict):
+            for module_name in self.module_contribution_share_sums:
+                self.module_contribution_share_sums[module_name] += float(
+                    contribution_share.get(module_name, 0.0)
+                )
+        dominant_module = str(getattr(arbitration, "dominant_module", ""))
+        if dominant_module in self.dominant_module_counts:
+            self.dominant_module_counts[dominant_module] += 1
+        self.dominant_module_share_sum += float(
+            getattr(arbitration, "dominant_module_share", 0.0)
+        )
+        self.effective_module_count_sum += float(
+            getattr(arbitration, "effective_module_count", 0.0)
+        )
+        self.module_agreement_rate_sum += float(
+            getattr(arbitration, "module_agreement_rate", 0.0)
+        )
+        self.module_disagreement_rate_sum += float(
+            getattr(arbitration, "module_disagreement_rate", 0.0)
+        )
 
     def record_transition(
         self,
@@ -295,6 +334,19 @@ class EpisodeMetricAccumulator:
             name: float(self.module_reflex_dominance_sums[name] / decision_total)
             for name in self.module_reflex_dominance_sums
         }
+        module_contribution_share = {
+            name: float(self.module_contribution_share_sums[name] / decision_total)
+            for name in self.module_contribution_share_sums
+        }
+        dominant_module_distribution = {
+            name: float(self.dominant_module_counts[name] / decision_total)
+            for name in self.dominant_module_counts
+        }
+        dominant_module = (
+            max(self.dominant_module_counts, key=self.dominant_module_counts.get)
+            if self.dominant_module_counts
+            else ""
+        )
         return {
             "night_ticks": int(self.night_ticks),
             "night_shelter_ticks": int(self.night_shelter_ticks),
@@ -337,6 +389,21 @@ class EpisodeMetricAccumulator:
                 float(mean(module_reflex_dominance.values()))
                 if module_reflex_dominance
                 else 0.0
+            ),
+            "module_contribution_share": module_contribution_share,
+            "dominant_module": dominant_module,
+            "dominant_module_distribution": dominant_module_distribution,
+            "dominant_module_share": float(
+                self.dominant_module_share_sum / decision_total
+            ),
+            "effective_module_count": float(
+                self.effective_module_count_sum / decision_total
+            ),
+            "module_agreement_rate": float(
+                self.module_agreement_rate_sum / decision_total
+            ),
+            "module_disagreement_rate": float(
+                self.module_disagreement_rate_sum / decision_total
             ),
         }
 
@@ -443,6 +510,15 @@ class EpisodeMetricAccumulator:
                 name: float(snapshot["module_reflex_dominance"][name])
                 for name in REFLEX_MODULE_NAMES
             },
+            module_contribution_share={
+                name: float(snapshot["module_contribution_share"][name])
+                for name in PROPOSAL_SOURCE_NAMES
+            },
+            dominant_module=str(snapshot["dominant_module"]),
+            dominant_module_share=float(snapshot["dominant_module_share"]),
+            effective_module_count=float(snapshot["effective_module_count"]),
+            module_agreement_rate=float(snapshot["module_agreement_rate"]),
+            module_disagreement_rate=float(snapshot["module_disagreement_rate"]),
         )
 
 
@@ -523,6 +599,32 @@ def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
         )
         for name in REFLEX_MODULE_NAMES
     }
+    module_contribution_share_means = {
+        name: (
+            mean(stats.module_contribution_share.get(name, 0.0) for stats in history)
+            if history
+            else 0.0
+        )
+        for name in PROPOSAL_SOURCE_NAMES
+    }
+    dominant_module_counter = Counter(
+        stats.dominant_module
+        for stats in history
+        if stats.dominant_module in PROPOSAL_SOURCE_NAMES
+    )
+    dominant_module_distribution = {
+        name: (
+            float(dominant_module_counter.get(name, 0) / len(history))
+            if history
+            else 0.0
+        )
+        for name in PROPOSAL_SOURCE_NAMES
+    }
+    dominant_module = (
+        max(dominant_module_counter, key=dominant_module_counter.get)
+        if dominant_module_counter
+        else ""
+    )
     dominant_predator_state = (
         max(predator_state_means, key=predator_state_means.get)
         if predator_state_means
@@ -580,6 +682,21 @@ def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
         "mean_module_reflex_usage_rate": module_reflex_usage_rate_means,
         "mean_module_reflex_override_rate": module_reflex_override_rate_means,
         "mean_module_reflex_dominance": module_reflex_dominance_means,
+        "mean_module_contribution_share": module_contribution_share_means,
+        "dominant_module": dominant_module,
+        "dominant_module_distribution": dominant_module_distribution,
+        "mean_dominant_module_share": (
+            mean(stats.dominant_module_share for stats in history) if history else 0.0
+        ),
+        "mean_effective_module_count": (
+            mean(stats.effective_module_count for stats in history) if history else 0.0
+        ),
+        "mean_module_agreement_rate": (
+            mean(stats.module_agreement_rate for stats in history) if history else 0.0
+        ),
+        "mean_module_disagreement_rate": (
+            mean(stats.module_disagreement_rate for stats in history) if history else 0.0
+        ),
         "episodes_detail": [asdict(stats) for stats in history],
     }
 

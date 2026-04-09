@@ -36,9 +36,27 @@ class ProposalCache:
 
 
 class ProposalNetwork:
-    """Pequeno MLP que produz logits de ação para um subsistema cortical."""
+    """Small MLP that produces action logits for a cortical subsystem."""
 
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, rng: np.random.Generator, name: str) -> None:
+        """
+        Initialize the ProposalNetwork's parameters and cache.
+        
+        Parameters:
+            input_dim (int): Dimensionality of the input vector.
+            hidden_dim (int): Number of hidden units in the single hidden layer.
+            output_dim (int): Number of output logits.
+            rng (np.random.Generator): Random number generator used to sample initial weights.
+            name (str): Identifier for this network instance.
+        
+        Details:
+            - Initializes weight matrices and bias vectors with shapes:
+                W1: (hidden_dim, input_dim), b1: (hidden_dim,)
+                W2: (output_dim, hidden_dim), b2: (output_dim,)
+            - Weights are drawn from a normal distribution with standard deviations
+              scale1 = 0.35 / sqrt(max(1, input_dim)) and scale2 = 0.35 / sqrt(max(1, hidden_dim)).
+            - The parameter cache is initialized to None.
+        """
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
@@ -65,8 +83,22 @@ class ProposalNetwork:
         return logits
 
     def backward(self, grad_logits: Array, lr: float, grad_clip: float = 5.0) -> None:
+        """
+        Perform a gradient step on network parameters using backpropagated logits.
+        
+        Sanitizes and optionally clips `grad_logits`, computes parameter gradients using the cached
+        forward pass, and updates weights and biases with a simple SGD step.
+        
+        Parameters:
+            grad_logits: Gradient of the loss w.r.t. the output logits. NaNs are converted to 0, +inf to 5, and -inf to -5; the vector is then scaled so its Euclidean norm does not exceed `grad_clip`.
+            lr: Learning rate used to scale the parameter updates.
+            grad_clip: Maximum allowed Euclidean norm for `grad_logits`; values above this are scaled down.
+        
+        Raises:
+            RuntimeError: If called when no forward-pass cache is available.
+        """
         if self.cache is None:
-            raise RuntimeError(f"Rede {self.name} backward chamado sem cache.")
+            raise RuntimeError(f"Network {self.name} backward called without cache.")
         grad_logits = np.nan_to_num(np.asarray(grad_logits, dtype=float), nan=0.0, posinf=5.0, neginf=-5.0)
         norm = float(np.linalg.norm(grad_logits))
         if norm > grad_clip:
@@ -106,11 +138,11 @@ class ProposalNetwork:
         b2 = np.asarray(state["b2"], dtype=float)
         if W1.shape != (self.hidden_dim, self.input_dim):
             raise ValueError(
-                f"{self.name}: W1 esperado {(self.hidden_dim, self.input_dim)}, recebido {W1.shape}"
+                f"{self.name}: W1 expected {(self.hidden_dim, self.input_dim)}, received {W1.shape}"
             )
         if W2.shape != (self.output_dim, self.hidden_dim):
             raise ValueError(
-                f"{self.name}: W2 esperado {(self.output_dim, self.hidden_dim)}, recebido {W2.shape}"
+                f"{self.name}: W2 expected {(self.output_dim, self.hidden_dim)}, received {W2.shape}"
             )
         self.W1 = W1
         self.b1 = b1
@@ -135,9 +167,27 @@ class MotorCache:
 
 
 class MotorNetwork:
-    """Rede motora com cabeça de política corretiva e cabeça crítica de valor."""
+    """Motor network with a corrective policy head and a value critic head."""
 
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, rng: np.random.Generator, name: str = "motor_cortex") -> None:
+        """
+        Initialize the MotorNetwork's parameters and metadata.
+        
+        Parameters:
+            input_dim (int): Dimensionality of the input vector.
+            hidden_dim (int): Number of hidden units in the shared layer.
+            output_dim (int): Number of policy outputs (action logits).
+            rng (np.random.Generator): Random generator used to sample initial weights from normal distributions.
+            name (str): Optional network name; defaults to "motor_cortex".
+        
+        Details:
+            - Allocates and initializes weight and bias arrays:
+                - W1: (hidden_dim, input_dim), b1: (hidden_dim,)
+                - W2_policy: (output_dim, hidden_dim), b2_policy: (output_dim,)
+                - W2_value: (1, hidden_dim), b2_value: (1,)
+            - Weight scales use 0.35 / sqrt(max(1, dimension)) per layer.
+            - Sets self.cache to None.
+        """
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
@@ -173,8 +223,25 @@ class MotorNetwork:
         lr: float,
         grad_clip: float = 5.0,
     ) -> Array:
+        """
+        Apply gradients to the motor network's parameters and return the gradient with respect to the input.
+        
+        Sanitizes and clips the provided policy-logits and value gradients, computes gradients for the policy head, value head, and shared layers, performs an SGD parameter update using the given learning rate, and returns the gradient of the loss with respect to the input vector.
+        
+        Parameters:
+            grad_policy_logits (Array): Gradient of the loss with respect to the policy logits.
+            grad_value (float): Gradient of the loss with respect to the scalar value output.
+            lr (float): Learning rate used for the parameter update.
+            grad_clip (float): Maximum allowed norm (or absolute value for the scalar) for gradients; defaults to 5.0.
+        
+        Returns:
+            Array: Gradient of the loss with respect to the input vector `x`.
+        
+        Raises:
+            RuntimeError: If called when no forward-pass cache is available.
+        """
         if self.cache is None:
-            raise RuntimeError("Backward da rede motora chamado sem cache.")
+            raise RuntimeError("Motor network backward called without cache.")
         grad_policy_logits = np.nan_to_num(
             np.asarray(grad_policy_logits, dtype=float),
             nan=0.0,
@@ -235,11 +302,11 @@ class MotorNetwork:
         b2_value = np.asarray(state["b2_value"], dtype=float)
         if W1.shape != (self.hidden_dim, self.input_dim):
             raise ValueError(
-                f"{self.name}: W1 esperado {(self.hidden_dim, self.input_dim)}, recebido {W1.shape}"
+                f"{self.name}: W1 expected {(self.hidden_dim, self.input_dim)}, received {W1.shape}"
             )
         if W2_policy.shape != (self.output_dim, self.hidden_dim):
             raise ValueError(
-                f"{self.name}: W2_policy esperado {(self.output_dim, self.hidden_dim)}, recebido {W2_policy.shape}"
+                f"{self.name}: W2_policy expected {(self.output_dim, self.hidden_dim)}, received {W2_policy.shape}"
             )
         self.W1 = W1
         self.b1 = b1

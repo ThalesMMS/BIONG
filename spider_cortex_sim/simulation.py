@@ -5,10 +5,16 @@ import json
 import shutil
 import tempfile
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Callable, Dict, List, Sequence
 
-from .ablations import BrainAblationConfig, default_brain_config, resolve_ablation_configs
+from .ablations import (
+    BrainAblationConfig,
+    PROPOSAL_SOURCE_NAMES,
+    default_brain_config,
+    resolve_ablation_configs,
+)
 from .agent import SpiderBrain
 from .budget_profiles import BudgetProfile, resolve_budget
 from .learning_evidence import (
@@ -17,6 +23,7 @@ from .learning_evidence import (
 from .bus import MessageBus
 from .interfaces import MODULE_INTERFACES
 from .maps import MAP_TEMPLATE_NAMES
+from .memory import memory_leakage_audit
 from .metrics import (
     BehavioralEpisodeScore,
     EpisodeMetricAccumulator,
@@ -28,9 +35,30 @@ from .metrics import (
 )
 from .noise import NoiseConfig, resolve_noise_profile
 from .operational_profiles import OperationalProfile, resolve_operational_profile
+from .perception import observation_leakage_audit
 from .predator import PREDATOR_STATES
+from .reward import REWARD_PROFILES, reward_component_audit, reward_profile_audit
 from .scenarios import SCENARIO_NAMES, get_scenario
 from .world import ACTIONS, REWARD_COMPONENT_NAMES, SpiderWorld
+
+
+CURRICULUM_PROFILE_NAMES: tuple[str, ...] = ("none", "ecological_v1")
+CURRICULUM_FOCUS_SCENARIOS: tuple[str, ...] = (
+    "open_field_foraging",
+    "corridor_gauntlet",
+    "exposed_day_foraging",
+    "food_deprivation",
+)
+
+
+@dataclass(frozen=True)
+class CurriculumPhaseDefinition:
+    name: str
+    training_scenarios: tuple[str, ...]
+    promotion_scenarios: tuple[str, ...]
+    success_threshold: float
+    max_episodes: int
+    min_episodes: int
 
 
 class SpiderSimulation:
@@ -136,6 +164,195 @@ class SpiderSimulation:
         self._latest_checkpointing_summary: Dict[str, object] | None = None
         self._latest_reflex_schedule_summary: Dict[str, object] | None = None
         self._latest_evaluation_without_reflex_support: Dict[str, object] | None = None
+        self._latest_curriculum_summary: Dict[str, object] | None = None
+        self._latest_training_regime_summary: Dict[str, object] = {
+            "mode": "flat",
+            "curriculum_profile": "none",
+            "resolved_budget": {
+                "total_training_episodes": int(
+                    self.budget_summary.get("resolved", {}).get("episodes", 0)
+                ),
+                "phase_episode_budgets": [],
+            },
+        }
+
+    @staticmethod
+    def _resolve_curriculum_phase_budgets(total_episodes: int) -> list[int]:
+        """Resolve per-phase budgets without exceeding the total episode count."""
+        total = max(0, int(total_episodes))
+        if total <= 0:
+            return [0, 0, 0, 0]
+        remaining = total
+        phase_1 = min(remaining, max(1, total // 6))
+        remaining -= phase_1
+        phase_2 = min(remaining, max(1, total // 6))
+        remaining -= phase_2
+        phase_3 = min(remaining, max(1, total // 3))
+        remaining -= phase_3
+        phase_4 = remaining
+        return [phase_1, phase_2, phase_3, phase_4]
+
+    @classmethod
+    def _resolve_curriculum_profile(
+        cls,
+        *,
+        curriculum_profile: str,
+        total_episodes: int,
+    ) -> list[CurriculumPhaseDefinition]:
+        """
+        Resolve the curriculum phases for a given curriculum profile and total episode budget.
+        
+        If `curriculum_profile` is "none", returns an empty list. If an unsupported profile is provided,
+        raises ValueError. For supported curricula, returns a list of CurriculumPhaseDefinition records
+        (each containing phase name, training and promotion scenario tuples, success threshold, and
+        per-phase `max_episodes`/`min_episodes`) whose episode budgets are derived from `total_episodes`.
+        
+        Parameters:
+            curriculum_profile (str): Identifier of the curriculum profile ("none" or "ecological_v1").
+            total_episodes (int): Total number of training episodes to distribute across phases.
+        
+        Returns:
+            list[CurriculumPhaseDefinition]: Ordered phase definitions for the requested curriculum.
+        """
+        profile_name = str(curriculum_profile)
+        if profile_name == "none":
+            return []
+        if profile_name != "ecological_v1":
+            raise ValueError(
+                "Invalid curriculum_profile. Use 'none' or 'ecological_v1'."
+            )
+        budgets = cls._resolve_curriculum_phase_budgets(total_episodes)
+        phase_specs = (
+            (
+                "phase_1_night_rest_predator_edge",
+                ("night_rest", "predator_edge"),
+                1.0,
+            ),
+            (
+                "phase_2_entrance_ambush_shelter_blockade",
+                ("entrance_ambush", "shelter_blockade"),
+                1.0,
+            ),
+            (
+                "phase_3_open_field_exposed_day",
+                ("open_field_foraging", "exposed_day_foraging"),
+                0.5,
+            ),
+            (
+                "phase_4_corridor_food_deprivation",
+                ("corridor_gauntlet", "food_deprivation"),
+                0.5,
+            ),
+        )
+        phases: list[CurriculumPhaseDefinition] = []
+        for budget, (name, scenarios, threshold) in zip(
+            budgets, phase_specs, strict=True
+        ):
+            phases.append(
+                CurriculumPhaseDefinition(
+                    name=name,
+                    training_scenarios=tuple(scenarios),
+                    promotion_scenarios=tuple(scenarios),
+                    success_threshold=float(threshold),
+                    max_episodes=int(budget),
+                    min_episodes=max(1, int(budget) // 2) if int(budget) > 0 else 0,
+                )
+            )
+        return phases
+
+    @staticmethod
+    def _empty_curriculum_summary(
+        curriculum_profile: str,
+        total_episodes: int,
+    ) -> Dict[str, object]:
+        """Build an empty curriculum summary for metadata seeding and zero-budget runs."""
+        resolved_episodes = max(0, int(total_episodes))
+        return {
+            "profile": str(curriculum_profile),
+            "total_training_episodes": resolved_episodes,
+            "executed_training_episodes": 0,
+            "status": "not_started" if resolved_episodes > 0 else "no_training_budget",
+            "phases": [],
+        }
+
+    @staticmethod
+    def _regime_row_metadata_from_summary(
+        training_regime: Dict[str, object],
+        curriculum_summary: Dict[str, object] | None,
+    ) -> Dict[str, object]:
+        """Expose training-regime metadata in behavior CSV rows."""
+        latest_phase: Dict[str, object] | None = None
+        if isinstance(curriculum_summary, dict):
+            phases = curriculum_summary.get("phases", [])
+            if isinstance(phases, list) and phases:
+                for phase in reversed(phases):
+                    if not isinstance(phase, dict):
+                        continue
+                    if int(phase.get("episodes_executed", 0)) > 0:
+                        latest_phase = phase
+                        break
+                if latest_phase is None:
+                    phase = phases[-1]
+                    if isinstance(phase, dict):
+                        latest_phase = phase
+        return {
+            "training_regime": str(training_regime.get("mode", "flat")),
+            "curriculum_profile": str(
+                training_regime.get("curriculum_profile", "none")
+            ),
+            "curriculum_phase": (
+                str(latest_phase.get("name", "")) if latest_phase is not None else ""
+            ),
+            "curriculum_phase_status": (
+                str(latest_phase.get("status", ""))
+                if latest_phase is not None
+                else ""
+            ),
+        }
+
+    @staticmethod
+    def _episode_stats_behavior_metrics(stats: EpisodeStats) -> Dict[str, object]:
+        """
+        Convert independence metrics from EpisodeStats into behavior-metric fields.
+
+        These fields are merged into scenario scorecards so they flow naturally to
+        behavior_evaluation summaries and to `behavior_csv` as `metric_*` columns.
+        """
+        metrics: Dict[str, object] = {
+            "dominant_module": stats.dominant_module,
+            "dominant_module_share": float(stats.dominant_module_share),
+            "effective_module_count": float(stats.effective_module_count),
+            "module_agreement_rate": float(stats.module_agreement_rate),
+            "module_disagreement_rate": float(stats.module_disagreement_rate),
+        }
+        for module_name in PROPOSAL_SOURCE_NAMES:
+            metrics[f"module_contribution_{module_name}"] = float(
+                stats.module_contribution_share.get(module_name, 0.0)
+            )
+        return metrics
+
+    def _set_training_regime_metadata(
+        self,
+        *,
+        curriculum_profile: str,
+        episodes: int,
+        curriculum_summary: Dict[str, object] | None = None,
+    ) -> None:
+        """Update cached regime metadata used by summaries and CSV exports."""
+        phase_budgets: list[int] = []
+        if curriculum_profile != "none":
+            phase_budgets = self._resolve_curriculum_phase_budgets(episodes)
+        self._latest_curriculum_summary = (
+            deepcopy(curriculum_summary) if curriculum_summary is not None else None
+        )
+        self._latest_training_regime_summary = {
+            "mode": "curriculum" if curriculum_profile != "none" else "flat",
+            "curriculum_profile": str(curriculum_profile),
+            "resolved_budget": {
+                "total_training_episodes": int(episodes),
+                "phase_episode_budgets": phase_budgets,
+            },
+        }
 
     def run_episode(
         self,
@@ -150,39 +367,39 @@ class SpiderSimulation:
         policy_mode: str = "normal",
     ) -> tuple[EpisodeStats, List[Dict[str, object]]]:
         """
-        Run a single simulation episode and collect aggregated episode statistics and an optional per-tick trace.
-
-        When trace capture is enabled, each trace item records tick metadata, environment state, rewards, action/result flags, and bus messages. When debug_trace is enabled, trace items additionally include serialized observations, per-module reflex diagnostics (logits, overrides, scales), decision logits, and detailed predator internal state.
-
+        Execute a single simulation episode and return aggregated episode statistics plus an optional per-tick trace.
+        
+        When `capture_trace` is True the trace contains one dict per tick with tick metadata, environment state, rewards, action/result flags, and bus messages; when `debug_trace` is also True trace items include expanded diagnostic fields (serialized observations, per-module reflex diagnostics, decision payloads, and predator internal state).
+        
         Parameters:
-            episode_index (int): Episode index used to derive the episode RNG seed and identify trace items.
-            training (bool): Enable learning updates during the episode.
-            sample (bool): Allow stochastic action sampling; when False the policy uses its argmax action.
-            render (bool): If True, print the world's textual render output each tick.
+            episode_index (int): Index used to derive the episode RNG seed and to tag trace items.
+            training (bool): If True, enable learning updates during the episode.
+            sample (bool): If True, allow stochastic action sampling; otherwise select the policy argmax.
+            render (bool): If True, render the world each tick (text output).
             capture_trace (bool): If True, collect and return a list of per-tick trace dictionaries.
-            scenario_name (str | None): Optional scenario identifier; when provided the scenario may override the map template and max steps for the episode.
-            debug_trace (bool): When True and capture_trace is enabled, include expanded diagnostic fields in each trace item.
-            policy_mode (str): Inference path passed to `SpiderBrain.act()`. `"normal"` uses the learned action-center/motor path; `"reflex_only"` uses only the post-reflex proposal path.
-
+            scenario_name (str | None): Optional scenario identifier; when provided the scenario may override the map template and max steps.
+            debug_trace (bool): When True and `capture_trace` is True, include expanded diagnostic fields in each trace item.
+            policy_mode (str): Inference mode passed to the brain; valid values are `"normal"` or `"reflex_only"`.
+        
         Returns:
-            tuple[EpisodeStats, List[Dict[str, object]]]: Aggregated episode statistics and the per-tick trace list (empty when capture_trace is False).
+            tuple[EpisodeStats, List[Dict[str, object]]]: Aggregated episode statistics and the per-tick trace list (an empty list when `capture_trace` is False).
         """
         # Validate policy_mode and brain compatibility before any state mutations
         if policy_mode not in {"normal", "reflex_only"}:
             raise ValueError(
-                "policy_mode inválido. Use 'normal' ou 'reflex_only'."
+                "Invalid policy_mode. Use 'normal' or 'reflex_only'."
             )
         if policy_mode == "reflex_only" and not self.brain.config.is_modular:
             raise ValueError(
-                "policy_mode='reflex_only' requer a arquitetura modular."
+                "policy_mode='reflex_only' requires the modular architecture."
             )
         if policy_mode == "reflex_only" and not self.brain.config.enable_reflexes:
             raise ValueError(
-                "policy_mode='reflex_only' requer reflexos habilitados."
+                "policy_mode='reflex_only' requires reflexes to be enabled."
             )
         if training and policy_mode != "normal":
             raise ValueError(
-                "run_episode() só suporta training=True com policy_mode='normal'."
+                "run_episode() only supports training=True with policy_mode='normal'."
             )
         episode_seed = self.seed + 997 * (episode_index + 1)
         scenario = get_scenario(scenario_name) if scenario_name is not None else None
@@ -273,10 +490,16 @@ class SpiderSimulation:
                     "reward_components": info["reward_components"],
                     "predator_transition": info.get("predator_transition"),
                     "distance_deltas": info.get("distance_deltas", {}),
+                    "event_log": info["event_log"],
                     "done": bool(done),
                     "messages": self.bus.serialize_current_tick(),
                 }
                 if debug_trace:
+                    arbitration_payload = (
+                        decision.arbitration_decision.to_payload()
+                        if decision.arbitration_decision is not None
+                        else {}
+                    )
                     item["observation"] = self._jsonify_observation(observation)
                     item["next_observation"] = self._jsonify_observation(next_observation)
                     item["debug"] = {
@@ -292,6 +515,7 @@ class SpiderSimulation:
                                 "effective_reflex_scale": round(float(result.effective_reflex_scale), 6),
                                 "module_reflex_override": bool(result.module_reflex_override),
                                 "module_reflex_dominance": round(float(result.module_reflex_dominance), 6),
+                                "contribution_share": round(float(result.contribution_share), 6),
                                 "reflex": result.reflex.to_payload() if result.reflex is not None else None,
                             }
                             for result in decision.module_results
@@ -302,7 +526,9 @@ class SpiderSimulation:
                             "logits": decision.action_center_logits.round(6).tolist(),
                             "policy": decision.action_center_policy.round(6).tolist(),
                             "selected_intent": ACTIONS[decision.action_intent_idx],
+                            **dict(arbitration_payload),
                         },
+                        "arbitration": dict(arbitration_payload),
                         "motor_cortex": {
                             "policy_mode": decision.policy_mode,
                             "input": decision.motor_input.round(6).tolist(),
@@ -553,8 +779,8 @@ class SpiderSimulation:
         metric_order = ["scenario_success_rate", "episode_success_rate", "mean_reward"]
         if primary_metric not in metric_order:
             raise ValueError(
-                "checkpoint_metric inválida. Use 'scenario_success_rate', "
-                "'episode_success_rate' ou 'mean_reward'."
+                "Invalid checkpoint_metric. Use 'scenario_success_rate', "
+                "'episode_success_rate' or 'mean_reward'."
             )
         ordered_metrics = [primary_metric] + [
             metric_name for metric_name in metric_order if metric_name != primary_metric
@@ -601,6 +827,204 @@ class SpiderSimulation:
             persisted[label] = str(target)
         return persisted
 
+    def _execute_training_schedule(
+        self,
+        *,
+        episodes: int,
+        episode_start: int = 0,
+        reflex_anneal_final_scale: float | None = None,
+        curriculum_profile: str = "none",
+        checkpoint_callback: Callable[[int], None] | None = None,
+    ) -> List[EpisodeStats]:
+        """
+        Run the configured training schedule either as flat training or following a curriculum.
+        
+        When `curriculum_profile` is "none" the function performs flat training for `episodes` episodes.
+        When a curriculum profile is selected it executes phase-by-phase training, performs promotion
+        checks using the phase's promotion scenarios, and may carry over unused phase budget to the
+        next phase. The optional `checkpoint_callback`, if provided, is invoked with the 1-based count
+        of completed training episodes after each training episode.
+        
+        Parameters:
+            episodes (int): Total number of training episodes to execute (non-negative).
+            episode_start (int): Base index added to per-episode indices reported to run_episode.
+            reflex_anneal_final_scale (float | None): If provided, clamps to >= 0.0 and becomes the
+                reflex scale applied at the end of training; if None, uses the brain's configured reflex scale.
+            curriculum_profile (str): Curriculum identifier; supported values are "none" and "ecological_v1".
+            checkpoint_callback (Callable[[int], None] | None): Optional callback called after each completed
+                training episode with the completed episode count (1-based) to support checkpoint/candidate capture.
+        
+        Returns:
+            training_history (List[EpisodeStats]): List of per-episode statistics collected in execution order.
+        """
+        training_history: List[EpisodeStats] = []
+        total_episodes = max(0, int(episodes))
+        final_training_reflex_scale = (
+            float(self.brain.config.reflex_scale)
+            if reflex_anneal_final_scale is None
+            else max(0.0, float(reflex_anneal_final_scale))
+        )
+        profile_name = str(curriculum_profile)
+        if profile_name not in CURRICULUM_PROFILE_NAMES:
+            raise ValueError(
+                "Invalid curriculum_profile. Use 'none' or 'ecological_v1'."
+            )
+
+        if profile_name == "none":
+            self._set_training_regime_metadata(
+                curriculum_profile="none",
+                episodes=total_episodes,
+            )
+            for episode in range(total_episodes):
+                self._set_training_episode_reflex_scale(
+                    episode_index=episode,
+                    total_episodes=total_episodes,
+                    final_scale=final_training_reflex_scale,
+                )
+                stats, _ = self.run_episode(
+                    episode_start + episode,
+                    training=True,
+                    sample=True,
+                    render=False,
+                    capture_trace=False,
+                    debug_trace=False,
+                )
+                training_history.append(stats)
+                if checkpoint_callback is not None:
+                    checkpoint_callback(episode + 1)
+            self.brain.set_runtime_reflex_scale(final_training_reflex_scale)
+            return training_history
+
+        phases = self._resolve_curriculum_profile(
+            curriculum_profile=profile_name,
+            total_episodes=total_episodes,
+        )
+        curriculum_summary = self._empty_curriculum_summary(
+            profile_name,
+            total_episodes,
+        )
+        completed_episodes = 0
+        carryover_episodes = 0
+        final_phase_index = len(phases) - 1
+        for phase_index, phase in enumerate(phases):
+            remaining_budget = max(0, total_episodes - completed_episodes)
+            carryover_in = int(carryover_episodes)
+            allocated_episodes = min(
+                remaining_budget,
+                int(phase.max_episodes) + carryover_in,
+            )
+            carryover_episodes = 0
+            phase_record: Dict[str, object] = {
+                "name": phase.name,
+                "training_scenarios": list(phase.training_scenarios),
+                "promotion_scenarios": list(phase.promotion_scenarios),
+                "success_threshold": float(phase.success_threshold),
+                "max_episodes": int(phase.max_episodes),
+                "min_episodes": int(phase.min_episodes),
+                "allocated_episodes": int(allocated_episodes),
+                "carryover_in": carryover_in,
+                "episodes_executed": 0,
+                "status": "pending",
+                "promotion_checks": [],
+                "final_metrics": {},
+            }
+            if allocated_episodes <= 0 or completed_episodes >= total_episodes:
+                phase_record["status"] = "skipped_no_budget"
+                curriculum_summary["phases"].append(phase_record)
+                continue
+
+            promoted = False
+            for local_episode in range(allocated_episodes):
+                if completed_episodes >= total_episodes:
+                    break
+                scenario_name = phase.training_scenarios[
+                    local_episode % len(phase.training_scenarios)
+                ]
+                self._set_training_episode_reflex_scale(
+                    episode_index=completed_episodes,
+                    total_episodes=total_episodes,
+                    final_scale=final_training_reflex_scale,
+                )
+                stats, _ = self.run_episode(
+                    episode_start + completed_episodes,
+                    training=True,
+                    sample=True,
+                    render=False,
+                    capture_trace=False,
+                    debug_trace=False,
+                    scenario_name=scenario_name,
+                )
+                training_history.append(stats)
+                completed_episodes += 1
+                phase_record["episodes_executed"] = int(local_episode + 1)
+                if checkpoint_callback is not None:
+                    checkpoint_callback(completed_episodes)
+                if promoted or local_episode + 1 < phase.min_episodes:
+                    continue
+
+                microeval_payload, _, _ = self.evaluate_behavior_suite(
+                    list(phase.promotion_scenarios),
+                    episodes_per_scenario=1,
+                    capture_trace=False,
+                    debug_trace=False,
+                )
+                microeval_summary = dict(microeval_payload.get("summary", {}))
+                check = {
+                    "after_episode": int(completed_episodes),
+                    "phase_episode": int(local_episode + 1),
+                    "scenario_success_rate": float(
+                        microeval_summary.get("scenario_success_rate", 0.0)
+                    ),
+                    "episode_success_rate": float(
+                        microeval_summary.get("episode_success_rate", 0.0)
+                    ),
+                    "mean_reward": self._mean_reward_from_behavior_payload(
+                        microeval_payload
+                    ),
+                }
+                phase_record["promotion_checks"].append(check)
+                phase_record["final_metrics"] = dict(check)
+                if check["scenario_success_rate"] >= phase.success_threshold:
+                    phase_record["status"] = "promoted"
+                    promoted = True
+                    if phase_index < final_phase_index:
+                        carryover_episodes = max(
+                            0,
+                            allocated_episodes - phase_record["episodes_executed"],
+                        )
+                        break
+
+            if not promoted:
+                phase_record["status"] = "max_budget_exhausted"
+            curriculum_summary["phases"].append(phase_record)
+
+        curriculum_summary["executed_training_episodes"] = int(completed_episodes)
+        if curriculum_summary["phases"]:
+            latest_executed_phase = None
+            for phase in reversed(curriculum_summary["phases"]):
+                if not isinstance(phase, dict):
+                    continue
+                if str(phase.get("status", "")) in {"skipped", "skipped_no_budget"}:
+                    continue
+                latest_executed_phase = phase
+                break
+            curriculum_summary["status"] = str(
+                (
+                    latest_executed_phase
+                    if latest_executed_phase is not None
+                    else curriculum_summary["phases"][-1]
+                ).get("status", "completed")
+            )
+        else:
+            curriculum_summary["status"] = "no_training_budget"
+        self._set_training_regime_metadata(
+            curriculum_profile=profile_name,
+            episodes=total_episodes,
+            curriculum_summary=curriculum_summary,
+        )
+        self.brain.set_runtime_reflex_scale(final_training_reflex_scale)
+        return training_history
+
     def _train_histories(
         self,
         *,
@@ -612,6 +1036,8 @@ class SpiderSimulation:
         episode_start: int = 0,
         reflex_anneal_final_scale: float | None = None,
         evaluation_reflex_scale: float | None = None,
+        curriculum_profile: str = "none",
+        preserve_training_metadata: bool = False,
     ) -> tuple[List[EpisodeStats], List[EpisodeStats], List[Dict[str, object]]]:
         """
         Execute a training phase of episodes followed by an evaluation phase and collect per-episode statistics and an optional evaluation trace.
@@ -630,27 +1056,18 @@ class SpiderSimulation:
                 - evaluation_trace (List[Dict[str, object]]): Trace captured from the last non-empty evaluation run when capture is enabled, or an empty list.
         """
         training_history: List[EpisodeStats] = []
+        if episodes > 0 or not preserve_training_metadata:
+            training_history = self._execute_training_schedule(
+                episodes=episodes,
+                episode_start=episode_start,
+                reflex_anneal_final_scale=reflex_anneal_final_scale,
+                curriculum_profile=curriculum_profile,
+            )
         final_training_reflex_scale = (
             float(self.brain.config.reflex_scale)
             if reflex_anneal_final_scale is None
             else max(0.0, float(reflex_anneal_final_scale))
         )
-        for episode in range(episodes):
-            self._set_training_episode_reflex_scale(
-                episode_index=episode,
-                total_episodes=episodes,
-                final_scale=final_training_reflex_scale,
-            )
-            stats, _ = self.run_episode(
-                episode_start + episode,
-                training=True,
-                sample=True,
-                render=False,
-                capture_trace=False,
-                debug_trace=False,
-            )
-            training_history.append(stats)
-        self.brain.set_runtime_reflex_scale(final_training_reflex_scale)
 
         evaluation_history: List[EpisodeStats] = []
         evaluation_trace: List[Dict[str, object]] = []
@@ -767,6 +1184,7 @@ class SpiderSimulation:
         checkpoint_scenario_names: Sequence[str] | None,
         selection_scenario_episodes: int,
         reflex_anneal_final_scale: float | None = None,
+        curriculum_profile: str = "none",
     ) -> tuple[List[EpisodeStats], List[EpisodeStats], List[Dict[str, object]]]:
         """
         Selects checkpoint candidates during training, evaluates them to pick the best checkpoint, loads that checkpoint, and runs the final evaluation pass.
@@ -815,22 +1233,7 @@ class SpiderSimulation:
                         eval_reflex_scale=final_training_reflex_scale,
                     )
                 )
-            for episode in range(episodes):
-                self._set_training_episode_reflex_scale(
-                    episode_index=episode,
-                    total_episodes=episodes,
-                    final_scale=final_training_reflex_scale,
-                )
-                stats, _ = self.run_episode(
-                    episode,
-                    training=True,
-                    sample=True,
-                    render=False,
-                    capture_trace=False,
-                    debug_trace=False,
-                )
-                training_history.append(stats)
-                completed_episode = episode + 1
+            def maybe_capture_candidate(completed_episode: int) -> None:
                 should_checkpoint = (
                     completed_episode % interval == 0 or completed_episode == episodes
                 )
@@ -845,6 +1248,14 @@ class SpiderSimulation:
                             eval_reflex_scale=final_training_reflex_scale,
                         )
                     )
+
+            training_history = self._execute_training_schedule(
+                episodes=episodes,
+                episode_start=0,
+                reflex_anneal_final_scale=final_training_reflex_scale,
+                curriculum_profile=curriculum_profile,
+                checkpoint_callback=maybe_capture_candidate,
+            )
 
             if not candidates:
                 candidates.append(
@@ -917,6 +1328,8 @@ class SpiderSimulation:
             debug_trace=debug_trace,
             episode_start=episodes,
             reflex_anneal_final_scale=final_training_reflex_scale,
+            curriculum_profile=curriculum_profile,
+            preserve_training_metadata=True,
         )
         return training_history, evaluation_history, evaluation_trace
 
@@ -935,6 +1348,7 @@ class SpiderSimulation:
         checkpoint_scenario_names: Sequence[str] | None = None,
         selection_scenario_episodes: int = 1,
         reflex_anneal_final_scale: float | None = None,
+        curriculum_profile: str = "none",
     ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
         """
         Run training episodes, optionally perform checkpoint selection, and evaluate the trained agent.
@@ -962,7 +1376,11 @@ class SpiderSimulation:
         """
         if checkpoint_selection not in {"none", "best"}:
             raise ValueError(
-                "checkpoint_selection inválido. Use 'none' ou 'best'."
+                "Invalid checkpoint_selection. Use 'none' or 'best'."
+            )
+        if curriculum_profile not in CURRICULUM_PROFILE_NAMES:
+            raise ValueError(
+                "Invalid curriculum_profile. Use 'none' or 'ecological_v1'."
             )
         if checkpoint_selection == "best":
             # Intentionally call _checkpoint_candidate_sort_key() with an empty
@@ -1014,6 +1432,7 @@ class SpiderSimulation:
                     checkpoint_scenario_names=checkpoint_scenario_names,
                     selection_scenario_episodes=selection_scenario_episodes,
                     reflex_anneal_final_scale=final_training_reflex_scale,
+                    curriculum_profile=curriculum_profile,
                 )
             )
         else:
@@ -1024,6 +1443,7 @@ class SpiderSimulation:
                 capture_evaluation_trace=capture_evaluation_trace,
                 debug_trace=debug_trace,
                 reflex_anneal_final_scale=final_training_reflex_scale,
+                curriculum_profile=curriculum_profile,
             )
         summary = self._build_summary(training_history, evaluation_history)
         if evaluation_episodes > 0 and self.brain.config.is_modular:
@@ -1036,6 +1456,8 @@ class SpiderSimulation:
                 episode_start=episodes,
                 reflex_anneal_final_scale=final_training_reflex_scale,
                 evaluation_reflex_scale=0.0,
+                curriculum_profile=curriculum_profile,
+                preserve_training_metadata=True,
             )
             self._latest_evaluation_without_reflex_support = {
                 "eval_reflex_scale": 0.0,
@@ -1213,7 +1635,11 @@ class SpiderSimulation:
                     policy_mode=policy_mode,
                 )
                 stats_group.append(stats)
-                score_group.append(scenario.score_episode(stats, run_trace))
+                score = scenario.score_episode(stats, run_trace)
+                score.behavior_metrics.update(
+                    self._episode_stats_behavior_metrics(stats)
+                )
+                score_group.append(score)
                 if capture_public_trace:
                     trace = run_trace
             stats_histories[name] = stats_group
@@ -1325,6 +1751,17 @@ class SpiderSimulation:
             "mean_module_reflex_dominance": {
                 interface.name: 0.0 for interface in MODULE_INTERFACES
             },
+            "mean_module_contribution_share": {
+                name: 0.0 for name in PROPOSAL_SOURCE_NAMES
+            },
+            "dominant_module": "",
+            "dominant_module_distribution": {
+                name: 0.0 for name in PROPOSAL_SOURCE_NAMES
+            },
+            "mean_dominant_module_share": 0.0,
+            "mean_effective_module_count": 0.0,
+            "mean_module_agreement_rate": 0.0,
+            "mean_module_disagreement_rate": 0.0,
             "episodes_detail": [],
         }
 
@@ -1375,7 +1812,11 @@ class SpiderSimulation:
                 "operational_profile": self.operational_profile.to_summary(),
                 "noise_profile": self.noise_profile.to_summary(),
                 "budget": deepcopy(self.budget_summary),
+                "training_regime": deepcopy(self._latest_training_regime_summary),
             },
+            "reward_audit": self._build_reward_audit(
+                current_profile=self.world.reward_profile
+            ),
             "training": self._aggregate_group(training_history),
             "training_last_window": self._aggregate_group(last_window),
             "evaluation": self._aggregate_group(evaluation_history),
@@ -1391,6 +1832,8 @@ class SpiderSimulation:
             summary["evaluation_without_reflex_support"] = deepcopy(
                 self._latest_evaluation_without_reflex_support
             )
+        if self._latest_curriculum_summary is not None:
+            summary["curriculum"] = deepcopy(self._latest_curriculum_summary)
         return summary
 
     def _annotate_behavior_rows(
@@ -1442,10 +1885,187 @@ class SpiderSimulation:
                 if eval_reflex_scale is not None
                 else self.brain.current_reflex_scale
             )
+            item.update(
+                self._regime_row_metadata_from_summary(
+                    self._latest_training_regime_summary,
+                    self._latest_curriculum_summary,
+                )
+            )
             if extra_metadata:
                 item.update(extra_metadata)
             annotated.append(item)
         return annotated
+
+    @classmethod
+    def _profile_comparison_metrics(
+        cls,
+        payload: Dict[str, object] | None,
+    ) -> Dict[str, float]:
+        """
+        Extract three numeric comparison metrics from a behavior-suite or aggregate comparison payload.
+        
+        Parameters:
+            payload (dict | None): A behavior-suite payload (with a top-level "summary") or an aggregate comparison payload; may be None or malformed.
+        
+        Returns:
+            dict: A mapping with keys:
+                - "scenario_success_rate": float, success rate aggregated per scenario.
+                - "episode_success_rate": float, success rate aggregated per episode.
+                - "mean_reward": float, mean reward (computed from payload summary or legacy scenario entries).
+        """
+        if not isinstance(payload, dict):
+            return {
+                "scenario_success_rate": 0.0,
+                "episode_success_rate": 0.0,
+                "mean_reward": 0.0,
+            }
+        summary = payload.get("summary")
+        if isinstance(summary, dict):
+            return {
+                "scenario_success_rate": cls._safe_float(
+                    summary.get("scenario_success_rate")
+                ),
+                "episode_success_rate": cls._safe_float(
+                    summary.get("episode_success_rate")
+                ),
+                "mean_reward": cls._condition_mean_reward(payload),
+            }
+        return {
+            "scenario_success_rate": cls._safe_float(
+                payload.get("scenario_success_rate")
+            ),
+            "episode_success_rate": cls._safe_float(
+                payload.get("episode_success_rate")
+            ),
+            "mean_reward": cls._safe_float(payload.get("mean_reward")),
+        }
+
+    @classmethod
+    def _build_reward_audit_comparison(
+        cls,
+        comparison_payload: Dict[str, object] | None,
+    ) -> Dict[str, object] | None:
+        """
+        Build a compact comparison of reward profiles and their metrics, and compute deltas versus the "austere" baseline when present.
+        
+        Parameters:
+            comparison_payload (dict | None): The reward-audit comparison payload expected to contain a
+                "reward_profiles" mapping of profile names to per-profile payloads (each a dict).
+        
+        Returns:
+            dict | None: A summary dict with the following keys, or `None` if input is missing or invalid:
+              - "minimal_profile": name of the austere baseline profile if present, else `None`.
+              - "profiles": mapping of profile name -> rounded metrics (`scenario_success_rate`,
+                `episode_success_rate`, `mean_reward`) with values rounded to 6 decimal places.
+              - "deltas_vs_minimal": mapping of profile name -> deltas vs the minimal profile (same
+                metric keys, rounded to 6 decimals). Empty if no austere baseline is available.
+              - "notes": list of human-readable notes about how metrics were derived.
+        """
+        if not isinstance(comparison_payload, dict):
+            return None
+        profile_payloads = comparison_payload.get("reward_profiles")
+        if not isinstance(profile_payloads, dict) or not profile_payloads:
+            return None
+        profiles = {
+            name: cls._profile_comparison_metrics(dict(payload))
+            for name, payload in profile_payloads.items()
+            if isinstance(payload, dict)
+        }
+        if not profiles:
+            return None
+        minimal_profile = "austere" if "austere" in profiles else None
+        deltas_vs_minimal: Dict[str, object] = {}
+        if minimal_profile is not None:
+            minimal_metrics = profiles[minimal_profile]
+            for name, metrics in profiles.items():
+                deltas_vs_minimal[name] = {
+                    "scenario_success_rate_delta": round(
+                        float(metrics["scenario_success_rate"])
+                        - float(minimal_metrics["scenario_success_rate"]),
+                        6,
+                    ),
+                    "episode_success_rate_delta": round(
+                        float(metrics["episode_success_rate"])
+                        - float(minimal_metrics["episode_success_rate"]),
+                        6,
+                    ),
+                    "mean_reward_delta": round(
+                        float(metrics["mean_reward"])
+                        - float(minimal_metrics["mean_reward"]),
+                        6,
+                    ),
+                }
+        return {
+            "minimal_profile": minimal_profile,
+            "profiles": {
+                name: {
+                    key: round(float(value), 6)
+                    for key, value in sorted(metrics.items())
+                }
+                for name, metrics in sorted(profiles.items())
+            },
+            "deltas_vs_minimal": deltas_vs_minimal,
+            "notes": [
+                "scenario_success_rate and episode_success_rate mirror the existing comparison payload.",
+                "mean_reward is derived from the summary when available or from the corresponding compact aggregate.",
+            ],
+        }
+
+    @classmethod
+    def _build_reward_audit(
+        cls,
+        *,
+        current_profile: str | None = None,
+        comparison_payload: Dict[str, object] | None = None,
+    ) -> Dict[str, object]:
+        """
+        Build a structured audit of reward shaping and leakage signals for the simulation.
+        
+        This produces a dictionary summarizing the current reward profile, a minimal baseline
+        marker (when available), per-component reward audits, observation- and memory-leakage
+        signals, per-profile audits for every known reward profile, and human-readable notes.
+        If a comparison payload is supplied, a `comparison` block with computed deltas is
+        included.
+        
+        Parameters:
+            current_profile (str | None): Optional name of the currently selected reward profile
+                to record in the audit. May be None.
+            comparison_payload (dict | None): Optional payload used to compute comparison deltas.
+                When provided, a `comparison` entry will be added to the returned audit.
+        
+        Returns:
+            dict: Audit payload containing keys:
+              - "current_profile": the provided `current_profile` value
+              - "minimal_profile": name of an austere baseline when available, else None
+              - "reward_components": per-component audit results
+              - "observation_signals": observation-leakage audit results
+              - "memory_signals": memory-leakage audit results
+              - "reward_profiles": per-profile audit entries for all known profiles
+              - "notes": explanatory notes
+              - "comparison" (optional): computed comparison block when `comparison_payload` was provided
+        """
+        audit = {
+            "current_profile": current_profile,
+            "minimal_profile": None,
+            "reward_components": reward_component_audit(),
+            "observation_signals": observation_leakage_audit(),
+            "memory_signals": memory_leakage_audit(),
+            "reward_profiles": {
+                name: reward_profile_audit(name)
+                for name in sorted(REWARD_PROFILES)
+            },
+            "notes": [
+                "The audit distinguishes event shaping, progress shaping, and internal pressure.",
+                "Observation and memory signals classified as privileged/world_derived should be interpreted cautiously in benchmarks.",
+            ],
+        }
+        comparison = cls._build_reward_audit_comparison(comparison_payload)
+        if comparison is not None:
+            audit["minimal_profile"] = comparison.get("minimal_profile")
+            audit["comparison"] = comparison
+        elif "austere" in REWARD_PROFILES:
+            audit["minimal_profile"] = "austere"
+        return audit
 
     @staticmethod
     def _safe_float(value: object) -> float:
@@ -1627,21 +2247,21 @@ class SpiderSimulation:
         reference_condition: str,
     ) -> Dict[str, object]:
         """
-        Build a compact learning-evidence summary that compares specified condition payloads against a reference.
+        Build a compact summary comparing learning-evidence conditions against a reference condition.
         
         Parameters:
-            conditions (Dict[str, Dict[str, object]]): Mapping from condition name to its compact condition payload (may include a `"skipped"` flag).
+            conditions (Dict[str, Dict[str, object]]): Mapping from condition name to its compact payload; a payload may include a `"skipped"` flag.
             reference_condition (str): Name of the condition to use as the primary trained reference.
         
         Returns:
-            Dict[str, object]: A dictionary containing:
+            Dict[str, object]: Summary containing:
                 - reference_condition: the provided reference name.
                 - primary_gate_metric: the metric used for the primary evidence gate ("scenario_success_rate").
-                - supports_primary_evidence: `true` if the reference, `random_init`, and `reflex_only` conditions are present and not marked skipped.
+                - supports_primary_evidence: `true` if `reference_condition`, `random_init`, and `reflex_only` are present and not skipped.
                 - has_learning_evidence: `true` if `scenario_success_rate` for the reference exceeds both `random_init` and `reflex_only`.
-                - trained_final, random_init, reflex_only, trained_without_reflex_support: compact summaries for each named condition (zeros if missing).
-                - trained_vs_random_init, trained_vs_reflex_only: per-metric deltas (`scenario_success_rate`, `episode_success_rate`, `mean_reward`) from reference minus comparator, rounded to 6 decimals.
-                - notes: explanatory messages about gating, complementary metrics, and reflex-only availability.
+                - trained_final, random_init, reflex_only, trained_without_reflex_support: compact summaries for each condition (zeroed defaults when missing).
+                - trained_vs_random_init, trained_vs_reflex_only: per-metric deltas (`scenario_success_rate`, `episode_success_rate`, `mean_reward`) computed as reference minus comparator and rounded to 6 decimals.
+                - notes: list of explanatory messages about gating, supporting metrics, and reflex-only availability.
         """
         trained_final = cls._condition_compact_summary(conditions.get(reference_condition))
         random_init = cls._condition_compact_summary(conditions.get("random_init"))
@@ -1699,13 +2319,13 @@ class SpiderSimulation:
             ),
         }
         notes = [
-            "A evidência principal usa apenas scenario_success_rate como gate.",
-            "episode_success_rate e mean_reward aparecem apenas como documentação complementar.",
-            "trained_without_reflex_support mede dependência residual de reflexos e não participa do gate principal.",
+            "Primary evidence uses only scenario_success_rate as the gate.",
+            "episode_success_rate and mean_reward are included only as supporting documentation.",
+            "trained_without_reflex_support measures residual reflex dependence and does not participate in the primary gate.",
         ]
         if not reflex_only_available:
             notes.append(
-                "A condição reflex_only não está disponível para a arquitetura atual."
+                "The reflex_only condition is not available for the current architecture."
             )
         has_learning_evidence = (
             primary_supported
@@ -1906,6 +2526,16 @@ class SpiderSimulation:
                 for map_name, history in map_histories.items()
             },
             "matrix": matrix,
+            "reward_audit": cls._build_reward_audit(
+                current_profile=profile_names[0] if profile_names else None,
+                comparison_payload={"reward_profiles": {
+                    profile: cls._with_noise_profile_metadata(
+                        cls._compact_aggregate(aggregate_episode_stats(history)),
+                        resolved_noise_profile,
+                    )
+                    for profile, history in profile_histories.items()
+                }},
+            ),
             **cls._noise_profile_metadata(resolved_noise_profile),
         }
 
@@ -2180,6 +2810,237 @@ class SpiderSimulation:
             "reward_profiles": reward_profile_payloads,
             "map_templates": map_payloads,
             "matrix": matrix,
+            "reward_audit": cls._build_reward_audit(
+                current_profile=profile_names[0] if profile_names else None,
+                comparison_payload={"reward_profiles": reward_profile_payloads},
+            ),
+            **cls._noise_profile_metadata(resolved_noise_profile),
+        }, rows
+
+    @classmethod
+    def compare_training_regimes(
+        cls,
+        *,
+        width: int = 12,
+        height: int = 12,
+        food_count: int = 4,
+        day_length: int = 18,
+        night_length: int = 12,
+        max_steps: int | None = None,
+        episodes: int | None = None,
+        evaluation_episodes: int | None = None,
+        gamma: float = 0.96,
+        module_lr: float = 0.010,
+        motor_lr: float = 0.012,
+        module_dropout: float = 0.05,
+        reward_profile: str = "classic",
+        map_template: str = "central_burrow",
+        operational_profile: str | OperationalProfile | None = None,
+        noise_profile: str | NoiseConfig | None = None,
+        budget_profile: str | BudgetProfile | None = None,
+        seeds: Sequence[int] | None = None,
+        names: Sequence[str] | None = None,
+        episodes_per_scenario: int | None = None,
+        checkpoint_selection: str = "none",
+        checkpoint_metric: str = "scenario_success_rate",
+        checkpoint_interval: int | None = None,
+        checkpoint_dir: str | Path | None = None,
+        curriculum_profile: str = "ecological_v1",
+    ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
+        """
+        Compare flat and curriculum training regimes by training each under the same resolved budget and seeds, then evaluating their behavior across a scenario suite.
+        
+        Trains a "flat" regime and a "curriculum" regime (using the provided curriculum_profile) per seed, evaluates both on the same scenarios and episodes-per-scenario, and aggregates per-scenario episode statistics, behavioral scores, annotated CSV rows, and computed deltas comparing curriculum vs flat.
+        
+        Returns:
+            result_payload (Dict[str, object]): Aggregated comparison payload containing budget and seed metadata, per-regime compact behavior payloads under "regimes", computed deltas vs the flat reference under "deltas_vs_flat", focus summaries, and noise profile metadata.
+            rows (List[Dict[str, object]]): A flattened, annotated list of per-episode/behavior rows suitable for CSV export.
+        """
+        if curriculum_profile == "none":
+            raise ValueError(
+                "compare_training_regimes() requires an active curriculum."
+            )
+        resolved_noise_profile = resolve_noise_profile(noise_profile)
+        budget = resolve_budget(
+            profile=budget_profile,
+            episodes=episodes,
+            eval_episodes=evaluation_episodes,
+            max_steps=max_steps,
+            scenario_episodes=episodes_per_scenario,
+            checkpoint_interval=checkpoint_interval,
+            behavior_seeds=seeds,
+            ablation_seeds=seeds,
+        )
+        scenario_names = list(names or SCENARIO_NAMES)
+        focus_scenarios = [
+            name for name in CURRICULUM_FOCUS_SCENARIOS if name in scenario_names
+        ]
+        run_count = max(1, int(budget.scenario_episodes))
+        seed_values = tuple(seeds) if seeds is not None else budget.behavior_seeds
+        if not seed_values:
+            raise ValueError(
+                "compare_training_regimes() requer pelo menos uma seed."
+            )
+        regimes = ("flat", "curriculum")
+        regime_stats = {
+            regime: {name: [] for name in scenario_names}
+            for regime in regimes
+        }
+        regime_scores = {
+            regime: {name: [] for name in scenario_names}
+            for regime in regimes
+        }
+        regime_training_metadata: Dict[str, Dict[str, object]] = {}
+        rows: List[Dict[str, object]] = []
+        sim_budget = budget.to_summary()
+        sim_budget["resolved"]["scenario_episodes"] = run_count
+        sim_budget["resolved"]["behavior_seeds"] = list(seed_values)
+        sim_budget["resolved"]["ablation_seeds"] = list(budget.ablation_seeds)
+
+        for regime in regimes:
+            for seed in seed_values:
+                sim = cls(
+                    width=width,
+                    height=height,
+                    food_count=food_count,
+                    day_length=day_length,
+                    night_length=night_length,
+                    max_steps=budget.max_steps,
+                    seed=seed,
+                    gamma=gamma,
+                    module_lr=module_lr,
+                    motor_lr=motor_lr,
+                    module_dropout=module_dropout,
+                    operational_profile=operational_profile,
+                    noise_profile=resolved_noise_profile,
+                    reward_profile=reward_profile,
+                    map_template=map_template,
+                    budget_profile_name=budget.profile,
+                    benchmark_strength=budget.benchmark_strength,
+                    budget_summary=sim_budget,
+                )
+                if regime == "curriculum":
+                    sim._set_training_regime_metadata(
+                        curriculum_profile=curriculum_profile,
+                        episodes=int(budget.episodes),
+                        curriculum_summary=cls._empty_curriculum_summary(
+                            curriculum_profile,
+                            int(budget.episodes),
+                        ) if int(budget.episodes) <= 0 else None,
+                    )
+                else:
+                    sim._set_training_regime_metadata(
+                        curriculum_profile="none",
+                        episodes=int(budget.episodes),
+                    )
+                if (
+                    checkpoint_selection == "best"
+                    or budget.episodes > 0
+                    or budget.eval_episodes > 0
+                ):
+                    run_checkpoint_dir = None
+                    if checkpoint_dir is not None:
+                        run_checkpoint_dir = (
+                            Path(checkpoint_dir)
+                            / "curriculum_compare"
+                            / f"{regime}__seed_{seed}"
+                        )
+                    sim.train(
+                        budget.episodes,
+                        evaluation_episodes=0,
+                        render_last_evaluation=False,
+                        capture_evaluation_trace=False,
+                        debug_trace=False,
+                        checkpoint_selection=checkpoint_selection,
+                        checkpoint_metric=checkpoint_metric,
+                        checkpoint_interval=budget.checkpoint_interval,
+                        checkpoint_dir=run_checkpoint_dir,
+                        checkpoint_scenario_names=scenario_names,
+                        selection_scenario_episodes=budget.selection_scenario_episodes,
+                        curriculum_profile=(
+                            curriculum_profile if regime == "curriculum" else "none"
+                        ),
+                    )
+                regime_training_metadata[regime] = deepcopy(
+                    sim._latest_training_regime_summary
+                )
+                stats_histories, behavior_histories, _ = sim._execute_behavior_suite(
+                    names=scenario_names,
+                    episodes_per_scenario=run_count,
+                    capture_trace=False,
+                    debug_trace=False,
+                    base_index=300_000,
+                )
+                for name in scenario_names:
+                    regime_stats[regime][name].extend(stats_histories[name])
+                    regime_scores[regime][name].extend(behavior_histories[name])
+                    rows.extend(
+                        sim._annotate_behavior_rows(
+                            flatten_behavior_rows(
+                                behavior_histories[name],
+                                reward_profile=reward_profile,
+                                scenario_map=get_scenario(name).map_template,
+                                simulation_seed=seed,
+                                scenario_description=get_scenario(name).description,
+                                scenario_objective=get_scenario(name).objective,
+                                scenario_focus=get_scenario(name).diagnostic_focus,
+                                evaluation_map=map_template,
+                            )
+                        )
+                    )
+
+        regime_payloads = {
+            regime: cls._with_noise_profile_metadata(
+                cls._compact_behavior_payload(
+                    sim._build_behavior_payload(
+                        stats_histories=regime_stats[regime],
+                        behavior_histories=regime_scores[regime],
+                    )
+                ),
+                resolved_noise_profile,
+            )
+            for regime in regimes
+        }
+        for regime in regimes:
+            regime_payloads[regime]["training_regime"] = deepcopy(
+                regime_training_metadata.get(regime, {})
+            )
+            regime_payloads[regime]["episode_allocation"] = {
+                "total_training_episodes": int(budget.episodes),
+                "evaluation_episodes": int(budget.eval_episodes),
+                "episodes_per_scenario": int(run_count),
+            }
+        deltas = cls._build_learning_evidence_deltas(
+            regime_payloads,
+            reference_condition="flat",
+            scenario_names=scenario_names,
+        )
+        return {
+            "budget_profile": budget.profile,
+            "benchmark_strength": budget.benchmark_strength,
+            "checkpoint_selection": checkpoint_selection,
+            "checkpoint_metric": checkpoint_metric,
+            "curriculum_profile": curriculum_profile,
+            "reference_regime": "flat",
+            "seeds": list(seed_values),
+            "scenario_names": scenario_names,
+            "episodes_per_scenario": run_count,
+            "focus_scenarios": focus_scenarios,
+            "regimes": regime_payloads,
+            "deltas_vs_flat": deltas,
+            "focus_summary": {
+                regime: {
+                    name: {
+                        "success_rate": float(
+                            regime_payloads[regime]["suite"]
+                            .get(name, {})
+                            .get("success_rate", 0.0)
+                        )
+                    }
+                    for name in focus_scenarios
+                }
+                for regime in regimes
+            },
             **cls._noise_profile_metadata(resolved_noise_profile),
         }, rows
 
@@ -2529,7 +3390,7 @@ class SpiderSimulation:
                     "config": base_config.to_summary(),
                     "skipped": True,
                     "reason": (
-                        f"Condição incompatível com a arquitetura {base_config.architecture!r}."
+                        f"Condition incompatible with architecture {base_config.architecture!r}."
                     ),
                     **cls._noise_profile_metadata(resolved_noise_profile),
                 }
@@ -2557,8 +3418,8 @@ class SpiderSimulation:
                     "config": base_config.to_summary(),
                     "skipped": True,
                     "reason": (
-                        f"Condição {condition.name!r} requer reflexos habilitados, "
-                        "mas a configuração base está com reflexos desabilitados."
+                        f"Condition {condition.name!r} requires reflexes to be enabled, "
+                        "but the base configuration has reflexes disabled."
                     ),
                     **cls._noise_profile_metadata(resolved_noise_profile),
                 }
@@ -2881,6 +3742,10 @@ class SpiderSimulation:
             "evaluation_map",
             "ablation_variant",
             "ablation_architecture",
+            "training_regime",
+            "curriculum_profile",
+            "curriculum_phase",
+            "curriculum_phase_status",
             "learning_evidence_condition",
             "learning_evidence_policy_mode",
             "learning_evidence_train_episodes",

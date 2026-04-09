@@ -1224,32 +1224,49 @@ def run_offline_analysis(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    Create and configure the command-line ArgumentParser for the offline analysis tool.
+    
+    The parser exposes the following options:
+    - --summary: path to an optional summary.json input.
+    - --trace: path to an optional trace.jsonl input.
+    - --behavior-csv: path to an optional behavior CSV exported by the main CLI.
+    - --output-dir: required path where the report and artifacts will be written.
+    
+    Returns:
+        argparse.ArgumentParser: A configured ArgumentParser instance.
+    """
     parser = argparse.ArgumentParser(
-        description="Gera análise offline reproduzível a partir de summary, trace e behavior_csv.",
+        description="Generate reproducible offline analysis from summary, trace, and behavior_csv.",
     )
-    parser.add_argument("--summary", type=Path, default=None, help="Arquivo summary.json.")
-    parser.add_argument("--trace", type=Path, default=None, help="Arquivo trace.jsonl.")
+    parser.add_argument("--summary", type=Path, default=None, help="Path to summary.json.")
+    parser.add_argument("--trace", type=Path, default=None, help="Path to trace.jsonl.")
     parser.add_argument(
         "--behavior-csv",
         type=Path,
         default=None,
-        help="Arquivo behavior_csv exportado pela CLI principal.",
+        help="Path to behavior CSV exported by the main CLI.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
-        help="Diretório onde o relatório e os artefatos serão gerados.",
+        help="Directory where the report and artifacts will be generated.",
     )
     return parser
 
 
 def main() -> None:
+    """
+    Parse command-line arguments, run the offline analysis pipeline with the provided inputs, write report artifacts to the output directory, and print the resulting report as JSON to stdout.
+    
+    If none of --summary, --trace, or --behavior-csv are supplied, the parser terminates with an error.
+    """
     parser = build_parser()
     args = parser.parse_args()
     if args.summary is None and args.trace is None and args.behavior_csv is None:
         parser.error(
-            "Ao menos um entre --summary, --trace e --behavior-csv é obrigatório."
+            "At least one of --summary, --trace, and --behavior-csv is required."
         )
     report = run_offline_analysis(
         summary_path=args.summary,

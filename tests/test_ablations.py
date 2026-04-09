@@ -10,6 +10,7 @@ import numpy as np
 from spider_cortex_sim.ablations import (
     BrainAblationConfig,
     MODULE_NAMES,
+    MONOLITHIC_POLICY_NAME,
     canonical_ablation_configs,
     canonical_ablation_variant_names,
     default_brain_config,
@@ -458,6 +459,14 @@ class CanonicalAblationConfigsTest(unittest.TestCase):
         self.assertFalse(no_reflex.enable_reflexes)
         self.assertFalse(no_reflex.enable_auxiliary_targets)
 
+    def test_contains_local_credit_only(self) -> None:
+        configs = canonical_ablation_configs()
+        local_credit = configs["local_credit_only"]
+        self.assertTrue(local_credit.is_modular)
+        self.assertTrue(local_credit.enable_reflexes)
+        self.assertTrue(local_credit.enable_auxiliary_targets)
+        self.assertTrue(local_credit.uses_local_credit_only)
+
     def test_contains_monolithic_policy(self) -> None:
         configs = canonical_ablation_configs()
         mono = configs["monolithic_policy"]
@@ -490,9 +499,9 @@ class CanonicalAblationConfigsTest(unittest.TestCase):
 
     def test_variant_names_count(self) -> None:
         names = canonical_ablation_variant_names()
-        # modular_full + no_module_dropout + no_module_reflexes
-        # + reflex_scale_0_25/_0_50/_0_75 + 5 drop_ variants + monolithic_policy = 12
-        expected_count = 6 + len(MODULE_NAMES) + 1
+        # modular_full + no_module_dropout + no_module_reflexes + local_credit_only
+        # + reflex_scale_0_25/_0_50/_0_75 + 5 drop_ variants + monolithic_policy = 13
+        expected_count = 7 + len(MODULE_NAMES) + 1
         self.assertEqual(len(names), expected_count)
 
     def test_contains_reflex_scale_0_25(self) -> None:
@@ -828,7 +837,7 @@ class SpiderBrainMonolithicTest(unittest.TestCase):
 
     def _monolithic_config(self) -> BrainAblationConfig:
         return BrainAblationConfig(
-            name="monolithic_policy",
+            name=MONOLITHIC_POLICY_NAME,
             architecture="monolithic",
             module_dropout=0.0,
             enable_reflexes=False,
@@ -937,7 +946,23 @@ class SpiderBrainMonolithicTest(unittest.TestCase):
         self.assertGreaterEqual(step.action_idx, 0)
         self.assertLess(step.action_idx, len(LOCOMOTION_ACTIONS))
 
+    def test_monolithic_step_exposes_arbitration_metadata(self) -> None:
+        brain = SpiderBrain(seed=7, config=self._monolithic_config())
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+        self.assertIsNotNone(step.arbitration_decision)
+        self.assertEqual(step.arbitration_decision.module_gates["monolithic_policy"], 1.0)
+        self.assertEqual(
+            step.arbitration_decision.module_contribution_share["monolithic_policy"],
+            1.0,
+        )
+
     def test_monolithic_save_and_load_round_trip(self) -> None:
+        """
+        Verifies that saving then loading a monolithic SpiderBrain reproduces its policy and value outputs.
+        
+        Uses a fixed observation and monolithic configuration: saves the brain to disk, loads it into a new SpiderBrain instance with the same configuration, and asserts that the resulting policy and value vectors match within a small numerical tolerance.
+        """
         config = self._monolithic_config()
         brain = SpiderBrain(seed=11, config=config)
         obs = self._build_observation()
@@ -1002,7 +1027,7 @@ class SpiderBrainMonolithicTest(unittest.TestCase):
             metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
             brain2 = SpiderBrain(seed=999, config=config)
-            with self.assertRaisesRegex(ValueError, "registry de interfaces incompatível"):
+            with self.assertRaisesRegex(ValueError, "interface registry incompatible"):
                 brain2.load(save_path)
 
     def test_loading_monolithic_into_modular_raises_value_error(self) -> None:
@@ -1108,13 +1133,73 @@ class SpiderBrainMonolithicTest(unittest.TestCase):
         brain.motor_cortex.backward = lambda grad_logits, lr: None
         brain.estimate_value = lambda _: 0.0
 
-        brain.learn(step, reward=0.5, next_observation=obs, done=False)
+        expected_reflex_aux = brain._auxiliary_module_gradients(step.module_results)
+        stats = brain.learn(step, reward=0.5, next_observation=obs, done=False)
 
-        np.testing.assert_allclose(captured["bank_grad"], captured["shared_grad"])
+        np.testing.assert_allclose(
+            captured["bank_grad"],
+            np.zeros_like(captured["shared_grad"]),
+        )
         for idx, result in enumerate(step.module_results):
+            expected_total_grad = result.gate_weight * (
+                captured["shared_grad"] + proposal_grads[idx]
+            )
+            expected_total_grad += result.gate_weight * expected_reflex_aux.get(
+                result.name,
+                np.zeros(len(LOCOMOTION_ACTIONS), dtype=float),
+            )
             np.testing.assert_allclose(
                 captured["aux_grads"][result.name],
-                proposal_grads[idx],
+                expected_total_grad,
+            )
+        self.assertEqual(stats["aux_modules"], float(len(expected_reflex_aux)))
+
+    def test_local_credit_only_learn_omits_shared_policy_broadcast(self) -> None:
+        config = BrainAblationConfig(
+            name="local_credit_only",
+            architecture="modular",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+        )
+        brain = SpiderBrain(seed=7, config=config)
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+
+        captured: dict[str, object] = {}
+        proposal_grads = np.arange(
+            len(step.module_results) * len(LOCOMOTION_ACTIONS),
+            dtype=float,
+        ).reshape(len(step.module_results), len(LOCOMOTION_ACTIONS))
+        upstream = np.concatenate(
+            [
+                proposal_grads.reshape(-1),
+                np.zeros(ACTION_CONTEXT_INTERFACE.input_dim, dtype=float),
+            ]
+        )
+
+        def fake_action_center_backward(*, grad_policy_logits, grad_value, lr):
+            captured["shared_grad"] = np.asarray(grad_policy_logits, dtype=float).copy()
+            return upstream
+
+        def fake_module_bank_backward(grad_logits, lr, aux_grads=None):
+            captured["aux_grads"] = {
+                name: np.asarray(value, dtype=float).copy()
+                for name, value in (aux_grads or {}).items()
+            }
+
+        brain.action_center.backward = fake_action_center_backward
+        brain.module_bank.backward = fake_module_bank_backward
+        brain.motor_cortex.backward = lambda grad_logits, lr: None
+        brain.estimate_value = lambda _: 0.0
+
+        brain.learn(step, reward=0.5, next_observation=obs, done=False)
+
+        for idx, result in enumerate(step.module_results):
+            expected_total_grad = result.gate_weight * proposal_grads[idx]
+            np.testing.assert_allclose(
+                captured["aux_grads"][result.name],
+                expected_total_grad,
             )
 
     def test_monolithic_learn_adds_action_center_input_grads_to_policy_update(self) -> None:
@@ -1371,6 +1456,19 @@ class BuildSummaryBrainConfigTest(unittest.TestCase):
         self.assertEqual(summary["config"]["architecture_version"], SpiderBrain.ARCHITECTURE_VERSION)
         self.assertTrue(summary["config"]["architecture_fingerprint"])
 
+    def test_summary_includes_reward_audit(self) -> None:
+        """
+        Verifies that SpiderSimulation._build_summary includes a reward_audit section with expected keys and values.
+        
+        Asserts that the summary contains a top-level "reward_audit" entry, that its "current_profile" is "classic", that "predator_dist" appears in "observation_signals", and that "austere" is listed among "reward_profiles".
+        """
+        sim = SpiderSimulation(seed=7, max_steps=5)
+        summary = sim._build_summary([], [])
+        self.assertIn("reward_audit", summary)
+        self.assertEqual(summary["reward_audit"]["current_profile"], "classic")
+        self.assertIn("predator_dist", summary["reward_audit"]["observation_signals"])
+        self.assertIn("austere", summary["reward_audit"]["reward_profiles"])
+
     def test_summary_monolithic_brain_config_in_summary(self) -> None:
         config = BrainAblationConfig(name="monolithic_policy", architecture="monolithic", module_dropout=0.0)
         sim = SpiderSimulation(seed=7, max_steps=5, brain_config=config)
@@ -1437,7 +1535,7 @@ class CompareAblationSuiteAlwaysIncludesReferenceTest(unittest.TestCase):
         _, rows = SpiderSimulation.compare_ablation_suite(
             episodes=0,
             evaluation_episodes=0,
-            variant_names=["monolithic_policy"],
+            variant_names=["local_credit_only", "monolithic_policy"],
             names=("night_rest",),
             seeds=(7,),
         )
@@ -1445,6 +1543,27 @@ class CompareAblationSuiteAlwaysIncludesReferenceTest(unittest.TestCase):
         for row in rows:
             self.assertIn("ablation_variant", row)
             self.assertIn("ablation_architecture", row)
+            self.assertIn("metric_module_contribution_alert_center", row)
+            self.assertIn("metric_dominant_module", row)
+            self.assertIn("metric_effective_module_count", row)
+
+    def test_payload_includes_local_credit_only_variant(self) -> None:
+        payload, _ = SpiderSimulation.compare_ablation_suite(
+            episodes=0,
+            evaluation_episodes=0,
+            variant_names=["local_credit_only"],
+            names=("night_rest",),
+            seeds=(7,),
+        )
+        self.assertIn("local_credit_only", payload["variants"])
+        self.assertEqual(
+            payload["variants"]["local_credit_only"]["config"]["name"],
+            "local_credit_only",
+        )
+        self.assertIn(
+            "mean_module_contribution_share",
+            payload["variants"]["local_credit_only"]["legacy_scenarios"]["night_rest"],
+        )
 
     def test_rows_contain_operational_profile_columns(self) -> None:
         _, rows = SpiderSimulation.compare_ablation_suite(
@@ -1605,6 +1724,423 @@ class SpiderSimulationOperationalProfileTest(unittest.TestCase):
         self.assertEqual(annotated[0]["operational_profile"], "ablation_test_profile")
         self.assertEqual(annotated[0]["operational_profile_version"], 21)
         self.assertEqual(annotated[0]["noise_profile"], "none")
+
+
+class BuildRewardAuditTest(unittest.TestCase):
+    """Tests for SpiderSimulation._build_reward_audit and related classmethods."""
+
+    def test_build_reward_audit_returns_required_top_level_keys(self) -> None:
+        audit = SpiderSimulation._build_reward_audit()
+        expected_keys = {
+            "current_profile", "minimal_profile", "reward_components",
+            "observation_signals", "memory_signals", "reward_profiles", "notes",
+        }
+        self.assertTrue(expected_keys.issubset(set(audit.keys())))
+
+    def test_build_reward_audit_current_profile_recorded(self) -> None:
+        audit = SpiderSimulation._build_reward_audit(current_profile="classic")
+        self.assertEqual(audit["current_profile"], "classic")
+
+    def test_build_reward_audit_none_current_profile(self) -> None:
+        audit = SpiderSimulation._build_reward_audit(current_profile=None)
+        self.assertIsNone(audit["current_profile"])
+
+    def test_build_reward_audit_minimal_profile_is_austere(self) -> None:
+        audit = SpiderSimulation._build_reward_audit()
+        self.assertEqual(audit["minimal_profile"], "austere")
+
+    def test_build_reward_audit_reward_profiles_contains_all_known_profiles(self) -> None:
+        from spider_cortex_sim.reward import REWARD_PROFILES
+        audit = SpiderSimulation._build_reward_audit()
+        for profile_name in REWARD_PROFILES:
+            self.assertIn(
+                profile_name,
+                audit["reward_profiles"],
+                f"Profile {profile_name!r} missing from reward_audit['reward_profiles']",
+            )
+
+    def test_build_reward_audit_observation_signals_contains_predator_dist(self) -> None:
+        audit = SpiderSimulation._build_reward_audit()
+        self.assertIn("predator_dist", audit["observation_signals"])
+
+    def test_build_reward_audit_memory_signals_contains_shelter_memory(self) -> None:
+        audit = SpiderSimulation._build_reward_audit()
+        self.assertIn("shelter_memory", audit["memory_signals"])
+
+    def test_build_reward_audit_with_comparison_payload_includes_comparison(self) -> None:
+        payload = {
+            "reward_profiles": {
+                "classic": {
+                    "summary": {
+                        "scenario_success_rate": 0.8,
+                        "episode_success_rate": 0.75,
+                    }
+                },
+                "austere": {
+                    "summary": {
+                        "scenario_success_rate": 0.6,
+                        "episode_success_rate": 0.55,
+                    }
+                },
+            }
+        }
+        audit = SpiderSimulation._build_reward_audit(comparison_payload=payload)
+        self.assertIn("comparison", audit)
+
+    def test_build_reward_audit_without_comparison_payload_no_comparison_key(self) -> None:
+        audit = SpiderSimulation._build_reward_audit()
+        self.assertNotIn("comparison", audit)
+
+    def test_build_reward_audit_notes_is_non_empty_list(self) -> None:
+        audit = SpiderSimulation._build_reward_audit()
+        self.assertIsInstance(audit["notes"], list)
+        self.assertGreater(len(audit["notes"]), 0)
+
+    def test_build_reward_audit_reward_components_contains_food_progress(self) -> None:
+        audit = SpiderSimulation._build_reward_audit()
+        self.assertIn("food_progress", audit["reward_components"])
+
+
+class BuildRewardAuditComparisonTest(unittest.TestCase):
+    """Tests for SpiderSimulation._build_reward_audit_comparison."""
+
+    def test_returns_none_for_none_input(self) -> None:
+        result = SpiderSimulation._build_reward_audit_comparison(None)
+        self.assertIsNone(result)
+
+    def test_returns_none_for_non_dict_input(self) -> None:
+        result = SpiderSimulation._build_reward_audit_comparison("not_a_dict")
+        self.assertIsNone(result)
+
+    def test_returns_none_when_reward_profiles_missing(self) -> None:
+        result = SpiderSimulation._build_reward_audit_comparison({"other_key": {}})
+        self.assertIsNone(result)
+
+    def test_returns_none_when_reward_profiles_empty(self) -> None:
+        result = SpiderSimulation._build_reward_audit_comparison({"reward_profiles": {}})
+        self.assertIsNone(result)
+
+    def test_returns_none_when_reward_profiles_not_dict(self) -> None:
+        result = SpiderSimulation._build_reward_audit_comparison({"reward_profiles": "bad"})
+        self.assertIsNone(result)
+
+    def test_minimal_profile_is_none_when_austere_absent(self) -> None:
+        payload = {
+            "reward_profiles": {
+                "classic": {
+                    "summary": {
+                        "scenario_success_rate": 0.7,
+                        "episode_success_rate": 0.6,
+                    }
+                }
+            }
+        }
+        result = SpiderSimulation._build_reward_audit_comparison(payload)
+        self.assertIsNotNone(result)
+        self.assertIsNone(result["minimal_profile"])
+        self.assertEqual(result["deltas_vs_minimal"], {})
+
+    def test_minimal_profile_is_austere_when_present(self) -> None:
+        payload = {
+            "reward_profiles": {
+                "classic": {
+                    "summary": {
+                        "scenario_success_rate": 0.8,
+                        "episode_success_rate": 0.75,
+                    }
+                },
+                "austere": {
+                    "summary": {
+                        "scenario_success_rate": 0.5,
+                        "episode_success_rate": 0.45,
+                    }
+                },
+            }
+        }
+        result = SpiderSimulation._build_reward_audit_comparison(payload)
+        self.assertEqual(result["minimal_profile"], "austere")
+
+    def test_deltas_vs_minimal_computed_for_all_profiles(self) -> None:
+        payload = {
+            "reward_profiles": {
+                "classic": {
+                    "summary": {
+                        "scenario_success_rate": 0.8,
+                        "episode_success_rate": 0.75,
+                    }
+                },
+                "austere": {
+                    "summary": {
+                        "scenario_success_rate": 0.5,
+                        "episode_success_rate": 0.45,
+                    }
+                },
+            }
+        }
+        result = SpiderSimulation._build_reward_audit_comparison(payload)
+        self.assertIn("classic", result["deltas_vs_minimal"])
+        self.assertIn("austere", result["deltas_vs_minimal"])
+
+    def test_delta_keys_are_correct(self) -> None:
+        payload = {
+            "reward_profiles": {
+                "classic": {
+                    "summary": {
+                        "scenario_success_rate": 0.8,
+                        "episode_success_rate": 0.75,
+                    }
+                },
+                "austere": {
+                    "summary": {
+                        "scenario_success_rate": 0.5,
+                        "episode_success_rate": 0.45,
+                    }
+                },
+            }
+        }
+        result = SpiderSimulation._build_reward_audit_comparison(payload)
+        delta_keys = set(result["deltas_vs_minimal"]["classic"].keys())
+        self.assertEqual(
+            delta_keys,
+            {"scenario_success_rate_delta", "episode_success_rate_delta", "mean_reward_delta"},
+        )
+
+    def test_austere_delta_vs_itself_is_zero(self) -> None:
+        payload = {
+            "reward_profiles": {
+                "classic": {
+                    "summary": {
+                        "scenario_success_rate": 0.8,
+                        "episode_success_rate": 0.75,
+                    }
+                },
+                "austere": {
+                    "summary": {
+                        "scenario_success_rate": 0.5,
+                        "episode_success_rate": 0.45,
+                    }
+                },
+            }
+        }
+        result = SpiderSimulation._build_reward_audit_comparison(payload)
+        austere_delta = result["deltas_vs_minimal"]["austere"]
+        self.assertAlmostEqual(austere_delta["scenario_success_rate_delta"], 0.0)
+        self.assertAlmostEqual(austere_delta["episode_success_rate_delta"], 0.0)
+        self.assertAlmostEqual(austere_delta["mean_reward_delta"], 0.0)
+
+    def test_classic_delta_vs_austere_is_positive_when_classic_has_higher_rate(self) -> None:
+        payload = {
+            "reward_profiles": {
+                "classic": {
+                    "summary": {
+                        "scenario_success_rate": 0.8,
+                        "episode_success_rate": 0.75,
+                    }
+                },
+                "austere": {
+                    "summary": {
+                        "scenario_success_rate": 0.5,
+                        "episode_success_rate": 0.45,
+                    }
+                },
+            }
+        }
+        result = SpiderSimulation._build_reward_audit_comparison(payload)
+        classic_delta = result["deltas_vs_minimal"]["classic"]
+        self.assertAlmostEqual(classic_delta["scenario_success_rate_delta"], 0.3)
+        self.assertAlmostEqual(classic_delta["episode_success_rate_delta"], 0.3)
+
+    def test_result_profiles_are_sorted(self) -> None:
+        payload = {
+            "reward_profiles": {
+                "classic": {"summary": {"scenario_success_rate": 0.8, "episode_success_rate": 0.75}},
+                "austere": {"summary": {"scenario_success_rate": 0.5, "episode_success_rate": 0.45}},
+                "ecological": {"summary": {"scenario_success_rate": 0.7, "episode_success_rate": 0.65}},
+            }
+        }
+        result = SpiderSimulation._build_reward_audit_comparison(payload)
+        profile_keys = list(result["profiles"].keys())
+        self.assertEqual(profile_keys, sorted(profile_keys))
+
+    def test_result_has_notes_list(self) -> None:
+        payload = {
+            "reward_profiles": {
+                "classic": {"summary": {"scenario_success_rate": 0.8, "episode_success_rate": 0.75}},
+            }
+        }
+        result = SpiderSimulation._build_reward_audit_comparison(payload)
+        self.assertIsInstance(result["notes"], list)
+        self.assertGreater(len(result["notes"]), 0)
+
+
+class ProfileComparisonMetricsTest(unittest.TestCase):
+    """Tests for SpiderSimulation._profile_comparison_metrics."""
+
+    def test_returns_zero_defaults_for_none_input(self) -> None:
+        result = SpiderSimulation._profile_comparison_metrics(None)
+        self.assertEqual(result["scenario_success_rate"], 0.0)
+        self.assertEqual(result["episode_success_rate"], 0.0)
+        self.assertEqual(result["mean_reward"], 0.0)
+
+    def test_returns_zero_defaults_for_non_dict_input(self) -> None:
+        result = SpiderSimulation._profile_comparison_metrics("bad")
+        self.assertEqual(result["scenario_success_rate"], 0.0)
+        self.assertEqual(result["episode_success_rate"], 0.0)
+
+    def test_extracts_from_summary_subdict(self) -> None:
+        payload = {
+            "summary": {
+                "scenario_success_rate": 0.75,
+                "episode_success_rate": 0.60,
+            }
+        }
+        result = SpiderSimulation._profile_comparison_metrics(payload)
+        self.assertAlmostEqual(result["scenario_success_rate"], 0.75)
+        self.assertAlmostEqual(result["episode_success_rate"], 0.60)
+
+    def test_extracts_from_flat_payload_when_no_summary(self) -> None:
+        payload = {
+            "scenario_success_rate": 0.55,
+            "episode_success_rate": 0.40,
+            "mean_reward": 1.23,
+        }
+        result = SpiderSimulation._profile_comparison_metrics(payload)
+        self.assertAlmostEqual(result["scenario_success_rate"], 0.55)
+        self.assertAlmostEqual(result["episode_success_rate"], 0.40)
+        self.assertAlmostEqual(result["mean_reward"], 1.23)
+
+    def test_returns_three_metric_keys(self) -> None:
+        result = SpiderSimulation._profile_comparison_metrics({})
+        self.assertEqual(
+            set(result.keys()),
+            {"scenario_success_rate", "episode_success_rate", "mean_reward"},
+        )
+
+    def test_missing_rate_fields_default_to_zero(self) -> None:
+        payload = {"summary": {}}
+        result = SpiderSimulation._profile_comparison_metrics(payload)
+        self.assertEqual(result["scenario_success_rate"], 0.0)
+        self.assertEqual(result["episode_success_rate"], 0.0)
+
+    def test_values_are_float(self) -> None:
+        payload = {
+            "summary": {
+                "scenario_success_rate": 1,
+                "episode_success_rate": 0,
+            }
+        }
+        result = SpiderSimulation._profile_comparison_metrics(payload)
+        self.assertIsInstance(result["scenario_success_rate"], float)
+        self.assertIsInstance(result["episode_success_rate"], float)
+
+
+class LocalCreditOnlyVariantTest(unittest.TestCase):
+    """Tests for the local_credit_only ablation variant (new in this PR)."""
+
+    def test_uses_local_credit_only_is_false_for_modular_full(self) -> None:
+        config = BrainAblationConfig(name="modular_full")
+        self.assertFalse(config.uses_local_credit_only)
+
+    def test_uses_local_credit_only_is_false_for_no_module_dropout(self) -> None:
+        config = BrainAblationConfig(name="no_module_dropout", module_dropout=0.0)
+        self.assertFalse(config.uses_local_credit_only)
+
+    def test_uses_local_credit_only_is_false_for_no_module_reflexes(self) -> None:
+        config = BrainAblationConfig(name="no_module_reflexes", enable_reflexes=False)
+        self.assertFalse(config.uses_local_credit_only)
+
+    def test_uses_local_credit_only_is_false_for_monolithic_policy(self) -> None:
+        config = BrainAblationConfig(name="monolithic_policy", architecture="monolithic")
+        self.assertFalse(config.uses_local_credit_only)
+
+    def test_uses_local_credit_only_is_true_only_for_local_credit_only_name(self) -> None:
+        config = BrainAblationConfig(name="local_credit_only")
+        self.assertTrue(config.uses_local_credit_only)
+
+    def test_uses_local_credit_only_is_false_for_drop_variants(self) -> None:
+        for module_name in MODULE_NAMES:
+            config = BrainAblationConfig(
+                name=f"drop_{module_name}",
+                disabled_modules=(module_name,),
+            )
+            self.assertFalse(
+                config.uses_local_credit_only,
+                f"Expected drop_{module_name} to have uses_local_credit_only=False",
+            )
+
+    def test_local_credit_only_is_modular_not_monolithic(self) -> None:
+        configs = canonical_ablation_configs()
+        lc = configs["local_credit_only"]
+        self.assertTrue(lc.is_modular)
+        self.assertFalse(lc.is_monolithic)
+
+    def test_local_credit_only_has_reflexes_and_aux_targets_enabled(self) -> None:
+        configs = canonical_ablation_configs()
+        lc = configs["local_credit_only"]
+        self.assertTrue(lc.enable_reflexes)
+        self.assertTrue(lc.enable_auxiliary_targets)
+
+    def test_local_credit_only_has_no_disabled_modules(self) -> None:
+        configs = canonical_ablation_configs()
+        lc = configs["local_credit_only"]
+        self.assertEqual(lc.disabled_modules, ())
+
+    def test_local_credit_only_has_reflex_scale_one(self) -> None:
+        configs = canonical_ablation_configs()
+        lc = configs["local_credit_only"]
+        self.assertAlmostEqual(lc.reflex_scale, 1.0)
+
+    def test_local_credit_only_appears_after_no_module_reflexes_in_canonical_order(self) -> None:
+        names = canonical_ablation_variant_names()
+        self.assertIn("local_credit_only", names)
+        self.assertIn("no_module_reflexes", names)
+        idx_lc = names.index("local_credit_only")
+        idx_nr = names.index("no_module_reflexes")
+        self.assertGreater(
+            idx_lc,
+            idx_nr,
+            "local_credit_only should appear after no_module_reflexes in canonical order",
+        )
+
+    def test_local_credit_only_appears_before_monolithic_policy_in_canonical_order(self) -> None:
+        names = canonical_ablation_variant_names()
+        idx_lc = names.index("local_credit_only")
+        idx_mono = names.index("monolithic_policy")
+        self.assertLess(
+            idx_lc,
+            idx_mono,
+            "local_credit_only should appear before monolithic_policy in canonical order",
+        )
+
+    def test_uses_local_credit_only_is_not_tied_to_architecture(self) -> None:
+        # Any name other than "local_credit_only" returns False regardless of other settings
+        config = BrainAblationConfig(
+            name="some_other_name",
+            architecture="modular",
+            enable_reflexes=True,
+            enable_auxiliary_targets=True,
+            disabled_modules=(),
+            reflex_scale=1.0,
+            module_reflex_scales={},
+        )
+        self.assertFalse(config.uses_local_credit_only)
+
+    def test_resolve_ablation_configs_returns_local_credit_only_by_name(self) -> None:
+        configs = resolve_ablation_configs(["local_credit_only"])
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0].name, "local_credit_only")
+        self.assertTrue(configs[0].uses_local_credit_only)
+
+    def test_local_credit_only_to_summary_includes_name(self) -> None:
+        configs = canonical_ablation_configs()
+        summary = configs["local_credit_only"].to_summary()
+        self.assertEqual(summary["name"], "local_credit_only")
+        self.assertEqual(summary["architecture"], "modular")
+
+    def test_local_credit_only_custom_dropout_propagates(self) -> None:
+        configs = canonical_ablation_configs(module_dropout=0.12)
+        lc = configs["local_credit_only"]
+        self.assertAlmostEqual(lc.module_dropout, 0.12)
 
 
 if __name__ == "__main__":

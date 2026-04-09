@@ -8,6 +8,8 @@ from .interfaces import MODULE_INTERFACES
 
 
 MODULE_NAMES: tuple[str, ...] = tuple(spec.name for spec in MODULE_INTERFACES)
+MONOLITHIC_POLICY_NAME: str = "monolithic_policy"
+PROPOSAL_SOURCE_NAMES: tuple[str, ...] = MODULE_NAMES + (MONOLITHIC_POLICY_NAME,)
 REFLEX_MODULE_NAMES: tuple[str, ...] = tuple(
     spec.name for spec in MODULE_INTERFACES if spec.role == "proposal"
 )
@@ -26,31 +28,43 @@ class BrainAblationConfig:
 
     def __post_init__(self) -> None:
         """
-        Normalize and validate dataclass fields after initialization.
+        Validate and normalize dataclass fields after initialization.
         
-        This finalizes and persists normalized values for: `architecture` (must be "modular" or "monolithic"), `module_dropout` (cast to a finite float), `reflex_scale` (cast to a finite float, must be >= 0.0), `disabled_modules` (deduplicated, sorted tuple of strings validated against MODULE_NAMES), and `module_reflex_scales` (stringified keys, finite float values, sorted, validated against REFLEX_MODULE_NAMES and must be >= 0.0). Raises `ValueError` for an invalid architecture, non-finite or negative scale values, unknown module names in `disabled_modules` or `module_reflex_scales`, or when monolithic architecture is combined with non-empty `disabled_modules` or `module_reflex_scales`.
+        Normalizes and persists these fields on the frozen dataclass:
+        - `architecture`: coerced to `str` and must be either "modular" or "monolithic".
+        - `module_dropout`: coerced to `float` and must be finite.
+        - `reflex_scale`: coerced to `float`, must be finite and >= 0.0.
+        - `disabled_modules`: coerced to `str`, deduplicated, sorted into a `tuple`, and each name must be in `MODULE_NAMES`.
+        - `module_reflex_scales`: keys coerced to `str`, values coerced to `float`, sorted by key into a `dict`; each key must be in `REFLEX_MODULE_NAMES`, each value must be finite and >= 0.0.
+        
+        Raises:
+            ValueError: If `architecture` is not "modular" or "monolithic";
+                        if `module_dropout` or any `module_reflex_scales` value is not finite;
+                        if `reflex_scale` or any `module_reflex_scales` value is negative;
+                        if `disabled_modules` or `module_reflex_scales` contain unknown module names;
+                        or if `architecture == "monolithic"` while `disabled_modules` or `module_reflex_scales` are non-empty.
         """
         architecture = str(self.architecture)
         if architecture not in {"modular", "monolithic"}:
-            raise ValueError(f"Arquitetura de ablação inválida: {architecture!r}.")
+            raise ValueError(f"Invalid ablation architecture: {architecture!r}.")
         object.__setattr__(self, "architecture", architecture)
         module_dropout = float(self.module_dropout)
         if not math.isfinite(module_dropout):
-            raise ValueError("module_dropout deve ser finito.")
+            raise ValueError("module_dropout must be finite.")
         object.__setattr__(self, "module_dropout", module_dropout)
         reflex_scale = float(self.reflex_scale)
         if not math.isfinite(reflex_scale):
-            raise ValueError("reflex_scale deve ser finito.")
+            raise ValueError("reflex_scale must be finite.")
         if reflex_scale < 0.0:
-            raise ValueError("reflex_scale deve ser não-negativo.")
+            raise ValueError("reflex_scale must be non-negative.")
         object.__setattr__(self, "reflex_scale", reflex_scale)
 
         normalized_modules = tuple(sorted({str(name) for name in self.disabled_modules}))
         invalid_modules = [name for name in normalized_modules if name not in MODULE_NAMES]
         if invalid_modules:
-            raise ValueError(f"Módulos inválidos na ablação: {invalid_modules}.")
+            raise ValueError(f"Invalid ablation modules: {invalid_modules}.")
         if architecture == "monolithic" and normalized_modules:
-            raise ValueError("A baseline monolítica não aceita módulos desabilitados.")
+            raise ValueError("The monolithic baseline does not accept disabled modules.")
         object.__setattr__(self, "disabled_modules", normalized_modules)
         normalized_reflex_scales = {
             name: float(value)
@@ -64,7 +78,7 @@ class BrainAblationConfig:
         ]
         if invalid_reflex_modules:
             raise ValueError(
-                f"Módulos inválidos em module_reflex_scales: {invalid_reflex_modules}."
+                f"Invalid modules in module_reflex_scales: {invalid_reflex_modules}."
             )
         non_finite_reflex_scales = [
             name
@@ -73,7 +87,7 @@ class BrainAblationConfig:
         ]
         if non_finite_reflex_scales:
             raise ValueError(
-                "module_reflex_scales deve conter apenas valores finitos."
+                "module_reflex_scales must contain only finite values."
             )
         negative_reflex_scales = [
             name
@@ -82,11 +96,11 @@ class BrainAblationConfig:
         ]
         if negative_reflex_scales:
             raise ValueError(
-                "module_reflex_scales deve conter apenas valores não-negativos."
+                "module_reflex_scales must contain only non-negative values."
             )
         if architecture == "monolithic" and normalized_reflex_scales:
             raise ValueError(
-                "A baseline monolítica não aceita module_reflex_scales por módulo."
+                "The monolithic baseline does not accept per-module module_reflex_scales."
             )
         object.__setattr__(self, "module_reflex_scales", normalized_reflex_scales)
 
@@ -109,6 +123,16 @@ class BrainAblationConfig:
             `true` if `architecture` is "monolithic", `false` otherwise.
         """
         return self.architecture == "monolithic"
+
+    @property
+    def uses_local_credit_only(self) -> bool:
+        """
+        Return whether this ablation uses only local proposal-credit updates.
+
+        The behavior is keyed off the variant name so we can add the experiment
+        without changing the saved ablation-config schema.
+        """
+        return self.name == "local_credit_only"
 
     def to_summary(self) -> Dict[str, object]:
         """
@@ -195,6 +219,16 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             reflex_scale=0.0,
             module_reflex_scales={},
         ),
+        "local_credit_only": BrainAblationConfig(
+            name="local_credit_only",
+            architecture="modular",
+            module_dropout=module_dropout,
+            enable_reflexes=True,
+            enable_auxiliary_targets=True,
+            disabled_modules=(),
+            reflex_scale=1.0,
+            module_reflex_scales={},
+        ),
         "reflex_scale_0_25": BrainAblationConfig(
             name="reflex_scale_0_25",
             architecture="modular",
@@ -226,7 +260,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             module_reflex_scales={},
         ),
         "monolithic_policy": BrainAblationConfig(
-            name="monolithic_policy",
+            name=MONOLITHIC_POLICY_NAME,
             architecture="monolithic",
             module_dropout=0.0,
             enable_reflexes=False,
@@ -285,5 +319,5 @@ def resolve_ablation_configs(
     unknown = sorted({name for name in requested if name not in registry})
     if unknown:
         available = ", ".join(registry.keys())
-        raise KeyError(f"Variações de ablação desconhecidas: {unknown}. Disponíveis: {available}")
+        raise KeyError(f"Unknown ablation variants: {unknown}. Available: {available}")
     return [registry[name] for name in requested]
