@@ -29,10 +29,16 @@ def one_hot(index: int, size: int) -> Array:
     return vec
 
 
+def _weight_scale(dim: int) -> float:
+    """Return the standard deviation for weight initialization given a layer dimension."""
+    return 0.35 / np.sqrt(max(1, dim))
+
+
 @dataclass
 class ProposalCache:
     x: Array
-    h: Array
+    h1: Array
+    h2: Array
 
 
 class ProposalNetwork:
@@ -44,7 +50,7 @@ class ProposalNetwork:
         
         Parameters:
             input_dim (int): Dimensionality of the input vector.
-            hidden_dim (int): Number of hidden units in the single hidden layer.
+            hidden_dim (int): Number of hidden units in each hidden layer.
             output_dim (int): Number of output logits.
             rng (np.random.Generator): Random number generator used to sample initial weights.
             name (str): Identifier for this network instance.
@@ -52,9 +58,10 @@ class ProposalNetwork:
         Details:
             - Initializes weight matrices and bias vectors with shapes:
                 W1: (hidden_dim, input_dim), b1: (hidden_dim,)
+                W_mid: (hidden_dim, hidden_dim), b_mid: (hidden_dim,)
                 W2: (output_dim, hidden_dim), b2: (output_dim,)
             - Weights are drawn from a normal distribution with standard deviations
-              scale1 = 0.35 / sqrt(max(1, input_dim)) and scale2 = 0.35 / sqrt(max(1, hidden_dim)).
+              scale1 = 0.35 / sqrt(max(1, input_dim)), scale_mid and scale2 = 0.35 / sqrt(max(1, hidden_dim)).
             - The parameter cache is initialized to None.
         """
         self.input_dim = input_dim
@@ -62,9 +69,12 @@ class ProposalNetwork:
         self.output_dim = output_dim
         self.name = name
         scale1 = 0.35 / np.sqrt(max(1, input_dim))
+        scale_mid = 0.35 / np.sqrt(max(1, hidden_dim))
         scale2 = 0.35 / np.sqrt(max(1, hidden_dim))
         self.W1 = rng.normal(0.0, scale1, size=(hidden_dim, input_dim))
         self.b1 = np.zeros(hidden_dim, dtype=float)
+        self.W_mid = rng.normal(0.0, scale_mid, size=(hidden_dim, hidden_dim))
+        self.b_mid = np.zeros(hidden_dim, dtype=float)
         self.W2 = rng.normal(0.0, scale2, size=(output_dim, hidden_dim))
         self.b2 = np.zeros(output_dim, dtype=float)
         self.cache: Optional[ProposalCache] = None
@@ -72,14 +82,16 @@ class ProposalNetwork:
     def forward(self, x: Array, *, store_cache: bool = True) -> Array:
         x = np.nan_to_num(np.asarray(x, dtype=float), nan=0.0, posinf=1.0, neginf=-1.0)
         z1 = self.W1 @ x + self.b1
-        h = np.tanh(z1)
+        h1 = np.tanh(z1)
+        z_mid = self.W_mid @ h1 + self.b_mid
+        h2 = np.tanh(z_mid)
         logits = np.clip(
-            np.nan_to_num(self.W2 @ h + self.b2, nan=0.0, posinf=20.0, neginf=-20.0),
+            np.nan_to_num(self.W2 @ h2 + self.b2, nan=0.0, posinf=20.0, neginf=-20.0),
             -20.0,
             20.0,
         )
         if store_cache:
-            self.cache = ProposalCache(x=x, h=h)
+            self.cache = ProposalCache(x=x, h1=h1, h2=h2)
         return logits
 
     def backward(self, grad_logits: Array, lr: float, grad_clip: float = 5.0) -> None:
@@ -104,18 +116,26 @@ class ProposalNetwork:
         if norm > grad_clip:
             grad_logits = grad_logits * (grad_clip / (norm + 1e-8))
         x = self.cache.x
-        h = self.cache.h
+        h1 = self.cache.h1
+        h2 = self.cache.h2
 
-        grad_W2 = np.outer(grad_logits, h)
+        grad_W2 = np.outer(grad_logits, h2)
         grad_b2 = grad_logits
 
-        dh = self.W2.T @ grad_logits
-        dz1 = dh * (1.0 - h**2)
+        dh2 = self.W2.T @ grad_logits
+        dz_mid = dh2 * (1.0 - h2**2)
+        grad_W_mid = np.outer(dz_mid, h1)
+        grad_b_mid = dz_mid
+
+        dh1 = self.W_mid.T @ dz_mid
+        dz1 = dh1 * (1.0 - h1**2)
         grad_W1 = np.outer(dz1, x)
         grad_b1 = dz1
 
         self.W2 -= lr * grad_W2
         self.b2 -= lr * grad_b2
+        self.W_mid -= lr * grad_W_mid
+        self.b_mid -= lr * grad_b_mid
         self.W1 -= lr * grad_W1
         self.b1 -= lr * grad_b1
 
@@ -127,6 +147,8 @@ class ProposalNetwork:
             "output_dim": self.output_dim,
             "W1": self.W1.copy(),
             "b1": self.b1.copy(),
+            "W_mid": self.W_mid.copy(),
+            "b_mid": self.b_mid.copy(),
             "W2": self.W2.copy(),
             "b2": self.b2.copy(),
         }
@@ -134,11 +156,17 @@ class ProposalNetwork:
     def load_state_dict(self, state: dict[str, object]) -> None:
         W1 = np.asarray(state["W1"], dtype=float)
         b1 = np.asarray(state["b1"], dtype=float)
+        W_mid = np.asarray(state["W_mid"], dtype=float)
+        b_mid = np.asarray(state["b_mid"], dtype=float)
         W2 = np.asarray(state["W2"], dtype=float)
         b2 = np.asarray(state["b2"], dtype=float)
         if W1.shape != (self.hidden_dim, self.input_dim):
             raise ValueError(
                 f"{self.name}: W1 expected {(self.hidden_dim, self.input_dim)}, received {W1.shape}"
+            )
+        if W_mid.shape != (self.hidden_dim, self.hidden_dim):
+            raise ValueError(
+                f"{self.name}: W_mid expected {(self.hidden_dim, self.hidden_dim)}, received {W_mid.shape}"
             )
         if W2.shape != (self.output_dim, self.hidden_dim):
             raise ValueError(
@@ -146,6 +174,8 @@ class ProposalNetwork:
             )
         self.W1 = W1
         self.b1 = b1
+        self.W_mid = W_mid
+        self.b_mid = b_mid
         self.W2 = W2
         self.b2 = b2
         self.cache = None
@@ -154,6 +184,8 @@ class ProposalNetwork:
         total = (
             np.sum(self.W1**2)
             + np.sum(self.b1**2)
+            + np.sum(self.W_mid**2)
+            + np.sum(self.b_mid**2)
             + np.sum(self.W2**2)
             + np.sum(self.b2**2)
         )
@@ -163,7 +195,8 @@ class ProposalNetwork:
 @dataclass
 class MotorCache:
     x: Array
-    h: Array
+    h1: Array
+    h2: Array
 
 
 class MotorNetwork:
@@ -175,7 +208,7 @@ class MotorNetwork:
         
         Parameters:
             input_dim (int): Dimensionality of the input vector.
-            hidden_dim (int): Number of hidden units in the shared layer.
+            hidden_dim (int): Number of hidden units in each shared hidden layer.
             output_dim (int): Number of policy outputs (action logits).
             rng (np.random.Generator): Random generator used to sample initial weights from normal distributions.
             name (str): Optional network name; defaults to "motor_cortex".
@@ -183,6 +216,7 @@ class MotorNetwork:
         Details:
             - Allocates and initializes weight and bias arrays:
                 - W1: (hidden_dim, input_dim), b1: (hidden_dim,)
+                - W_mid: (hidden_dim, hidden_dim), b_mid: (hidden_dim,)
                 - W2_policy: (output_dim, hidden_dim), b2_policy: (output_dim,)
                 - W2_value: (1, hidden_dim), b2_value: (1,)
             - Weight scales use 0.35 / sqrt(max(1, dimension)) per layer.
@@ -193,27 +227,32 @@ class MotorNetwork:
         self.output_dim = output_dim
         self.name = name
         scale1 = 0.35 / np.sqrt(max(1, input_dim))
+        scale_mid = 0.35 / np.sqrt(max(1, hidden_dim))
         scale2 = 0.35 / np.sqrt(max(1, hidden_dim))
         self.W1 = rng.normal(0.0, scale1, size=(hidden_dim, input_dim))
         self.b1 = np.zeros(hidden_dim, dtype=float)
+        self.W_mid = rng.normal(0.0, scale_mid, size=(hidden_dim, hidden_dim))
+        self.b_mid = np.zeros(hidden_dim, dtype=float)
         self.W2_policy = rng.normal(0.0, scale2, size=(output_dim, hidden_dim))
         self.b2_policy = np.zeros(output_dim, dtype=float)
-        self.W2_value = rng.normal(0.0, scale2, size=(1, hidden_dim))
+        self.W2_value = rng.normal(0.0, _weight_scale(hidden_dim), size=(1, hidden_dim))
         self.b2_value = np.zeros(1, dtype=float)
         self.cache: Optional[MotorCache] = None
 
     def forward(self, x: Array, *, store_cache: bool = True) -> tuple[Array, float]:
         x = np.nan_to_num(np.asarray(x, dtype=float), nan=0.0, posinf=1.0, neginf=-1.0)
         z1 = self.W1 @ x + self.b1
-        h = np.tanh(z1)
+        h1 = np.tanh(z1)
+        z_mid = self.W_mid @ h1 + self.b_mid
+        h2 = np.tanh(z_mid)
         policy_logits = np.clip(
-            np.nan_to_num(self.W2_policy @ h + self.b2_policy, nan=0.0, posinf=20.0, neginf=-20.0),
+            np.nan_to_num(self.W2_policy @ h2 + self.b2_policy, nan=0.0, posinf=20.0, neginf=-20.0),
             -20.0,
             20.0,
         )
-        value = float(np.nan_to_num((self.W2_value @ h + self.b2_value)[0], nan=0.0, posinf=20.0, neginf=-20.0))
+        value = float(np.nan_to_num((self.W2_value @ h2 + self.b2_value)[0], nan=0.0, posinf=20.0, neginf=-20.0))
         if store_cache:
-            self.cache = MotorCache(x=x, h=h)
+            self.cache = MotorCache(x=x, h1=h1, h2=h2)
         return policy_logits, value
 
     def backward(
@@ -254,15 +293,21 @@ class MotorNetwork:
         grad_value = float(np.clip(grad_value, -grad_clip, grad_clip))
 
         x = self.cache.x
-        h = self.cache.h
+        h1 = self.cache.h1
+        h2 = self.cache.h2
 
-        grad_W2_policy = np.outer(grad_policy_logits, h)
+        grad_W2_policy = np.outer(grad_policy_logits, h2)
         grad_b2_policy = grad_policy_logits
-        grad_W2_value = grad_value * h.reshape(1, -1)
+        grad_W2_value = grad_value * h2.reshape(1, -1)
         grad_b2_value = np.array([grad_value], dtype=float)
 
-        dh = self.W2_policy.T @ grad_policy_logits + self.W2_value.T[:, 0] * grad_value
-        dz1 = dh * (1.0 - h**2)
+        dh2 = self.W2_policy.T @ grad_policy_logits + self.W2_value.T[:, 0] * grad_value
+        dz_mid = dh2 * (1.0 - h2**2)
+        grad_W_mid = np.outer(dz_mid, h1)
+        grad_b_mid = dz_mid
+
+        dh1 = self.W_mid.T @ dz_mid
+        dz1 = dh1 * (1.0 - h1**2)
         grad_x = self.W1.T @ dz1
         grad_W1 = np.outer(dz1, x)
         grad_b1 = dz1
@@ -271,6 +316,8 @@ class MotorNetwork:
         self.b2_policy -= lr * grad_b2_policy
         self.W2_value -= lr * grad_W2_value
         self.b2_value -= lr * grad_b2_value
+        self.W_mid -= lr * grad_W_mid
+        self.b_mid -= lr * grad_b_mid
         self.W1 -= lr * grad_W1
         self.b1 -= lr * grad_b1
         return grad_x
@@ -287,6 +334,8 @@ class MotorNetwork:
             "output_dim": self.output_dim,
             "W1": self.W1.copy(),
             "b1": self.b1.copy(),
+            "W_mid": self.W_mid.copy(),
+            "b_mid": self.b_mid.copy(),
             "W2_policy": self.W2_policy.copy(),
             "b2_policy": self.b2_policy.copy(),
             "W2_value": self.W2_value.copy(),
@@ -296,6 +345,8 @@ class MotorNetwork:
     def load_state_dict(self, state: dict[str, object]) -> None:
         W1 = np.asarray(state["W1"], dtype=float)
         b1 = np.asarray(state["b1"], dtype=float)
+        W_mid = np.asarray(state["W_mid"], dtype=float)
+        b_mid = np.asarray(state["b_mid"], dtype=float)
         W2_policy = np.asarray(state["W2_policy"], dtype=float)
         b2_policy = np.asarray(state["b2_policy"], dtype=float)
         W2_value = np.asarray(state["W2_value"], dtype=float)
@@ -304,12 +355,18 @@ class MotorNetwork:
             raise ValueError(
                 f"{self.name}: W1 expected {(self.hidden_dim, self.input_dim)}, received {W1.shape}"
             )
+        if W_mid.shape != (self.hidden_dim, self.hidden_dim):
+            raise ValueError(
+                f"{self.name}: W_mid expected {(self.hidden_dim, self.hidden_dim)}, received {W_mid.shape}"
+            )
         if W2_policy.shape != (self.output_dim, self.hidden_dim):
             raise ValueError(
                 f"{self.name}: W2_policy expected {(self.output_dim, self.hidden_dim)}, received {W2_policy.shape}"
             )
         self.W1 = W1
         self.b1 = b1
+        self.W_mid = W_mid
+        self.b_mid = b_mid
         self.W2_policy = W2_policy
         self.b2_policy = b2_policy
         self.W2_value = W2_value
@@ -320,6 +377,8 @@ class MotorNetwork:
         total = (
             np.sum(self.W1**2)
             + np.sum(self.b1**2)
+            + np.sum(self.W_mid**2)
+            + np.sum(self.b_mid**2)
             + np.sum(self.W2_policy**2)
             + np.sum(self.b2_policy**2)
             + np.sum(self.W2_value**2)

@@ -1,8 +1,10 @@
 import unittest
 from collections import deque
+from unittest.mock import patch
 
 import numpy as np
 
+from spider_cortex_sim import stages as tick_stages
 from spider_cortex_sim.agent import SpiderBrain
 from spider_cortex_sim.interfaces import (
     ACTION_DELTAS,
@@ -84,18 +86,24 @@ class SpiderWorldTest(unittest.TestCase):
         brain = SpiderBrain(seed=seed, module_dropout=0.0)
         brain.action_center.W1.fill(0.0)
         brain.action_center.b1.fill(0.0)
+        brain.action_center.W_mid.fill(0.0)
+        brain.action_center.b_mid.fill(0.0)
         brain.action_center.W2_policy.fill(0.0)
         brain.action_center.b2_policy.fill(0.0)
         brain.action_center.W2_value.fill(0.0)
         brain.action_center.b2_value.fill(0.0)
         brain.motor_cortex.W1.fill(0.0)
         brain.motor_cortex.b1.fill(0.0)
+        brain.motor_cortex.W_mid.fill(0.0)
+        brain.motor_cortex.b_mid.fill(0.0)
         brain.motor_cortex.W2.fill(0.0)
         brain.motor_cortex.b2.fill(0.0)
         if brain.module_bank is not None:
             for network in brain.module_bank.modules.values():
                 network.W1.fill(0.0)
                 network.b1.fill(0.0)
+                network.W_mid.fill(0.0)
+                network.b_mid.fill(0.0)
                 network.W2.fill(0.0)
                 network.b2.fill(0.0)
         return brain
@@ -618,7 +626,7 @@ class SpiderWorldTest(unittest.TestCase):
                 phases.append(info["state"]["sleep_phase"])
             return phases, reward, world.state.sleep_debt
 
-        night_phases, night_reward, night_debt = run_rest(19)
+        night_phases, night_reward, night_debt = run_rest(37)
         day_phases, day_reward, day_debt = run_rest(2)
         self.assertEqual(night_phases[-1], "DEEP_SLEEP")
         self.assertEqual(day_phases[-1], "RESTING")
@@ -834,6 +842,13 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertEqual(info["intended_action"], "STAY")
 
     def test_event_log_records_pipeline_stages_in_order(self) -> None:
+        """
+        Verifies the event log contains pipeline stages in the expected execution order.
+        
+        Asserts that the first occurrence of each major pipeline stage appears in the sequence:
+        pre_tick -> action -> terrain_and_wakefulness -> predator_contact -> autonomic ->
+        predator_update -> reward -> postprocess -> memory -> finalize.
+        """
         world = SpiderWorld(seed=49, lizard_move_interval=999999)
         world.reset(seed=49)
 
@@ -861,6 +876,41 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertLess(first_index["reward"], first_index["postprocess"])
         self.assertLess(first_index["postprocess"], first_index["memory"])
         self.assertLess(first_index["memory"], first_index["finalize"])
+
+    def test_step_uses_live_stages_module_build_tick_context(self) -> None:
+        world = SpiderWorld(seed=50, lizard_move_interval=999999)
+        world.reset(seed=50)
+
+        class SentinelError(RuntimeError):
+            pass
+
+        with patch.object(
+            tick_stages,
+            "build_tick_context",
+            side_effect=SentinelError("patched build_tick_context should be used"),
+        ):
+            with self.assertRaises(SentinelError):
+                world.step(ACTION_TO_INDEX["STAY"])
+
+    def test_step_adds_stage_name_to_stage_failures(self) -> None:
+        world = SpiderWorld(seed=50, lizard_move_interval=999999)
+        world.reset(seed=50)
+
+        class SentinelError(RuntimeError):
+            pass
+
+        def fail_stage(world: SpiderWorld, context: object) -> None:
+            raise SentinelError("boom")
+
+        with patch.object(
+            tick_stages,
+            "TICK_STAGES",
+            (tick_stages.StageDescriptor(name="sentinel", run=fail_stage, mutates=("context.event_log",)),),
+        ):
+            with self.assertRaises(SentinelError) as ctx:
+                world.step(ACTION_TO_INDEX["STAY"])
+
+        self.assertIn("Tick stage 'sentinel' failed.", getattr(ctx.exception, "__notes__", []))
 
     def test_event_log_memory_stage_runs_after_tick_increment(self) -> None:
         world = SpiderWorld(seed=51, lizard_move_interval=999999)

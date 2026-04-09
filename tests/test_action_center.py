@@ -924,6 +924,8 @@ class EstimateValueTest(unittest.TestCase):
         # Zero all motor_cortex parameters
         self.brain.motor_cortex.W1.fill(0.0)
         self.brain.motor_cortex.b1.fill(0.0)
+        self.brain.motor_cortex.W_mid.fill(0.0)
+        self.brain.motor_cortex.b_mid.fill(0.0)
         self.brain.motor_cortex.W2.fill(0.0)
         self.brain.motor_cortex.b2.fill(0.0)
         # estimate_value should still work through action_center
@@ -936,6 +938,8 @@ class EstimateValueTest(unittest.TestCase):
         since action_center.W2_value @ 0 + 0 = 0."""
         self.brain.action_center.W1.fill(0.0)
         self.brain.action_center.b1.fill(0.0)
+        self.brain.action_center.W_mid.fill(0.0)
+        self.brain.action_center.b_mid.fill(0.0)
         self.brain.action_center.W2_policy.fill(0.0)
         self.brain.action_center.b2_policy.fill(0.0)
         self.brain.action_center.W2_value.fill(0.0)
@@ -1056,6 +1060,8 @@ class ActionCenterRegressionTest(unittest.TestCase):
         # Zero motor_cortex so it adds no correction
         brain.motor_cortex.W1.fill(0.0)
         brain.motor_cortex.b1.fill(0.0)
+        brain.motor_cortex.W_mid.fill(0.0)
+        brain.motor_cortex.b_mid.fill(0.0)
         brain.motor_cortex.W2.fill(0.0)
         brain.motor_cortex.b2.fill(0.0)
         obs = _blank_obs()

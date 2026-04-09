@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Callable, TypeAlias
+
+if TYPE_CHECKING:
+    from .world import SpiderWorld
+
+
+# Tick stages are side-effectful pipeline steps. They must:
+# 1. Read and write state only through the provided world and context.
+# 2. Record runtime events through context.record_event().
+# 3. Communicate outcomes via mutation rather than return values.
+Stage: TypeAlias = Callable[["SpiderWorld", "TickContext"], None]
 
 
 @dataclass
@@ -158,10 +169,16 @@ class TickContext:
 
     def serialized_event_log(self) -> list[dict[str, object]]:
         """
-        Return a serialized representation of the tick's event log.
+        Produce a JSON-serializable list of payload dictionaries for the tick's recorded events.
         
-        Each list item is a dict produced by calling `to_payload()` on a recorded TickEvent, suitable for JSON-like serialization.
         Returns:
-        	list[dict[str, object]]: The event log as a list of serialized event payload dictionaries.
+            list[dict[str, object]]: List of event payload dictionaries produced by each recorded TickEvent's `to_payload()` method.
         """
         return [event.to_payload() for event in self.event_log]
+
+
+@dataclass
+class StageDescriptor:
+    name: str
+    run: Stage
+    mutates: tuple[str, ...]

@@ -179,8 +179,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=12, help="World width.")
     parser.add_argument("--height", type=int, default=12, help="World height.")
     parser.add_argument("--food-count", type=int, default=4, help="Number of active food sources.")
-    parser.add_argument("--day-length", type=int, default=18, help="Day length in ticks.")
-    parser.add_argument("--night-length", type=int, default=12, help="Night length in ticks.")
+    parser.add_argument("--day-length", type=int, default=36, help="Day length in ticks.")
+    parser.add_argument("--night-length", type=int, default=24, help="Night length in ticks.")
     parser.add_argument("--seed", type=int, default=7, help="Primary seed.")
     parser.add_argument(
         "--reward-profile",

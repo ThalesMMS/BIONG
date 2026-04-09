@@ -140,7 +140,8 @@ class RewardModuleTest(unittest.TestCase):
         "action_cost_stay", "action_cost_move", "hunger_pressure", "fatigue_pressure",
         "sleep_debt_pressure", "food_progress", "shelter_progress", "predator_escape",
         "predator_escape_bonus", "sleep_debt_night_awake", "sleep_debt_day_awake",
-        "sleep_debt_overdue_threshold", and "sleep_debt_health_penalty".
+        "sleep_debt_overdue_threshold", "sleep_debt_health_penalty", "recent_contact_decay",
+        "recent_pain_decay", and "death_penalty".
         
         If any key is missing from a profile, the test fails with a message identifying
         the profile name and the missing key.
@@ -152,6 +153,7 @@ class RewardModuleTest(unittest.TestCase):
             "predator_escape", "predator_escape_bonus",
             "sleep_debt_night_awake", "sleep_debt_day_awake",
             "sleep_debt_overdue_threshold", "sleep_debt_health_penalty",
+            "recent_contact_decay", "recent_pain_decay", "death_penalty",
         }
         for profile_name, profile in REWARD_PROFILES.items():
             for key in required_keys:
@@ -293,12 +295,13 @@ class RewardModuleTest(unittest.TestCase):
     def test_reward_profile_audit_non_configurable_components_includes_expected(self) -> None:
         audit = reward_profile_audit("classic")
         non_configurable = audit["non_configurable_components"]
-        for expected in ("death_penalty", "predator_contact", "feeding"):
+        for expected in ("predator_contact", "feeding"):
             self.assertIn(
                 expected,
                 non_configurable,
                 f"Expected {expected!r} in non_configurable_components",
             )
+        self.assertNotIn("death_penalty", non_configurable)
 
     def test_reward_profile_audit_non_configurable_components_is_sorted(self) -> None:
         audit = reward_profile_audit("classic")
@@ -355,10 +358,11 @@ class RewardModuleTest(unittest.TestCase):
         self.assertIn("hardcoded_weight", audit["resting"])
         self.assertGreater(float(audit["resting"]["hardcoded_weight"]), 0.0)
 
-    def test_reward_component_audit_death_penalty_has_hardcoded_weight(self) -> None:
+    def test_reward_component_audit_death_penalty_is_configurable(self) -> None:
         audit = reward_component_audit()
-        self.assertIn("hardcoded_weight", audit["death_penalty"])
-        self.assertGreater(float(audit["death_penalty"]["hardcoded_weight"]), 0.0)
+        self.assertEqual(audit["death_penalty"]["config_keys"], ["death_penalty"])
+        self.assertEqual(audit["death_penalty"]["configured_weight_keys"], ["death_penalty"])
+        self.assertNotIn("hardcoded_weight", audit["death_penalty"])
 
     def test_profile_with_reward_updates_rejects_unknown_keys(self) -> None:
         with self.assertRaises(ValueError) as ctx:
@@ -1118,6 +1122,152 @@ class AustreProfileStructureTest(unittest.TestCase):
                 math.isfinite(value),
                 f"austere[{key!r}] = {value!r} is not finite",
             )
+
+
+class RewardProfileFatigueCostValuesTest(unittest.TestCase):
+    """Regression tests for the current fatigue cost values across all profiles."""
+
+    def _check_profile_fatigue_costs(self, profile_name: str) -> None:
+        profile = REWARD_PROFILES[profile_name]
+        self.assertAlmostEqual(profile["base_fatigue_cost"], 0.0035, places=6)
+        self.assertAlmostEqual(profile["move_fatigue_cost"], 0.003, places=6)
+        self.assertAlmostEqual(profile["idle_fatigue_cost"], 0.001, places=6)
+
+    def test_classic_fatigue_costs(self) -> None:
+        self._check_profile_fatigue_costs("classic")
+
+    def test_ecological_fatigue_costs(self) -> None:
+        self._check_profile_fatigue_costs("ecological")
+
+    def test_austere_fatigue_costs(self) -> None:
+        self._check_profile_fatigue_costs("austere")
+
+    def test_move_fatigue_cost_exceeds_idle_fatigue_cost_in_all_profiles(self) -> None:
+        for name in REWARD_PROFILES:
+            with self.subTest(profile=name):
+                profile = REWARD_PROFILES[name]
+                self.assertGreater(
+                    profile["move_fatigue_cost"],
+                    profile["idle_fatigue_cost"],
+                    f"{name}: move_fatigue_cost should exceed idle_fatigue_cost",
+                )
+
+
+class RewardProfileNightExposureValuesTest(unittest.TestCase):
+    """Regression tests for the current night-exposure values across all profiles."""
+
+    def test_classic_night_exposure_fatigue(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["classic"]["night_exposure_fatigue"], 0.006, places=6)
+
+    def test_classic_night_exposure_debt(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["classic"]["night_exposure_debt"], 0.009, places=6)
+
+    def test_ecological_night_exposure_fatigue(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["night_exposure_fatigue"], 0.009, places=6)
+
+    def test_ecological_night_exposure_debt(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["night_exposure_debt"], 0.014, places=6)
+
+    def test_austere_night_exposure_fatigue(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["austere"]["night_exposure_fatigue"], 0.010, places=6)
+
+    def test_austere_night_exposure_debt(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["austere"]["night_exposure_debt"], 0.015, places=6)
+
+    def test_austere_exposure_fatigue_exceeds_classic(self) -> None:
+        self.assertGreater(
+            REWARD_PROFILES["austere"]["night_exposure_fatigue"],
+            REWARD_PROFILES["classic"]["night_exposure_fatigue"],
+        )
+
+    def test_austere_exposure_debt_exceeds_classic(self) -> None:
+        self.assertGreater(
+            REWARD_PROFILES["austere"]["night_exposure_debt"],
+            REWARD_PROFILES["classic"]["night_exposure_debt"],
+        )
+
+
+class RewardProfileSleepDebtPenaltyValuesTest(unittest.TestCase):
+    """Regression tests for the current sleep-debt penalty values across all profiles."""
+
+    def test_classic_sleep_debt_interrupt(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["classic"]["sleep_debt_interrupt"], 0.035, places=6)
+
+    def test_ecological_sleep_debt_interrupt(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["sleep_debt_interrupt"], 0.050, places=6)
+
+    def test_austere_sleep_debt_interrupt(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["austere"]["sleep_debt_interrupt"], 0.060, places=6)
+
+    def test_classic_sleep_debt_night_awake(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["classic"]["sleep_debt_night_awake"], 0.007, places=6)
+
+    def test_ecological_sleep_debt_night_awake(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["sleep_debt_night_awake"], 0.011, places=6)
+
+    def test_austere_sleep_debt_night_awake(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["austere"]["sleep_debt_night_awake"], 0.012, places=6)
+
+    def test_classic_sleep_debt_day_awake(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["classic"]["sleep_debt_day_awake"], 0.0015, places=6)
+
+    def test_ecological_sleep_debt_day_awake(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["sleep_debt_day_awake"], 0.002, places=6)
+
+    def test_austere_sleep_debt_day_awake(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["austere"]["sleep_debt_day_awake"], 0.0025, places=6)
+
+    def test_sleep_debt_interrupt_is_greater_than_night_awake_in_all_profiles(self) -> None:
+        for name in REWARD_PROFILES:
+            with self.subTest(profile=name):
+                profile = REWARD_PROFILES[name]
+                self.assertGreater(
+                    profile["sleep_debt_interrupt"],
+                    profile["sleep_debt_night_awake"],
+                    f"{name}: sleep_debt_interrupt should be greater than sleep_debt_night_awake",
+                )
+
+    def test_sleep_debt_night_awake_exceeds_day_awake_in_all_profiles(self) -> None:
+        for name in REWARD_PROFILES:
+            with self.subTest(profile=name):
+                profile = REWARD_PROFILES[name]
+                self.assertGreater(
+                    profile["sleep_debt_night_awake"],
+                    profile["sleep_debt_day_awake"],
+                    f"{name}: sleep_debt_night_awake should exceed sleep_debt_day_awake",
+                )
+
+
+class RewardProfileClutterNarrowFatigueValuesTest(unittest.TestCase):
+    """Regression tests for the current clutter/narrow fatigue values."""
+
+    def test_classic_clutter_fatigue(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["classic"]["clutter_fatigue"], 0.002, places=6)
+
+    def test_ecological_clutter_fatigue(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["clutter_fatigue"], 0.003, places=6)
+
+    def test_austere_clutter_fatigue(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["austere"]["clutter_fatigue"], 0.003, places=6)
+
+    def test_classic_narrow_fatigue(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["classic"]["narrow_fatigue"], 0.0015, places=6)
+
+    def test_ecological_narrow_fatigue(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["narrow_fatigue"], 0.0025, places=6)
+
+    def test_austere_narrow_fatigue(self) -> None:
+        self.assertAlmostEqual(REWARD_PROFILES["austere"]["narrow_fatigue"], 0.0025, places=6)
+
+    def test_clutter_fatigue_exceeds_narrow_fatigue_in_all_profiles(self) -> None:
+        for name in REWARD_PROFILES:
+            with self.subTest(profile=name):
+                profile = REWARD_PROFILES[name]
+                self.assertGreaterEqual(
+                    profile["clutter_fatigue"],
+                    profile["narrow_fatigue"],
+                    f"{name}: clutter_fatigue should be >= narrow_fatigue",
+                )
 
 
 if __name__ == "__main__":

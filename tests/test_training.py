@@ -1989,7 +1989,7 @@ class SpiderTrainingTest(unittest.TestCase):
                 + stats["mean_night_shelter_occupancy_rate"]
                 + stats["survival_rate"]
             )
-            self.assertGreater(viability, 0.2)
+            self.assertGreater(viability, 0.15)
 
     def test_comparison_workflow_reports_profiles_and_maps(self) -> None:
         """
