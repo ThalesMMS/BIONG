@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 from .maps import CLUTTER, NARROW
 
@@ -28,6 +28,14 @@ REWARD_COMPONENT_NAMES: Sequence[str] = (
     "night_shelter_bonus",
     "homeostasis_penalty",
     "death_penalty",
+)
+
+SHAPING_DISPOSITIONS: Sequence[str] = (
+    "defended",
+    "weakened",
+    "removed",
+    "outcome_signal",
+    "under_investigation",
 )
 
 REWARD_PROFILES = {
@@ -174,6 +182,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["action_cost_stay", "action_cost_move"],
         "configured_weight_keys": ["action_cost_stay", "action_cost_move"],
         "shaping_risk": "low",
+        "shaping_disposition": "defended",
+        "disposition_rationale": (
+            "Retained in the austere profile as a small universal action and energy budget, "
+            "not as task-directed progress guidance."
+        ),
         "notes": "Penaliza cada passo; funciona mais como custo universal do que como trilha guiada.",
     },
     "terrain_cost": {
@@ -183,6 +196,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["clutter_cost", "narrow_cost", "narrow_predator_risk"],
         "configured_weight_keys": ["clutter_cost", "narrow_cost", "narrow_predator_risk"],
         "shaping_risk": "medium",
+        "shaping_disposition": "defended",
+        "disposition_rationale": (
+            "Retained in the austere profile because clutter and narrow-passage penalties "
+            "model environmental hazards rather than direct waypoint progress."
+        ),
         "notes": "Encodes explicit environmental cost and pushes the agent away from dangerous bottlenecks.",
     },
     "night_exposure": {
@@ -192,6 +210,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["night_exposure_reward"],
         "configured_weight_keys": ["night_exposure_reward"],
         "shaping_risk": "medium",
+        "shaping_disposition": "defended",
+        "disposition_rationale": (
+            "Retained in the austere profile because nighttime exposure is an ecological "
+            "consequence of failing to use shelter."
+        ),
         "notes": "Dense penalty for nighttime exposure outside shelter.",
     },
     "hunger_pressure": {
@@ -201,6 +224,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["hunger_pressure"],
         "configured_weight_keys": ["hunger_pressure"],
         "shaping_risk": "medium",
+        "shaping_disposition": "defended",
+        "disposition_rationale": (
+            "Retained and strengthened in the austere profile as internal homeostatic "
+            "pressure; it defines need without pointing directly to food."
+        ),
         "notes": "Continuous homeostatic pressure rather than a terminal event.",
     },
     "fatigue_pressure": {
@@ -210,6 +238,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["fatigue_pressure"],
         "configured_weight_keys": ["fatigue_pressure"],
         "shaping_risk": "medium",
+        "shaping_disposition": "defended",
+        "disposition_rationale": (
+            "Retained and strengthened in the austere profile as an internal exhaustion "
+            "cost rather than destination guidance."
+        ),
         "notes": "Continuous internal pressure to seek rest.",
     },
     "sleep_debt_pressure": {
@@ -219,6 +252,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["sleep_debt_pressure"],
         "configured_weight_keys": ["sleep_debt_pressure"],
         "shaping_risk": "medium",
+        "shaping_disposition": "defended",
+        "disposition_rationale": (
+            "Retained and strengthened in the austere profile to represent physiological "
+            "sleep debt while leaving shelter-finding to behavior."
+        ),
         "notes": "Pushes shelter-seeking behavior even before clear behavioral failures appear.",
     },
     "predator_contact": {
@@ -229,6 +267,11 @@ REWARD_COMPONENT_AUDIT = {
         "configured_weight_keys": [],
         "hardcoded_weight": 2.4,
         "shaping_risk": "low",
+        "shaping_disposition": "outcome_signal",
+        "disposition_rationale": (
+            "Acute external damage anchors a negative outcome signal tied to predator contact, "
+            "not incremental escape guidance."
+        ),
         "notes": "Acute event anchored in real predator-inflicted damage.",
     },
     "feeding": {
@@ -239,6 +282,11 @@ REWARD_COMPONENT_AUDIT = {
         "configured_weight_keys": [],
         "hardcoded_weight": 3.48,
         "shaping_risk": "low",
+        "shaping_disposition": "outcome_signal",
+        "disposition_rationale": (
+            "Consummatory reward marks the positive outcome of reaching food rather than "
+            "providing distance-based shaping."
+        ),
         "notes": "Event-level reinforcement when the spider actually reaches food.",
     },
     "resting": {
@@ -259,6 +307,11 @@ REWARD_COMPONENT_AUDIT = {
         ],
         "hardcoded_weight": 2.2,
         "shaping_risk": "medium",
+        "shaping_disposition": "weakened",
+        "disposition_rationale": (
+            "The austere profile keeps the direct rest outcome but trims configurable rest "
+            "bonuses relative to the ecological profile; dense intermediate rest shaping remains monitored."
+        ),
         "notes": "Combines a legitimate ecological event with dense shaping for intermediate rest phases.",
     },
     "food_progress": {
@@ -268,6 +321,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["food_progress"],
         "configured_weight_keys": ["food_progress"],
         "shaping_risk": "high",
+        "shaping_disposition": "removed",
+        "disposition_rationale": (
+            "Zeroed in the austere profile so food seeking must be supported by sparse "
+            "feeding outcomes and learned memory or planning rather than distance gradients."
+        ),
         "notes": "Approach reward for food; reduces the need for long-horizon temporal credit assignment.",
     },
     "shelter_progress": {
@@ -277,6 +335,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["shelter_progress", "threat_shelter_progress"],
         "configured_weight_keys": ["shelter_progress", "threat_shelter_progress"],
         "shaping_risk": "high",
+        "shaping_disposition": "removed",
+        "disposition_rationale": (
+            "Zeroed in the austere profile, including the threat branch, to expose whether "
+            "shelter behavior survives without distance-to-shelter guidance."
+        ),
         "notes": "Provides an explicit direction toward shelter even without full perception or planning.",
     },
     "predator_escape": {
@@ -294,6 +357,11 @@ REWARD_COMPONENT_AUDIT = {
             "predator_escape_stay_penalty",
         ],
         "shaping_risk": "high",
+        "shaping_disposition": "removed",
+        "disposition_rationale": (
+            "Zeroed in the austere profile, including escape bonus and stay penalty, so "
+            "survival must come from contact and exposure outcomes plus predator dynamics."
+        ),
         "notes": "Incremental reward for increasing distance from the predator and a penalty for remaining exposed and still.",
     },
     "day_exploration": {
@@ -303,6 +371,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["day_exploration_hungry", "day_exploration_calm"],
         "configured_weight_keys": ["day_exploration_hungry", "day_exploration_calm"],
         "shaping_risk": "medium",
+        "shaping_disposition": "removed",
+        "disposition_rationale": (
+            "Zeroed in the austere profile because it is auxiliary locomotion guidance "
+            "rather than an outcome signal."
+        ),
         "notes": "Auxiliary bonus for daytime exploration; explicit and not ecological on its own.",
     },
     "shelter_entry": {
@@ -312,6 +385,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["shelter_entry"],
         "configured_weight_keys": ["shelter_entry"],
         "shaping_risk": "medium",
+        "shaping_disposition": "removed",
+        "disposition_rationale": (
+            "Zeroed in the austere profile because crossing the shelter boundary still "
+            "provides navigational shaping before sustained rest or safety outcomes."
+        ),
         "notes": "Clear event, but it still guides navigation toward the shelter edge.",
     },
     "night_shelter_bonus": {
@@ -321,6 +399,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["night_shelter_bonus"],
         "configured_weight_keys": ["night_shelter_bonus"],
         "shaping_risk": "medium",
+        "shaping_disposition": "removed",
+        "disposition_rationale": (
+            "Zeroed in the austere profile because recurrent shelter occupancy reward can "
+            "mask whether the agent learned night-shelter behavior from consequences."
+        ),
         "notes": "Recurring bonus for occupying shelter at night.",
     },
     "homeostasis_penalty": {
@@ -331,6 +414,11 @@ REWARD_COMPONENT_AUDIT = {
         "configured_weight_keys": ["sleep_debt_health_penalty"],
         "hardcoded_weight": 0.72,
         "shaping_risk": "medium",
+        "shaping_disposition": "defended",
+        "disposition_rationale": (
+            "Retained and strengthened in the austere profile as physiological deterioration; "
+            "unlike progress rewards, it penalizes bad internal state rather than instructing a destination."
+        ),
         "notes": "Penalizes progressive physiological degradation; part of the weight is hardcoded.",
     },
     "death_penalty": {
@@ -340,6 +428,11 @@ REWARD_COMPONENT_AUDIT = {
         "config_keys": ["death_penalty"],
         "configured_weight_keys": ["death_penalty"],
         "shaping_risk": "low",
+        "shaping_disposition": "outcome_signal",
+        "disposition_rationale": (
+            "Terminal episode failure anchors a negative outcome signal for death rather than "
+            "dense behavioral guidance."
+        ),
         "notes": "Explicit and rare terminal event.",
     },
 }
@@ -360,28 +453,76 @@ def reward_component_audit() -> dict[str, dict[str, object]]:
     return deepcopy(REWARD_COMPONENT_AUDIT)
 
 
-def reward_profile_audit(profile_name: str) -> dict[str, object]:
+def validate_shaping_disposition(
+    metadata: Mapping[str, object],
+    component_name: str,
+) -> str:
+    """Return a component's validated shaping disposition."""
+    disposition = metadata.get("shaping_disposition")
+    if disposition is None:
+        raise ValueError(
+            f"Reward component {component_name!r} is missing shaping_disposition."
+        )
+    disposition_name = str(disposition)
+    if disposition_name not in SHAPING_DISPOSITIONS:
+        raise ValueError(
+            f"Reward component {component_name!r} has invalid shaping disposition "
+            f"{disposition_name!r}."
+        )
+    return disposition_name
+
+
+def shaping_disposition_summary() -> dict[str, object]:
     """
-    Produce a human-readable audit summary for the named reward profile.
-    
-    The result reports a per-component "weight proxy" (sum of absolute configured weights from the profile plus any hardcoded weight), aggregated category proxies for both configurable-only and total mass, the chosen dominant category (preferring configurable mass when present), a list of components that have no configurable weight keys, and the total hardcoded mass. Intended for diagnostics and profile comparison rather than exact reward decomposition.
-    
-    Parameters:
-        profile_name (str): Name of the reward profile to audit.
+    Group reward components by their shaping disposition.
     
     Returns:
-        dict[str, object]: An audit mapping containing:
+        dict[str, object]: A mapping containing:
+            - one list of component names for each disposition key from SHAPING_DISPOSITIONS, and
+            - a `"counts"` mapping with the integer count of components per disposition.
+    
+    Raises:
+        ValueError: If any component in REWARD_COMPONENT_AUDIT has a shaping disposition
+            that is not present in SHAPING_DISPOSITIONS.
+    """
+    summary: dict[str, list[str]] = {
+        disposition: []
+        for disposition in SHAPING_DISPOSITIONS
+    }
+    for component_name, metadata in sorted(REWARD_COMPONENT_AUDIT.items()):
+        disposition = validate_shaping_disposition(metadata, component_name)
+        summary[disposition].append(component_name)
+    return {
+        **summary,
+        "counts": {
+            disposition: len(summary[disposition])
+            for disposition in SHAPING_DISPOSITIONS
+        },
+    }
+
+
+def reward_profile_audit(profile_name: str) -> dict[str, object]:
+    """
+    Produce a human-readable audit of the named reward profile summarizing per-component and per-category weight proxies and shaping dispositions.
+    
+    Parameters:
+        profile_name (str): Name of a profile defined in REWARD_PROFILES.
+    
+    Returns:
+        dict[str, object]: Audit mapping including:
             - "profile": the requested profile name.
-            - "component_weight_proxy": mapping of component -> proxy weight (float).
+            - "component_weight_proxy": mapping of component name -> proxy weight (float).
             - "category_weight_proxy": mapping of category -> total proxy mass (float).
             - "configurable_category_weight_proxy": mapping of category -> configurable-only proxy mass (float).
-            - "dominant_category": category with the largest chosen proxy mass.
+            - "disposition_summary": mapping of shaping disposition -> {"components": [str], "component_count": int, "total_weight_proxy": float}.
+            - "dominant_category": category name chosen as dominant (str).
             - "hardcoded_mass": total hardcoded weight summed across components (float).
             - "non_configurable_components": sorted list of component names without configurable weight keys.
             - "notes": list of explanatory strings.
     
     Raises:
-        KeyError: If `profile_name` is not a key in REWARD_PROFILES.
+        KeyError: If `profile_name` is not present in REWARD_PROFILES.
+        ValueError: If any reward component has an invalid `shaping_disposition`.
     """
     if profile_name not in REWARD_PROFILES:
         raise KeyError(f"Unknown reward profile: {profile_name!r}.")
@@ -397,6 +538,14 @@ def reward_profile_audit(profile_name: str) -> dict[str, object]:
         "internal_pressure": 0.0,
     }
     component_weights: dict[str, float] = {}
+    disposition_summary: dict[str, dict[str, object]] = {
+        disposition: {
+            "components": [],
+            "component_count": 0,
+            "total_weight_proxy": 0.0,
+        }
+        for disposition in SHAPING_DISPOSITIONS
+    }
     non_configurable_components: list[str] = []
     hardcoded_mass = 0.0
     for component_name, metadata in REWARD_COMPONENT_AUDIT.items():
@@ -411,6 +560,11 @@ def reward_profile_audit(profile_name: str) -> dict[str, object]:
         category_weights[category_name] += proxy_weight
         configurable_category_weights[category_name] += configured_weight
         hardcoded_mass += hardcoded_weight
+        disposition = validate_shaping_disposition(metadata, component_name)
+        disposition_data = disposition_summary[disposition]
+        disposition_data["components"].append(component_name)
+        disposition_data["component_count"] += 1
+        disposition_data["total_weight_proxy"] += proxy_weight
         if not metadata.get("configured_weight_keys"):
             non_configurable_components.append(component_name)
     dominant_weight_source = configurable_category_weights
@@ -430,6 +584,14 @@ def reward_profile_audit(profile_name: str) -> dict[str, object]:
         "configurable_category_weight_proxy": {
             name: round(float(value), 6)
             for name, value in sorted(configurable_category_weights.items())
+        },
+        "disposition_summary": {
+            disposition: {
+                "components": sorted(data["components"]),
+                "component_count": data["component_count"],
+                "total_weight_proxy": round(float(data["total_weight_proxy"]), 6),
+            }
+            for disposition, data in disposition_summary.items()
         },
         "dominant_category": dominant_category,
         "hardcoded_mass": round(float(hardcoded_mass), 6),

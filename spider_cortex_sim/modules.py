@@ -6,7 +6,7 @@ from typing import Dict, List, Sequence
 import numpy as np
 
 from .interfaces import MODULE_INTERFACES, ModuleInterface
-from .nn import ProposalNetwork, softmax
+from .nn import ProposalNetwork, RecurrentProposalNetwork, softmax
 
 
 MODULE_HIDDEN_DIMS: Dict[str, int] = {
@@ -102,6 +102,8 @@ DEFAULT_MODULE_SPECS: List[ModuleSpec] = [
     for interface in MODULE_INTERFACES
 ]
 
+ModuleNetwork = ProposalNetwork | RecurrentProposalNetwork
+
 
 class CorticalModuleBank:
     """Runs only the proposer networks; it does not decide reflexes or integrate global context."""
@@ -112,6 +114,7 @@ class CorticalModuleBank:
         rng: np.random.Generator,
         module_dropout: float = 0.05,
         disabled_modules: Sequence[str] = (),
+        recurrent_modules: Sequence[str] = (),
     ) -> None:
         """
         Create a CorticalModuleBank configured to produce proposals for each default module spec.
@@ -121,18 +124,27 @@ class CorticalModuleBank:
             rng (np.random.Generator): Random number generator used for network initialization and any stochastic behavior.
             module_dropout (float): Probability (0.0-1.0) that a module will be dropped during training; stored as a float.
             disabled_modules (Sequence[str]): Iterable of module names to mark as permanently disabled; converted to a set of strings internally.
+            recurrent_modules (Sequence[str]): Iterable of module names whose proposal networks should maintain recurrent hidden state.
         """
         self.specs = list(DEFAULT_MODULE_SPECS)
         self.action_dim = action_dim
         self.rng = rng
         self.module_dropout = float(module_dropout)
         self.disabled_modules = {str(name) for name in disabled_modules}
+        self.recurrent_modules = {str(name) for name in recurrent_modules}
         known_names = {spec.name for spec in self.specs}
         unknown = self.disabled_modules - known_names
         if unknown:
             raise ValueError(f"Invalid disabled modules: {sorted(unknown)}")
-        self.modules: Dict[str, ProposalNetwork] = {
-            spec.name: ProposalNetwork(
+        unknown_recurrent = self.recurrent_modules - known_names
+        if unknown_recurrent:
+            raise ValueError(f"Invalid recurrent modules: {sorted(unknown_recurrent)}")
+        self.modules: Dict[str, ModuleNetwork] = {
+            spec.name: (
+                RecurrentProposalNetwork
+                if spec.name in self.recurrent_modules
+                else ProposalNetwork
+            )(
                 input_dim=spec.input_dim,
                 hidden_dim=spec.hidden_dim,
                 output_dim=action_dim,
@@ -142,6 +154,42 @@ class CorticalModuleBank:
             for spec in self.specs
         }
         self._active_names: List[str] = [spec.name for spec in self.specs]
+
+    @property
+    def has_recurrent_modules(self) -> bool:
+        return bool(self.recurrent_modules)
+
+    @staticmethod
+    def _has_hidden_state_api(network: ModuleNetwork) -> bool:
+        return (
+            callable(getattr(network, "get_hidden_state", None))
+            and callable(getattr(network, "set_hidden_state", None))
+            and callable(getattr(network, "reset_hidden_state", None))
+        )
+
+    def reset_hidden_states(self) -> None:
+        """Reset hidden state on all recurrent proposal networks."""
+        for network in self.modules.values():
+            if self._has_hidden_state_api(network):
+                network.reset_hidden_state()
+
+    def snapshot_hidden_states(self) -> Dict[str, np.ndarray]:
+        """Return copies of runtime hidden states for recurrent modules."""
+        snapshots: Dict[str, np.ndarray] = {}
+        for name, network in self.modules.items():
+            if self._has_hidden_state_api(network):
+                snapshots[name] = np.asarray(network.get_hidden_state(), dtype=float).copy()
+        return snapshots
+
+    def restore_hidden_states(self, snapshots: Dict[str, np.ndarray]) -> None:
+        """Restore recurrent runtime hidden states from a previous snapshot."""
+        for name, hidden_state in snapshots.items():
+            if name not in self.modules:
+                raise KeyError(f"Module '{name}' does not exist in the module bank.")
+            network = self.modules[name]
+            if not self._has_hidden_state_api(network):
+                raise ValueError(f"Module '{name}' does not have recurrent hidden state.")
+            network.set_hidden_state(np.asarray(hidden_state, dtype=float))
 
     def forward(
         self,
@@ -203,7 +251,7 @@ class CorticalModuleBank:
             else:
                 effective_logits = np.zeros(
                     self.action_dim,
-                    dtype=self.modules[spec.name].b2.dtype,
+                    dtype=float,
                 )
             outputs.append(
                 ModuleResult(

@@ -426,6 +426,9 @@ class TickContextTest(unittest.TestCase):
         self.assertEqual(ctx.intended_action, "MOVE_UP")
         self.assertEqual(ctx.executed_action, "MOVE_UP")
         self.assertFalse(ctx.motor_noise_applied)
+        self.assertAlmostEqual(ctx.execution_difficulty, 0.0)
+        self.assertEqual(ctx.execution_components, {})
+        self.assertEqual(ctx.motor_slip_info, {})
 
     def test_tick_context_defaults(self) -> None:
         ctx = self._make_context()

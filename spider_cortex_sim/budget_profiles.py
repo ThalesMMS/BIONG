@@ -23,12 +23,16 @@ class BudgetProfile:
     comparison_seeds: tuple[int, ...]
     checkpoint_interval: int
     selection_scenario_episodes: int
+    requires_checkpoint_selection: bool = False
 
     def __post_init__(self) -> None:
         """
-        Canonicalize and normalize dataclass fields to their expected types after initialization.
+        Canonicalize and normalize BudgetProfile fields to their expected types after initialization.
         
-        Converts `name` and `benchmark_strength` to `str`; casts numeric fields `episodes`, `eval_episodes`, `max_steps`, `scenario_episodes`, `checkpoint_interval`, and `selection_scenario_episodes` to `int`; and converts `comparison_seeds` to a `tuple[int, ...]` by casting each element to `int`. This method mutates the instance's frozen fields via object-level assignment to ensure consistent, canonical types.
+        Converts `name` and `benchmark_strength` to `str`; casts `episodes`, `eval_episodes`, `max_steps`,
+        `scenario_episodes`, `checkpoint_interval`, and `selection_scenario_episodes` to `int`; converts
+        `comparison_seeds` to `tuple[int, ...]` by casting each element to `int`; and coerces
+        `requires_checkpoint_selection` to `bool`.
         """
         object.__setattr__(self, "name", str(self.name))
         object.__setattr__(self, "benchmark_strength", str(self.benchmark_strength))
@@ -47,15 +51,22 @@ class BudgetProfile:
             "selection_scenario_episodes",
             int(self.selection_scenario_episodes),
         )
+        object.__setattr__(
+            self,
+            "requires_checkpoint_selection",
+            bool(self.requires_checkpoint_selection),
+        )
 
     def to_summary(self) -> dict[str, object]:
         """
-        Produce a serializable summary of the budget profile.
+        Return a serializable summary of this budget profile.
+        
+        The returned dictionary has top-level keys "profile" (profile name), "benchmark_strength",
+        and "resolved". The "resolved" mapping contains the numeric budget fields, "comparison_seeds"
+        as a list of ints, and "requires_checkpoint_selection" as a bool.
         
         Returns:
-            summary (dict[str, object]): Dictionary with top-level keys "profile" (profile name)
-            and "benchmark_strength", and a "resolved" mapping that contains the numeric
-            budget fields and "comparison_seeds" as a list of ints:
+            dict[str, object]: Summary dictionary with structure:
                 {
                     "profile": str,
                     "benchmark_strength": str,
@@ -67,6 +78,7 @@ class BudgetProfile:
                         "comparison_seeds": list[int],
                         "checkpoint_interval": int,
                         "selection_scenario_episodes": int,
+                        "requires_checkpoint_selection": bool,
                     }
                 }
         """
@@ -81,6 +93,7 @@ class BudgetProfile:
                 "comparison_seeds": list(self.comparison_seeds),
                 "checkpoint_interval": self.checkpoint_interval,
                 "selection_scenario_episodes": self.selection_scenario_episodes,
+                "requires_checkpoint_selection": self.requires_checkpoint_selection,
             },
         }
 
@@ -99,6 +112,7 @@ class ResolvedBudget:
     behavior_seeds: tuple[int, ...]
     ablation_seeds: tuple[int, ...]
     overrides: dict[str, object]
+    requires_checkpoint_selection: bool = False
 
     def __post_init__(self) -> None:
         """
@@ -108,6 +122,7 @@ class ResolvedBudget:
         - ensures `profile` and `benchmark_strength` are `str`
         - ensures `episodes`, `eval_episodes`, `max_steps`, `scenario_episodes`, `checkpoint_interval`, and `selection_scenario_episodes` are `int`
         - ensures `comparison_seeds`, `behavior_seeds`, and `ablation_seeds` are `tuple[int, ...]`
+        - coerces `requires_checkpoint_selection` to `bool`
         - deep-copies `overrides` into a new `dict` to prevent external mutation
         """
         object.__setattr__(self, "profile", str(self.profile))
@@ -138,15 +153,20 @@ class ResolvedBudget:
             tuple(int(seed) for seed in self.ablation_seeds),
         )
         object.__setattr__(self, "overrides", deepcopy(dict(self.overrides)))
+        object.__setattr__(
+            self,
+            "requires_checkpoint_selection",
+            bool(self.requires_checkpoint_selection),
+        )
 
     def to_summary(self) -> dict[str, object]:
         """
-        Return a structured summary of the resolved budget suitable for serialization.
+        Return a serializable summary of the resolved budget.
         
-        The returned dictionary contains top-level keys "profile" and "benchmark_strength" with their string values, a "resolved" mapping with numeric fields and seed lists, and an "overrides" value which is a deep-copied dict of any explicit overrides.
+        The summary includes top-level `profile` and `benchmark_strength`, a `resolved` mapping with resolved numeric fields and seed lists (all seed tuples converted to lists), and an `overrides` mapping which is a deep copy of any explicit overrides.
         
         Returns:
-            summary (dict[str, object]): {
+            dict[str, object]: {
                 "profile": str,
                 "benchmark_strength": str,
                 "resolved": {
@@ -159,6 +179,7 @@ class ResolvedBudget:
                     "selection_scenario_episodes": int,
                     "behavior_seeds": list[int],
                     "ablation_seeds": list[int],
+                    "requires_checkpoint_selection": bool,
                 },
                 "overrides": dict[str, object],
             }
@@ -176,6 +197,7 @@ class ResolvedBudget:
                 "selection_scenario_episodes": self.selection_scenario_episodes,
                 "behavior_seeds": list(self.behavior_seeds),
                 "ablation_seeds": list(self.ablation_seeds),
+                "requires_checkpoint_selection": self.requires_checkpoint_selection,
             },
             "overrides": deepcopy(self.overrides),
         }
@@ -229,10 +251,24 @@ CUSTOM_BUDGET_PROFILE = BudgetProfile(
     selection_scenario_episodes=1,
 )
 
+PAPER_BUDGET_PROFILE = BudgetProfile(
+    name="paper",
+    benchmark_strength="publication",
+    episodes=48,
+    eval_episodes=8,
+    max_steps=150,
+    scenario_episodes=4,
+    comparison_seeds=(7, 17, 29, 41, 53, 67, 79),
+    checkpoint_interval=8,
+    selection_scenario_episodes=2,
+    requires_checkpoint_selection=True,
+)
+
 BUDGET_PROFILES: dict[str, BudgetProfile] = {
     SMOKE_BUDGET_PROFILE.name: SMOKE_BUDGET_PROFILE,
     DEV_BUDGET_PROFILE.name: DEV_BUDGET_PROFILE,
     REPORT_BUDGET_PROFILE.name: REPORT_BUDGET_PROFILE,
+    PAPER_BUDGET_PROFILE.name: PAPER_BUDGET_PROFILE,
 }
 
 
@@ -383,4 +419,5 @@ def resolve_budget(
         behavior_seeds=resolved_behavior_seeds,
         ablation_seeds=resolved_ablation_seeds,
         overrides=overrides,
+        requires_checkpoint_selection=base.requires_checkpoint_selection,
     )

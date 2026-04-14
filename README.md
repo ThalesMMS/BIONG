@@ -1,10 +1,10 @@
-# Neuro-Modular Spider Simulator With Explicit Predator And Standardized Interfaces
+# Biologically-Inspired Organism, Not a Game
 
 This project implements a simulated spider with a modular brain, explicit predator pressure, standardized neural interfaces, online learning, deterministic behavioral scenarios, and reproducible evaluation workflows.
 
 The current version centers on three structural changes:
 
-1. an explicit predator (`lizard`) inside the world
+1. explicit predator instances inside the world, with a backward-compatible primary `lizard`
 2. a primitive locomotion output space instead of high-level semantic actions
 3. standardized input and output interfaces for each center or cortex to reduce excessive coupling between networks
 
@@ -12,9 +12,11 @@ That core has since been extended with:
 
 - reward profiles (`classic`, `ecological`, `austere`)
 - explicit shelter geometry with entrance, interior, and deep zones
+- predator profiles for visual and olfactory hunters, including multi-predator worlds
 - a richer lizard state machine (`PATROL`, `ORIENT`, `INVESTIGATE`, `CHASE`, `WAIT`, `RECOVER`)
 - lizard working memory for investigate targets, ambush windows, chase streaks, and recovery
 - explicit spider memory for food, predator, safe shelter, and escape route
+- optional recurrent memory inside selected proposer modules
 - map templates and deterministic scenarios for behavioral evaluation
 - behavioral scorecards, ablations, learning-evidence workflows, reward audits, and offline analysis
 
@@ -77,8 +79,11 @@ The current architecture also includes:
 - module dropout during training
 - local reflexes per module, defined from the module's own interface
 - auxiliary per-module targets ("reflex targets") to reduce coadaptation
+- optional recurrent proposer state for selected modules through `BrainAblationConfig.recurrent_modules`
 - explicit contribution metrics in `action_center` for dominance, agreement, and effective proposer count
 - the `local_credit_only` ablation, which preserves current inference but removes global policy-gradient broadcast during modular training
+
+Recurrent memory is opt-in per proposer. Set `BrainAblationConfig(recurrent_modules=(...))` to make selected modules stateful within an episode, or use the canonical `modular_recurrent` and `modular_recurrent_all` ablation variants when comparing recurrent and feed-forward architectures. Hidden state resets at episode boundaries, so recurrence helps with within-episode temporal context rather than cross-episode carryover. Evaluation guidance and variant definitions live in [docs/ablation_workflow.md](docs/ablation_workflow.md).
 
 Layer responsibilities:
 
@@ -99,13 +104,30 @@ The 2D grid world contains:
 - clutter terrain (`:`)
 - food (`F`)
 - spider (`A`)
-- predator lizard (`L`)
+- predator lizard or hunter instances (`L`)
 - day/night cycle
 - limited vision
 - food and predator smell fields
 - homeostatic pressures from hunger, fatigue, health, pain, and contact
 
 If the spider and lizard occupy the same ASCII-rendered cell, the renderer shows `X`.
+
+## Predator Profiles
+
+Predators are configured with `PredatorProfile` values in `spider_cortex_sim/predator.py`. A profile defines the predator name, visual range, smell range, detection style, move interval, and detection threshold.
+
+Built-in profiles:
+
+- `DEFAULT_LIZARD_PROFILE`: backward-compatible single-predator behavior matching the classic lizard parameters
+- `VISUAL_HUNTER_PROFILE`: long visual range, short smell range, `detection_style="visual"`
+- `OLFACTORY_HUNTER_PROFILE`: short visual range, long smell range, `detection_style="olfactory"`
+
+`SpiderWorld.reset()` accepts `predator_profiles=[...]`. Passing one profile preserves the old single-predator API; passing several profiles spawns one predator per profile and creates one controller per predator. The compatibility helpers still work:
+
+- `world.lizard` and `world.lizard_pos()` refer to the first predator
+- `world.predators`, `world.predator_positions()`, `world.predator_count`, and `world.get_predator(index)` expose the full predator set
+
+Scenario setup code can also assign explicit `LizardState(profile=...)` instances when a benchmark needs hand-placed predators.
 
 ## Project Layout
 
@@ -125,6 +147,7 @@ neuro_modular_sim/
 │   ├── interfaces.py
 │   ├── modules.py
 │   ├── nn.py
+│   ├── predator.py      # PredatorProfile, DEFAULT_LIZARD_PROFILE, VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE
 │   ├── simulation.py
 │   └── world.py
 └── tests/
@@ -246,6 +269,9 @@ Available scenarios:
 - `two_shelter_tradeoff`
 - `exposed_day_foraging`
 - `food_deprivation`
+- `visual_olfactory_pincer`
+- `olfactory_ambush`
+- `visual_hunter_open_field`
 - `food_vs_predator_conflict`
 - `sleep_vs_exploration_conflict`
 
@@ -253,8 +279,16 @@ Scenario-to-map specializations include:
 
 - `entrance_ambush`, `shelter_blockade`, and `recover_after_failed_chase` use `entrance_funnel`
 - `open_field_foraging` and `exposed_day_foraging` use `exposed_feeding_ground`
+- `visual_olfactory_pincer` and `visual_hunter_open_field` use `exposed_feeding_ground`
+- `olfactory_ambush` uses `entrance_funnel`
 - `corridor_gauntlet` uses `corridor_escape`
 - `two_shelter_tradeoff` uses `two_shelters`
+
+Multi-predator scenario intent:
+
+- `visual_olfactory_pincer`: the spider starts between a visible visual hunter in front and an olfactory hunter behind and downwind; it tests dual-threat perception and module specialization
+- `olfactory_ambush`: an olfactory hunter waits near a shelter entrance where the spider can smell danger without seeing it; it targets sensory-cortex-led response
+- `visual_hunter_open_field`: a fast visual hunter pressures the spider in open terrain; it targets visual-cortex-led response under exposed conditions
 
 ## Behavioral Evaluation
 
@@ -285,6 +319,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 - `summary`: overall suite success and detected regressions
 - `comparisons`: optional profile/map/seed comparison matrices when behavioral comparison flags are used
 - `learning_evidence`: optional comparison between a trained checkpoint and controls such as `random_init`, `reflex_only`, `freeze_half_budget`, and `trained_long_budget`
+- `claim_tests`: optional experiment-of-record synthesis that composes the canonical learning-evidence, ablation, and noise-robustness primitives into per-claim pass/fail results
 
 Weak-signal scenarios now publish scenario-owned interpretation metadata:
 
@@ -299,6 +334,57 @@ The scenario diagnostics block also summarizes:
 - `outcome_distribution`
 - `partial_progress_rate`
 - `died_without_contact_rate`
+
+## Emergence Hypothesis
+
+The scientific question in this repository is narrower than "does the score go up?" The emergence hypothesis is that the modular cortex learns reusable threat-sensitive behavior that remains present when privileged supports are removed, stays coherent under disturbance, and differentiates between predator types rather than collapsing into one generic escape reflex.
+
+The supporting workflows still matter, but they are no longer the experiment-of-record by themselves:
+
+- ablations isolate which modules and memory pathways matter
+- learning-evidence comparisons separate trained behavior from initialization or reflex-only baselines
+- the noise matrix checks whether behavior survives train/eval mismatch
+
+Those workflows provide the raw evidence. The claim test suite is the formal gate that reads them together and decides whether the core scientific claims actually hold.
+
+## Claim Test Suite
+
+Run the canonical claim suite and write the full experiment record to JSON:
+
+```bash
+PYTHONPATH=. python3 -m spider_cortex_sim \
+  --claim-test-suite \
+  --summary results.json
+```
+
+The five canonical claim tests are:
+
+- `learning_without_privileged_signals`
+  Hypothesis: trained behavior still beats an untrained policy after privileged reflex support is removed.
+  Protocol: learning-evidence comparison from `random_init` to `trained_without_reflex_support` across `night_rest`, `predator_edge`, `entrance_ambush`, `shelter_blockade`, and `two_shelter_tradeoff`, with the leakage audit enforced.
+  Success criterion: `trained_without_reflex_support` must improve `scenario_success_rate` over `random_init` by at least `0.15` and the leakage audit must report zero unresolved privileged-signal findings.
+
+- `escape_without_reflex_support`
+  Hypothesis: predator escape remains learned behavior rather than a reflex-only artifact.
+  Protocol: learning-evidence comparison from `reflex_only` to `trained_without_reflex_support` over `predator_edge`, `entrance_ambush`, and `shelter_blockade`.
+  Success criterion: `trained_without_reflex_support` must reach predator-response `scenario_success_rate >= 0.60` and exceed `reflex_only` by at least `0.10`.
+
+- `memory_improves_shelter_return`
+  Hypothesis: recurrent memory improves delayed shelter return and shelter trade-off behavior.
+  Protocol: ablation comparison of `modular_recurrent` versus `modular_full` on `night_rest` and `two_shelter_tradeoff`.
+  Success criterion: `modular_recurrent` must improve shelter-return `scenario_success_rate` by at least `0.10`.
+
+- `noise_preserves_threat_valence`
+  Hypothesis: threat-sensitive arbitration survives train/eval noise mismatch instead of working only on the diagonal.
+  Protocol: canonical noise-robustness matrix, comparing diagonal and off-diagonal aggregate scores over the threat-response scenarios.
+  Success criterion: the off-diagonal threat-response score must stay at least `0.60`, and the diagonal-minus-off-diagonal gap must stay at most `0.15`.
+
+- `specialization_emerges_with_multiple_predators`
+  Hypothesis: multiple predator ecologies produce predator-type specialization instead of one undifferentiated threat pathway.
+  Protocol: predator-type ablation comparison across `visual_olfactory_pincer`, `olfactory_ambush`, and `visual_hunter_open_field`, paired with type-specific cortex engagement checks in the full modular policy.
+  Success criterion: `drop_visual_cortex` must drive `visual_minus_olfactory_success_rate <= -0.10`, `drop_sensory_cortex` must drive `visual_minus_olfactory_success_rate >= 0.10`, and the reference policy must show the expected cortex engagement in at least `2` of the `3` specialization scenarios.
+
+Generic benchmarks such as the ablation suite and the noise matrix still provide the supporting detail, but the claim tests are the scientific nucleus: they are the concise pass/fail record for whether the main emergence story survives contact with the actual measurements.
 
 ## Graphical Interface (Pygame)
 
@@ -397,6 +483,8 @@ The `summary` and `trace` include:
 - nighttime shelter occupancy and nighttime stillness
 - nighttime shelter-role distribution (`outside`, `entrance`, `inside`, `deep`)
 - predator-response latency
+- predator contacts, escapes, and response latency by predator type
+- dominant module response by predator type
 - `reward_profile` and `map_template`
 - `config.operational_profile`, including active thresholds and operational weights
 - `config.budget`, including resolved profile, benchmark strength, seeds, and explicit overrides
@@ -424,6 +512,8 @@ When `--debug-trace` is combined with `--trace`, each tick also includes:
 - full predator internal state
 
 Use `--full-summary` to print the complete JSON summary to stdout.
+
+Specialization metrics compare how modules respond when visual versus olfactory predators are the primary threat. A high predator-type specialization score means response distributions differ by predator type, such as stronger `visual_cortex` dominance for visual hunters and stronger `sensory_cortex` dominance for olfactory hunters. A low score means the same modules respond similarly to both predator types, which can be useful as a baseline but does not show sensory-niche specialization.
 
 ## Budget Profiles
 
@@ -556,14 +646,13 @@ The detailed ablation workflow, variant definitions, and canonical check-in tabl
 
 - The system is biologically inspired, not biologically faithful
 - The "return vector to shelter" is a simplified form of proprioception or minimal spatial memory
-- Explicit memory is world-owned: target, age, and TTL are maintained by the environment and only consumed by cortical modules through observation
+- Explicit memory is perception-grounded: data sources are limited to local visual perception, contact events, and movement history. The environment pipeline maintains mechanics such as aging and TTL expiration, but it cannot inject information the spider has not perceived.
 - Local per-module reflexes act like innate behavior that online learning later refines
 - There is no giant fallback center that integrates everything; each proposer receives only its own interface and emits only standardized locomotion proposals
 
 ## Natural Extensions
 
-1. add recurrent memory per module
-2. introduce multiple predators with different sensory niches
-3. model a more strongly oriented field of view rather than a short omnidirectional one
-4. separate locomotion into gait, speed, and body orientation
-5. migrate the networks to PyTorch while preserving the same modular interface signature
+1. implemented: multiple predators with different sensory niches
+2. model a more strongly oriented field of view rather than a short omnidirectional one
+3. separate locomotion into gait, speed, and body orientation
+4. migrate the networks to PyTorch while preserving the same modular interface signature

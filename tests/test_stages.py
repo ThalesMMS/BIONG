@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from spider_cortex_sim import stages
 from spider_cortex_sim.interfaces import ACTION_DELTAS
+from spider_cortex_sim.predator import OLFACTORY_HUNTER_PROFILE, VISUAL_HUNTER_PROFILE
 from spider_cortex_sim.world import ACTION_TO_INDEX, SpiderWorld
 from spider_cortex_sim.world_types import StageDescriptor
 
@@ -164,8 +165,8 @@ class StageFunctionTest(unittest.TestCase):
         self.assertEqual(context.intended_action, "STAY")
         self.assertEqual(context.executed_action, "STAY")
         self.assertFalse(context.motor_noise_applied)
-        self.assertEqual([event.stage for event in context.event_log], ["pre_tick", "action"])
-        self.assertEqual([event.name for event in context.event_log], ["snapshot", "action_resolved"])
+        self.assertEqual([event.stage for event in context.event_log], ["pre_tick"])
+        self.assertEqual([event.name for event in context.event_log], ["snapshot"])
         self.assertEqual(context.info["action"], "STAY")
         self.assertEqual(context.info["distance_deltas"], {})
 
@@ -177,6 +178,10 @@ class StageFunctionTest(unittest.TestCase):
         stages.run_action_stage(world, context)
 
         self.assertTrue(context.moved)
+        action_event = next(event for event in context.event_log if event.name == "action_resolved")
+        self.assertEqual(action_event.stage, "action")
+        self.assertIn("execution_difficulty", action_event.payload)
+        self.assertIn("slip_probability", action_event.payload)
         movement_event = context.event_log[-1]
         self.assertEqual(movement_event.stage, "action")
         self.assertEqual(movement_event.name, "movement_applied")
@@ -222,7 +227,33 @@ class StageFunctionTest(unittest.TestCase):
             {"damage", "health", "recent_pain", "recent_contact"},
         )
 
+    def test_run_predator_contact_stage_checks_all_predator_positions(self) -> None:
+        world = self._make_world(seed=21)
+        world.reset(
+            seed=21,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+        context = self._build_context(world, "STAY")
+        spider_x, spider_y = world.spider_pos()
+        first_x = spider_x - 1 if spider_x > 0 else spider_x + 1
+        world.lizard.x, world.lizard.y = first_x, spider_y
+        second_predator = world.get_predator(1)
+        second_predator.x, second_predator.y = spider_x, spider_y
+
+        stages.run_predator_contact_stage(world, context)
+
+        self.assertTrue(context.predator_contact_applied)
+        self.assertTrue(context.info["predator_contact"])
+
     def test_run_autonomic_stage_feeding_updates_context_and_records_events(self) -> None:
+        """
+        Verify running the autonomic stage applies feeding when the spider is on a food cell and records the corresponding events.
+        
+        Sets the spider's position as a food location, runs the autonomic stage, and expects:
+        - context.fed_this_tick to be True
+        - context.info["ate"] to be truthy
+        - an event named "feeding" and an "autonomic_summary" event to appear in the autonomic-stage entries of context.event_log
+        """
         world = self._make_world(seed=23)
         world.food_positions = [world.spider_pos()]
         context = self._build_context(world, "STAY")
@@ -256,12 +287,9 @@ class StageFunctionTest(unittest.TestCase):
 
     def test_run_predator_update_stage_records_update_and_second_contact_check(self) -> None:
         """
-        Verifies the predator update stage records a movement update and performs a second predator-contact check.
+        Check that running the predator-update stage when the lizard is colocated with the spider records the update and triggers a second predator-contact check.
         
-        Runs the predator update stage when the lizard is colocated with the spider and asserts:
-        - the context reflects no lizard movement (`predator_moved` false),
-        - the update is documented in an event named "predator_update" whose payload contains the keys `moved`, `mode_before`, `mode_after`, `transition`, and `lizard_pos`,
-        - a subsequent predator-contact event was applied and its payload includes `damage`.
+        Sets the lizard to the spider's position, runs the predator update stage, and asserts that the context indicates no predator movement, that an event named "predator_update" exists with payload keys "moved", "mode_before", "mode_after", "transition", and "lizard_pos", and that a subsequent "predator_contact" event was applied whose payload includes "damage".
         """
         world = self._make_world(seed=31, lizard_move_interval=999999)
         context = self._build_context(world, "STAY")
@@ -277,8 +305,18 @@ class StageFunctionTest(unittest.TestCase):
         self.assertEqual(update_event.name, "predator_update")
         self.assertEqual(
             set(update_event.payload.keys()),
-            {"moved", "mode_before", "mode_after", "transition", "lizard_pos"},
+            {
+                "moved",
+                "mode_before",
+                "mode_after",
+                "transition",
+                "moved_each",
+                "transitions",
+                "lizard_pos",
+            },
         )
+        self.assertEqual(update_event.payload["moved_each"], [False])
+        self.assertEqual(update_event.payload["transitions"], [])
         predator_contact_event = next(
             event
             for event in context.event_log
@@ -286,7 +324,72 @@ class StageFunctionTest(unittest.TestCase):
         )
         self.assertIn("damage", predator_contact_event.payload)
 
+    def test_run_predator_update_stage_iterates_all_predator_controllers(self) -> None:
+        world = self._make_world(seed=33)
+        world.reset(
+            seed=33,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+        context = self._build_context(world, "STAY")
+
+        class StubController:
+            def __init__(self, predator_index: int, moved: bool, next_mode: str | None = None) -> None:
+                """
+                Initialize a stub predator controller for testing predator update behavior.
+                
+                Parameters:
+                    predator_index (int): Index of the predator this controller represents.
+                    moved (bool): Whether the controller's update should report the predator as having moved.
+                    next_mode (str | None): Optional predator mode to set during update; if None, mode is unchanged.
+                """
+                self.predator_index = predator_index
+                self.moved = moved
+                self.next_mode = next_mode
+                self.calls = 0
+
+            def update(self, stage_world: SpiderWorld) -> bool:
+                """
+                Record a controller update call, optionally set the predator's mode in the provided world, and report whether the predator moved.
+                
+                Parameters:
+                    stage_world (SpiderWorld): The world passed to the controller; if `next_mode` is set, the predator at `predator_index` in this world will have its `mode` overwritten.
+                
+                Returns:
+                    bool: `True` if this controller reports the predator moved, `False` otherwise.
+                """
+                self.calls += 1
+                if self.next_mode is not None:
+                    stage_world.get_predator(self.predator_index).mode = self.next_mode
+                return self.moved
+
+        first = StubController(0, moved=False)
+        second = StubController(1, moved=True, next_mode="ORIENT")
+        world.predator_controllers = [first, second]
+
+        stages.run_predator_update_stage(world, context)
+
+        self.assertEqual(first.calls, 1)
+        self.assertEqual(second.calls, 1)
+        self.assertTrue(context.predator_moved)
+        self.assertTrue(context.info["predator_moved"])
+        self.assertEqual(context.info["predator_moved_each"], [False, True])
+        self.assertEqual(
+            context.info["predator_transitions"],
+            [{"index": 1, "from": "PATROL", "to": "ORIENT"}],
+        )
+        update_event = next(event for event in context.event_log if event.stage == "predator_update")
+        self.assertEqual(update_event.payload["moved_each"], [False, True])
+        self.assertEqual(
+            update_event.payload["transitions"],
+            [{"index": 1, "from": "PATROL", "to": "ORIENT"}],
+        )
+
     def test_run_reward_stage_populates_distance_deltas_and_records_event(self) -> None:
+        """
+        Verifies that run_reward_stage populates distance delta information for food, shelter, and predator and records a corresponding event.
+        
+        Asserts that context.info["distance_deltas"] contains keys "food", "shelter", and "predator", that context.predator_visible_now is a boolean, and that an event named "distance_deltas" is present in the event log with payload keys "food", "shelter", and "predator".
+        """
         world = self._make_world(seed=37)
         context = self._build_context(world, "STAY")
 

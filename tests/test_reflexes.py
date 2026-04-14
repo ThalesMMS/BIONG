@@ -218,6 +218,209 @@ class SpiderReflexDecisionTest(unittest.TestCase):
 
         self.assertIsNone(self.brain._module_reflex_decision(result))
 
+    def test_alert_reflex_retreats_from_predator_trace_when_occluded(self) -> None:
+        """retreat_from_predator_trace fires when predator is occluded and a trace exists."""
+        result = self._module_result(
+            "alert_center",
+            predator_occluded=1.0,
+            predator_trace_dx=1.0,
+            predator_trace_dy=0.0,
+            predator_trace_strength=0.8,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.reason, "retreat_from_predator_trace")
+        # retreat direction is away from trace (dx=1.0 => move LEFT)
+        self.assertEqual(reflex.action, "MOVE_LEFT")
+
+    def test_alert_reflex_retreat_from_predator_trace_skipped_when_trace_strength_zero(self) -> None:
+        """retreat_from_predator_trace must NOT fire when predator_trace_strength == 0.0."""
+        result = self._module_result(
+            "alert_center",
+            predator_occluded=1.0,
+            predator_smell_strength=0.9,
+            predator_trace_dx=1.0,
+            predator_trace_dy=0.0,
+            predator_trace_strength=0.0,  # zero strength blocks the reflex
+        )
+
+        # With zero trace strength, the new guard prevents this branch from firing.
+        # The reflex may be None or may take an earlier branch (memory/escape); we only
+        # verify it does NOT produce the predator-trace reason.
+        reflex = self.brain._module_reflex_decision(result)
+        if reflex is not None:
+            self.assertNotEqual(reflex.reason, "retreat_from_predator_trace")
+
+    def test_alert_reflex_predator_trace_triggers_include_trace_fields(self) -> None:
+        """retreat_from_predator_trace reflex triggers must include trace fields."""
+        result = self._module_result(
+            "alert_center",
+            predator_smell_strength=0.9,
+            predator_trace_dx=0.0,
+            predator_trace_dy=1.0,
+            predator_trace_strength=0.6,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.reason, "retreat_from_predator_trace")
+        self.assertIn("predator_trace_dx", reflex.triggers)
+        self.assertIn("predator_trace_dy", reflex.triggers)
+        self.assertIn("predator_trace_strength", reflex.triggers)
+
+    def test_alert_reflex_predator_trace_does_not_include_home_vector(self) -> None:
+        """The predator-trace reflex must not reference home_dx or home_dy (removed fields)."""
+        result = self._module_result(
+            "alert_center",
+            predator_occluded=1.0,
+            predator_trace_dx=1.0,
+            predator_trace_dy=0.0,
+            predator_trace_strength=0.7,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.reason, "retreat_from_predator_trace")
+        self.assertNotIn("home_dx", reflex.triggers)
+        self.assertNotIn("home_dy", reflex.triggers)
+
+    def test_alert_reflex_predator_trace_fires_when_recent_pain(self) -> None:
+        """retreat_from_predator_trace fires on recent_pain when a trace exists."""
+        result = self._module_result(
+            "alert_center",
+            recent_pain=0.9,
+            predator_trace_dx=-1.0,
+            predator_trace_dy=0.0,
+            predator_trace_strength=0.5,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.reason, "retreat_from_predator_trace")
+
+    def test_alert_reflex_predator_trace_fires_when_recent_contact(self) -> None:
+        """retreat_from_predator_trace fires on recent_contact when a trace exists."""
+        result = self._module_result(
+            "alert_center",
+            recent_contact=0.9,
+            predator_trace_dx=0.0,
+            predator_trace_dy=-1.0,
+            predator_trace_strength=0.5,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.reason, "retreat_from_predator_trace")
+
+    def test_sleep_reflex_follows_shelter_trace_when_fatigued(self) -> None:
+        """follow_shelter_trace_to_rest fires when fatigued and a shelter trace exists."""
+        result = self._module_result(
+            "sleep_center",
+            fatigue=0.9,
+            hunger=0.1,
+            shelter_trace_dx=1.0,
+            shelter_trace_dy=0.0,
+            shelter_trace_strength=0.7,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.reason, "follow_shelter_trace_to_rest")
+        # direction toward trace (dx=1.0 => move RIGHT)
+        self.assertEqual(reflex.action, "MOVE_RIGHT")
+
+    def test_sleep_reflex_shelter_trace_skipped_when_trace_strength_zero(self) -> None:
+        """follow_shelter_trace_to_rest must NOT fire when shelter_trace_strength == 0.0."""
+        result = self._module_result(
+            "sleep_center",
+            fatigue=0.9,
+            sleep_debt=0.9,
+            hunger=0.1,
+            shelter_trace_dx=1.0,
+            shelter_trace_dy=0.0,
+            shelter_trace_strength=0.0,  # zero strength blocks the reflex
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+        if reflex is not None:
+            self.assertNotEqual(reflex.reason, "follow_shelter_trace_to_rest")
+
+    def test_sleep_reflex_shelter_trace_triggers_include_trace_fields(self) -> None:
+        """follow_shelter_trace_to_rest triggers must contain shelter trace fields."""
+        result = self._module_result(
+            "sleep_center",
+            fatigue=0.9,
+            hunger=0.1,
+            shelter_trace_dx=0.0,
+            shelter_trace_dy=1.0,
+            shelter_trace_strength=0.5,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.reason, "follow_shelter_trace_to_rest")
+        self.assertIn("shelter_trace_dx", reflex.triggers)
+        self.assertIn("shelter_trace_dy", reflex.triggers)
+        self.assertIn("shelter_trace_strength", reflex.triggers)
+
+    def test_sleep_reflex_shelter_trace_does_not_include_home_vector(self) -> None:
+        """The shelter-trace reflex must not reference home_dx or home_dy (removed fields)."""
+        result = self._module_result(
+            "sleep_center",
+            fatigue=0.9,
+            hunger=0.1,
+            shelter_trace_dx=1.0,
+            shelter_trace_dy=0.0,
+            shelter_trace_strength=0.6,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.reason, "follow_shelter_trace_to_rest")
+        self.assertNotIn("home_dx", reflex.triggers)
+        self.assertNotIn("home_dy", reflex.triggers)
+
+    def test_sleep_reflex_shelter_trace_fires_during_night(self) -> None:
+        """follow_shelter_trace_to_rest fires at night when a shelter trace exists."""
+        result = self._module_result(
+            "sleep_center",
+            night=1.0,
+            hunger=0.1,
+            shelter_trace_dx=-1.0,
+            shelter_trace_dy=0.0,
+            shelter_trace_strength=0.4,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.reason, "follow_shelter_trace_to_rest")
+
+    def test_sleep_reflex_shelter_trace_blocked_by_high_hunger(self) -> None:
+        """follow_shelter_trace_to_rest must not fire when hunger exceeds threshold."""
+        result = self._module_result(
+            "sleep_center",
+            fatigue=0.9,
+            night=1.0,
+            hunger=0.99,  # very hungry; blocks sleep-related movement
+            shelter_trace_dx=1.0,
+            shelter_trace_dy=0.0,
+            shelter_trace_strength=0.8,
+        )
+
+        reflex = self.brain._module_reflex_decision(result)
+        if reflex is not None:
+            self.assertNotEqual(reflex.reason, "follow_shelter_trace_to_rest")
+
     def test_auxiliary_gradients_use_recorded_reflex_target(self) -> None:
         custom_brain = SpiderBrain(
             seed=3,
@@ -282,12 +485,11 @@ class SpiderReflexDecisionTest(unittest.TestCase):
                 "predator_certainty": 0.9,
                 "predator_dx": 1.0,
                 "predator_dy": 0.0,
-                "predator_dist": 0.2,
+                "predator_motion_salience": 1.0,
             },
             action_context={
                 "predator_visible": 1.0,
                 "predator_certainty": 0.9,
-                "predator_dist": 0.2,
             },
         )
 
@@ -313,7 +515,6 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             action_context={
                 "predator_visible": 1.0,
                 "predator_certainty": 1.0,
-                "predator_dist": 0.2,
             },
         )
 
@@ -351,6 +552,15 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             monolithic_brain.act(observation, sample=False, policy_mode="reflex_only")
 
     def test_global_and_module_reflex_scales_multiply(self) -> None:
+        """
+        Verifies that global reflex scale and per-module reflex scale multiply to produce the effective reflex scale and that reflex strengths/auxiliary weights are scaled accordingly.
+        
+        Asserts that:
+        - The computed effective reflex scale for "alert_center" equals the product of the global reflex_scale and the module override (0.5 * 0.5 = 0.25).
+        - The reflex logit strength is base_logit_strength multiplied by the effective reflex scale.
+        - The reflex auxiliary weight is base_auxiliary_weight multiplied by the effective reflex scale.
+        - The auxiliary gradients dictionary contains an entry for "alert_center".
+        """
         brain = SpiderBrain(
             seed=17,
             module_dropout=0.0,
@@ -367,12 +577,11 @@ class SpiderReflexDecisionTest(unittest.TestCase):
                 "predator_certainty": 0.9,
                 "predator_dx": 1.0,
                 "predator_dy": 0.0,
-                "predator_dist": 0.2,
+                "predator_motion_salience": 1.0,
             },
             action_context={
                 "predator_visible": 1.0,
                 "predator_certainty": 0.9,
-                "predator_dist": 0.2,
             },
         )
 
@@ -417,7 +626,6 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             on_shelter=0.7,
             predator_visible=0.8,
             predator_certainty=0.9,
-            predator_dist=0.15,
             day=1.0,
             night=0.0,
             last_move_dx=-1.0,
@@ -467,14 +675,18 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             on_shelter=0.7,
             predator_visible=0.8,
             predator_certainty=0.9,
-            predator_dist=0.15,
             day=1.0,
             night=0.0,
             last_move_dx=-1.0,
             last_move_dy=1.0,
             shelter_role_level=0.5,
+            heading_dx=1.0,
+            heading_dy=0.0,
+            terrain_difficulty=0.4,
+            fatigue=0.2,
         )
-        action_intent = np.array([0.0, 1.0, 0.0, 0.0, 0.0], dtype=float)
+        action_intent = np.zeros(len(LOCOMOTION_ACTIONS), dtype=float)
+        action_intent[ACTION_TO_INDEX["MOVE_DOWN"]] = 1.0
         observation = {
             MOTOR_CONTEXT_INTERFACE.observation_key: MOTOR_CONTEXT_INTERFACE.vector_from_mapping(
                 motor_context_view.as_mapping()
@@ -706,12 +918,11 @@ class SpiderReflexDecisionTest(unittest.TestCase):
                 "predator_certainty": 0.95,
                 "predator_dx": 1.0,
                 "predator_dy": 0.0,
-                "predator_dist": 0.1,
+                "predator_motion_salience": 1.0,
             },
             action_context={
                 "predator_visible": 1.0,
                 "predator_certainty": 0.95,
-                "predator_dist": 0.1,
             },
         )
         decision = brain.act(observation, sample=False)
@@ -730,12 +941,11 @@ class SpiderReflexDecisionTest(unittest.TestCase):
                 "predator_certainty": 0.95,
                 "predator_dx": 1.0,
                 "predator_dy": 0.0,
-                "predator_dist": 0.1,
+                "predator_motion_salience": 1.0,
             },
             action_context={
                 "predator_visible": 1.0,
                 "predator_certainty": 0.95,
-                "predator_dist": 0.1,
             },
         )
         decision = brain.act(observation, sample=False)

@@ -11,13 +11,24 @@ from .budget_profiles import (
     CHECKPOINT_SELECTION_NAMES,
     canonical_budget_profile_names,
     resolve_budget,
+    resolve_budget_profile,
 )
+from .claim_tests import claim_test_names
 from .maps import MAP_TEMPLATE_NAMES
 from .noise import canonical_noise_profile_names
 from .operational_profiles import canonical_operational_profile_names
 from .scenarios import SCENARIO_NAMES
-from .simulation import CURRICULUM_PROFILE_NAMES, SpiderSimulation
+from .simulation import (
+    CHECKPOINT_PENALTY_MODE_NAMES,
+    CURRICULUM_PROFILE_NAMES,
+    EXPERIMENT_OF_RECORD_REGIME,
+    SpiderSimulation,
+)
+from .training_regimes import canonical_training_regime_names
 from .world import REWARD_PROFILES
+
+EXPERIMENT_OF_RECORD_CHECKPOINT_OVERRIDE_PENALTY = 1.0
+EXPERIMENT_OF_RECORD_CHECKPOINT_DOMINANCE_PENALTY = 1.0
 
 
 def _default_behavior_evaluation() -> dict[str, object]:
@@ -35,6 +46,7 @@ def _default_behavior_evaluation() -> dict[str, object]:
             "episode_count": 0,
             "scenario_success_rate": 0.0,
             "episode_success_rate": 0.0,
+            "competence_type": "mixed",
             "regressions": [],
         },
     }
@@ -46,37 +58,148 @@ def _ensure_behavior_evaluation(summary: dict[str, object]) -> None:
         summary["behavior_evaluation"] = _default_behavior_evaluation()
 
 
+def _collect_requested_scenarios(args: argparse.Namespace) -> list[str]:
+    """Collect the ordered set of explicitly requested behavior scenarios."""
+    requested_scenarios = list(args.scenario or [])
+    for name in args.behavior_scenario or []:
+        if name not in requested_scenarios:
+            requested_scenarios.append(name)
+    if args.scenario_suite or args.behavior_suite:
+        for name in SCENARIO_NAMES:
+            if name not in requested_scenarios:
+                requested_scenarios.append(name)
+    return requested_scenarios
+
+
+def _short_robustness_matrix_summary(
+    robustness_payload: dict[str, object],
+) -> dict[str, object]:
+    """
+    Create a condensed summary of a robustness-matrix payload for CLI display.
+    
+    Parameters:
+        robustness_payload (dict): Payload from a robustness analysis. Expected optional keys:
+            - "matrix_spec" (dict): may contain "train_conditions" and "eval_conditions" lists.
+            - "robustness_score", "diagonal_score", "off_diagonal_score"
+            - "train_marginals", "eval_marginals"
+    
+    Returns:
+        dict: Condensed fields for printing:
+            - "matrix_dimensions" (str): formatted as "{num_train}x{num_eval}".
+            - "matrix_spec" (dict): the matrix specification dictionary (or empty dict).
+            - "robustness_score", "diagonal_score", "off_diagonal_score": selected numeric metrics.
+            - "train_marginals", "eval_marginals": marginal statistics for train/eval conditions.
+    """
+    matrix_spec = robustness_payload.get("matrix_spec")
+    matrix_spec_dict = matrix_spec if isinstance(matrix_spec, dict) else {}
+    train_conditions = matrix_spec_dict.get("train_conditions")
+    eval_conditions = matrix_spec_dict.get("eval_conditions")
+    train_names = list(train_conditions) if isinstance(train_conditions, list) else []
+    eval_names = list(eval_conditions) if isinstance(eval_conditions, list) else []
+    return {
+        "matrix_dimensions": f"{len(train_names)}x{len(eval_names)}",
+        "matrix_spec": matrix_spec_dict,
+        "robustness_score": robustness_payload.get("robustness_score"),
+        "diagonal_score": robustness_payload.get("diagonal_score"),
+        "off_diagonal_score": robustness_payload.get("off_diagonal_score"),
+        "train_marginals": robustness_payload.get("train_marginals"),
+        "eval_marginals": robustness_payload.get("eval_marginals"),
+    }
+
+
+def _short_claim_test_suite_summary(
+    claim_test_payload: dict[str, object],
+) -> dict[str, object]:
+    """
+    Construct a condensed summary of a claim-test payload for CLI display.
+    
+    Parameters:
+        claim_test_payload (dict): Payload containing optional `claims` (mapping claim name -> claim result dict)
+            and `summary` (dict with aggregate counters).
+    
+    Returns:
+        dict: A compact payload with:
+            - `claims`: mapping of claim name to `{"passed": bool}` for each claim present,
+            - `claims_passed`: total passed count from the input summary (or None if absent),
+            - `claims_failed`: total failed count from the input summary (or None if absent),
+            - `all_primary_claims_passed`: boolean flag from the input summary (or None if absent).
+    """
+    claims = claim_test_payload.get("claims", {})
+    summary = claim_test_payload.get("summary", {})
+    claim_rows = claims if isinstance(claims, dict) else {}
+    summary_row = summary if isinstance(summary, dict) else {}
+    return {
+        "claims": {
+            name: (
+                {
+                    "passed": None,
+                    "skipped": True,
+                }
+                if bool(data.get("skipped")) or str(data.get("status")) == "skipped"
+                else {
+                    "passed": bool(data.get("passed", False)),
+                }
+            )
+            for name, data in claim_rows.items()
+            if isinstance(data, dict)
+        },
+        "claims_passed": summary_row.get("claims_passed"),
+        "claims_failed": summary_row.get("claims_failed"),
+        "claims_skipped": summary_row.get("claims_skipped"),
+        "all_primary_claims_passed": summary_row.get("all_primary_claims_passed"),
+    }
+
+
 def _default_checkpointing_summary(
     *,
     selection: str,
     metric: str,
     checkpoint_interval: int,
     selection_scenario_episodes: int,
+    override_penalty_weight: float = 0.0,
+    dominance_penalty_weight: float = 0.0,
+    penalty_mode: str = "tiebreaker",
 ) -> dict[str, object]:
     """
-    Builds the checkpointing metadata payload for inclusion in a run summary.
+    Build checkpoint-selection metadata for inclusion in a run summary.
     
     Parameters:
         selection (str): Checkpoint selection policy name; use "none" to disable checkpointing.
         metric (str): Metric name used to choose the selected checkpoint.
         checkpoint_interval (int): Number of episodes between generated checkpoints.
         selection_scenario_episodes (int): Episodes per scenario used when evaluating checkpoints for selection.
+        override_penalty_weight (float): Weight applied to an override penalty when ranking checkpoints.
+        dominance_penalty_weight (float): Weight applied to a dominance penalty when ranking checkpoints.
+        penalty_mode (str): Mode used to apply penalties (e.g., "tiebreaker" or "direct").
     
     Returns:
-        dict: Payload containing:
-            - `enabled` (bool): True if `selection` is not "none", False otherwise.
+        dict: A checkpointing payload containing:
+            - `enabled` (bool): True when `selection` is not "none".
             - `selection` (str): Echoes the provided selection policy.
             - `metric` (str): Echoes the provided metric name.
+            - `penalty_mode` (str): Echoes the provided penalty mode.
+            - `penalty_config` (dict): Penalty configuration with keys:
+                - `metric` (str)
+                - `override_penalty_weight` (float)
+                - `dominance_penalty_weight` (float)
+                - `penalty_mode` (str)
             - `checkpoint_interval` (int): Echoes the provided checkpoint interval.
             - `evaluation_source` (str): Always "behavior_suite".
             - `selection_scenario_episodes` (int): Echoes the provided episodes-per-scenario value.
             - `generated_checkpoints` (list): Initially empty list reserved for generated checkpoint records.
-            - `selected_checkpoint` (dict): Metadata for the chosen checkpoint (includes `scope` = "per_run").
+            - `selected_checkpoint` (dict): Metadata for the chosen checkpoint; includes `scope` set to "per_run".
     """
     return {
         "enabled": selection != "none",
         "selection": selection,
         "metric": metric,
+        "penalty_mode": penalty_mode,
+        "penalty_config": {
+            "metric": metric,
+            "override_penalty_weight": float(override_penalty_weight),
+            "dominance_penalty_weight": float(dominance_penalty_weight),
+            "penalty_mode": penalty_mode,
+        },
         "checkpoint_interval": checkpoint_interval,
         "evaluation_source": "behavior_suite",
         "selection_scenario_episodes": selection_scenario_episodes,
@@ -91,7 +214,16 @@ def _build_compare_training_kwargs(
     args: argparse.Namespace,
     budget,
 ) -> dict[str, object]:
-    """Collect shared runtime kwargs for training-regime comparisons."""
+    """
+    Builds a dictionary of shared training and evaluation keyword arguments used for comparing training regimes.
+    
+    Parameters:
+        args (argparse.Namespace): Parsed CLI arguments providing world dimensions, learning hyperparameters, profiles, and checkpoint options.
+        budget: Budget-like object with attributes `max_steps`, `episodes`, `eval_episodes`, `behavior_seeds`, `scenario_episodes`, and `checkpoint_interval` describing runtime sizing.
+    
+    Returns:
+        dict[str, object]: Mapping of runtime kwargs including world size (`width`, `height`, `food_count`, `day_length`, `night_length`, `max_steps`), training/evaluation sizing (`episodes`, `evaluation_episodes`, `episodes_per_scenario`, `checkpoint_interval`), learning hyperparameters (`gamma`, `module_lr`, `motor_lr`, `module_dropout`), profile selections (`reward_profile`, `map_template`, `operational_profile`, `noise_profile`, `budget_profile`, `curriculum_profile`), checkpoint controls (`checkpoint_selection`, `checkpoint_metric`, `checkpoint_override_penalty`, `checkpoint_dominance_penalty`, `checkpoint_penalty_mode`, `checkpoint_dir`), and `seeds` as a tuple of behavior seeds.
+    """
     return {
         "width": args.width,
         "height": args.height,
@@ -114,6 +246,9 @@ def _build_compare_training_kwargs(
         "episodes_per_scenario": budget.scenario_episodes,
         "checkpoint_selection": args.checkpoint_selection,
         "checkpoint_metric": args.checkpoint_metric,
+        "checkpoint_override_penalty": args.checkpoint_override_penalty,
+        "checkpoint_dominance_penalty": args.checkpoint_dominance_penalty,
+        "checkpoint_penalty_mode": args.checkpoint_penalty_mode,
         "checkpoint_interval": budget.checkpoint_interval,
         "checkpoint_dir": args.checkpoint_dir,
         "curriculum_profile": args.curriculum_profile,
@@ -157,12 +292,12 @@ def _parse_module_reflex_scales(values: list[str] | None) -> dict[str, float]:
 
 def build_parser() -> argparse.ArgumentParser:
     """
-    Create a preconfigured command-line parser for the SpiderSimulation CLI.
+    Builds the command-line argument parser for the SpiderSimulation CLI.
     
-    The parser includes options for training/evaluation sizing, world and map configuration, budget and operational/noise profiles, learning hyperparameters, reflex/module overrides, deterministic scenario and behavior evaluation (including ablations and comparisons), checkpointing controls, GUI/rendering, model load/save, and output persistence/debugging flags.
+    Configures options for training/evaluation sizing and budget, world and map configuration, reward/operational/noise profiles, learning hyperparameters and reflex/module overrides, deterministic scenarios and behavioral evaluation (including ablation, comparison, claim-test, and noise-robustness workflows), checkpointing controls, GUI/rendering, model load/save, and summary/trace/CSV persistence and debug flags.
     
     Returns:
-        argparse.ArgumentParser: Configured parser for the SpiderSimulation command-line interface.
+        argparse.ArgumentParser: A configured ArgumentParser for the SpiderSimulation command-line interface.
     """
     parser = argparse.ArgumentParser(
         description="Online reward-based training for independent cortical modules in a simulated spider."
@@ -179,8 +314,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=12, help="World width.")
     parser.add_argument("--height", type=int, default=12, help="World height.")
     parser.add_argument("--food-count", type=int, default=4, help="Number of active food sources.")
-    parser.add_argument("--day-length", type=int, default=36, help="Day length in ticks.")
-    parser.add_argument("--night-length", type=int, default=24, help="Night length in ticks.")
+    parser.add_argument("--day-length", type=int, default=18, help="Day length in ticks.")
+    parser.add_argument("--night-length", type=int, default=12, help="Night length in ticks.")
     parser.add_argument("--seed", type=int, default=7, help="Primary seed.")
     parser.add_argument(
         "--reward-profile",
@@ -222,11 +357,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Per-module override in module=scale format. Can be used multiple times.",
     )
-    parser.add_argument(
+    reflex_training_group = parser.add_mutually_exclusive_group()
+    reflex_training_group.add_argument(
         "--reflex-anneal-final-scale",
         type=float,
         default=None,
         help="Final reflex scale for linear annealing during training.",
+    )
+    reflex_training_group.add_argument(
+        "--training-regime",
+        choices=list(canonical_training_regime_names()),
+        default=None,
+        help="Named training regime for reflex annealing and late fine-tuning.",
+    )
+    parser.add_argument(
+        "--experiment-of-record",
+        action="store_true",
+        help=(
+            "Run the canonical no-reflex benchmark workflow: late fine-tuning, "
+            "best-checkpoint selection, and direct reflex-dependence penalties."
+        ),
     )
     parser.add_argument("--gamma", type=float, default=0.96, help="Online TD discount factor.")
     parser.add_argument("--summary", type=Path, default=None, help="JSON file path for writing the summary.")
@@ -302,6 +452,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compare the behavioral suite across map templates.",
     )
     parser.add_argument(
+        "--noise-robustness",
+        "--behavior-noise-robustness",
+        dest="noise_robustness",
+        action="store_true",
+        help="Train across canonical noise conditions and evaluate the full train-noise x eval-noise matrix.",
+    )
+    parser.add_argument(
         "--behavior-csv",
         type=Path,
         default=None,
@@ -324,6 +481,24 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(CHECKPOINT_METRIC_NAMES),
         default="scenario_success_rate",
         help="Metric used to choose the best checkpoint.",
+    )
+    parser.add_argument(
+        "--checkpoint-override-penalty",
+        type=float,
+        default=0.0,
+        help="Direct-mode penalty weight for final reflex override rate.",
+    )
+    parser.add_argument(
+        "--checkpoint-dominance-penalty",
+        type=float,
+        default=0.0,
+        help="Direct-mode penalty weight for mean reflex dominance.",
+    )
+    parser.add_argument(
+        "--checkpoint-penalty-mode",
+        choices=list(CHECKPOINT_PENALTY_MODE_NAMES),
+        default="tiebreaker",
+        help="How reflex-dependence penalties influence checkpoint ranking.",
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -362,6 +537,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compare the trained checkpoint against controls to measure evidence of learning.",
     )
     parser.add_argument(
+        "--claim-test-suite",
+        action="store_true",
+        help="Run the canonical claim-test suite that composes the core scientific comparisons.",
+    )
+    parser.add_argument(
+        "--claim-test",
+        action="append",
+        choices=list(claim_test_names()),
+        default=None,
+        help="Select an individual canonical claim test. Can be used multiple times.",
+    )
+    parser.add_argument(
         "--learning-evidence-long-budget-profile",
         choices=list(canonical_budget_profile_names()),
         default="report",
@@ -392,15 +579,58 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     """
-    Parse CLI arguments and run the requested SpiderSimulation workflows.
+    Parse command-line arguments and execute the requested SpiderSimulation workflows.
     
-    Builds and validates the CLI, resolves runtime budget and brain configuration, then either launches the GUI or executes headless workflows (training/evaluation, deterministic scenario evaluations, behavior and configuration comparisons, ablation analyses, learning-evidence comparisons, and curriculum comparisons). Manages checkpoint-selection metadata, optionally persists summary/trace/behavior-CSV/brain files, and prints either a condensed or full JSON report to stdout.
+    Builds and validates the CLI, resolves the runtime budget and brain configuration, then either launches the GUI or runs headless workflows including training/evaluation, deterministic scenario evaluations, behavior and configuration comparisons, ablation analyses, learning-evidence comparisons, claim-test suites, curriculum comparisons, and noise-robustness studies. Manages checkpoint-selection metadata, optionally persists summary/trace/behavior-CSV/brain files, and prints either a condensed or full JSON report to stdout.
     """
     parser = build_parser()
     args = parser.parse_args()
+    if args.claim_test and not args.claim_test_suite:
+        args.claim_test_suite = True
 
     if args.load_modules and not args.load_brain:
         parser.error("--load-modules requires --load-brain.")
+    if args.experiment_of_record:
+        if (
+            bool(args.module_reflex_scale)
+            or not math.isclose(
+                float(args.reflex_scale),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+        ):
+            parser.error(
+                "--experiment-of-record forbids custom reflex settings "
+                "(--reflex-scale/--module-reflex-scale); it selects "
+                f"{EXPERIMENT_OF_RECORD_REGIME!r} and applies checkpoint "
+                "penalties "
+                f"{EXPERIMENT_OF_RECORD_CHECKPOINT_OVERRIDE_PENALTY} "
+                "and "
+                f"{EXPERIMENT_OF_RECORD_CHECKPOINT_DOMINANCE_PENALTY}."
+            )
+        if args.reflex_anneal_final_scale is not None:
+            parser.error(
+                "--experiment-of-record cannot be combined with "
+                "--reflex-anneal-final-scale."
+            )
+        if args.training_regime not in (None, EXPERIMENT_OF_RECORD_REGIME):
+            parser.error(
+                "--experiment-of-record selects "
+                f"{EXPERIMENT_OF_RECORD_REGIME!r}; do not combine it with a "
+                "different --training-regime."
+            )
+        args.training_regime = EXPERIMENT_OF_RECORD_REGIME
+        args.checkpoint_selection = "best"
+        args.checkpoint_penalty_mode = "direct"
+        if float(args.checkpoint_override_penalty) == 0.0:
+            args.checkpoint_override_penalty = (
+                EXPERIMENT_OF_RECORD_CHECKPOINT_OVERRIDE_PENALTY
+            )
+        if float(args.checkpoint_dominance_penalty) == 0.0:
+            args.checkpoint_dominance_penalty = (
+                EXPERIMENT_OF_RECORD_CHECKPOINT_DOMINANCE_PENALTY
+            )
     if not math.isfinite(float(args.reflex_scale)):
         parser.error("--reflex-scale must be finite.")
     if (
@@ -408,6 +638,14 @@ def main() -> None:
         and not math.isfinite(float(args.reflex_anneal_final_scale))
     ):
         parser.error("--reflex-anneal-final-scale must be finite.")
+    for value, flag_name in (
+        (args.checkpoint_override_penalty, "--checkpoint-override-penalty"),
+        (args.checkpoint_dominance_penalty, "--checkpoint-dominance-penalty"),
+    ):
+        if not math.isfinite(float(value)):
+            parser.error(f"{flag_name} must be finite.")
+        if float(value) < 0.0:
+            parser.error(f"{flag_name} must be non-negative.")
 
     budget = resolve_budget(
         profile=args.budget_profile,
@@ -419,6 +657,29 @@ def main() -> None:
         behavior_seeds=args.behavior_seeds,
         ablation_seeds=args.ablation_seeds,
     )
+    if (
+        budget.requires_checkpoint_selection
+        and args.checkpoint_selection in (None, "none")
+    ):
+        parser.error(
+            f"Budget profile {budget.profile!r} requires checkpoint selection; "
+            "specify --checkpoint-selection best."
+        )
+    if (
+        args.learning_evidence
+        and args.learning_evidence_long_budget_profile is not None
+    ):
+        long_budget_profile = resolve_budget_profile(
+            args.learning_evidence_long_budget_profile
+        )
+        if (
+            long_budget_profile.requires_checkpoint_selection
+            and args.checkpoint_selection in (None, "none")
+        ):
+            parser.error(
+                f"Budget profile {long_budget_profile.name!r} requires checkpoint "
+                "selection; specify --checkpoint-selection best."
+            )
     try:
         module_reflex_scales = _parse_module_reflex_scales(args.module_reflex_scale)
     except ValueError as exc:
@@ -436,13 +697,21 @@ def main() -> None:
         unsupported_reflex_workflows.append(
             "--behavior-compare-profiles/--behavior-compare-maps"
         )
+    if args.noise_robustness:
+        unsupported_reflex_workflows.append("--noise-robustness")
     if args.ablation_suite or args.ablation_variant:
         unsupported_reflex_workflows.append("--ablation-suite/--ablation-variant")
+    if args.claim_test_suite:
+        unsupported_reflex_workflows.append("--claim-test-suite")
     if unsupported_reflex_workflows and (
-        custom_reflex_config_requested or args.reflex_anneal_final_scale is not None
+        custom_reflex_config_requested
+        or args.reflex_anneal_final_scale is not None
+        or args.training_regime is not None
     ):
         parser.error(
-            "Custom reflex flags are not supported with "
+            "Custom reflex flags, reflex annealing, and named training "
+            "regime / experiment-of-record settings (--training-regime/"
+            "--experiment-of-record) are not supported with "
             + ", ".join(unsupported_reflex_workflows)
             + "."
         )
@@ -487,6 +756,125 @@ def main() -> None:
         )
         return
 
+    if args.noise_robustness:
+        if args.trace is not None:
+            parser.error("--trace is not supported with --noise-robustness.")
+        if args.render_eval:
+            parser.error("--render-eval is not supported with --noise-robustness.")
+        if args.debug_trace:
+            parser.error("--debug-trace is not supported with --noise-robustness.")
+        if args.curriculum_profile != "none":
+            parser.error(
+                "--curriculum-profile is not supported with --noise-robustness."
+            )
+        if args.noise_profile != "none":
+            parser.error(
+                "--noise-profile is not supported with --noise-robustness."
+            )
+        for enabled, flag_name in (
+            (args.compare_profiles, "--compare-profiles"),
+            (args.compare_maps, "--compare-maps"),
+            (args.behavior_compare_profiles, "--behavior-compare-profiles"),
+            (args.behavior_compare_maps, "--behavior-compare-maps"),
+            (args.ablation_suite, "--ablation-suite"),
+            (bool(args.ablation_variant), "--ablation-variant"),
+            (args.learning_evidence, "--learning-evidence"),
+            (args.claim_test_suite, "--claim-test-suite"),
+        ):
+            if enabled:
+                parser.error(
+                    f"{flag_name} is not supported with --noise-robustness."
+                )
+        requested_scenarios = _collect_requested_scenarios(args)
+        robustness_payload, robustness_rows = SpiderSimulation.compare_noise_robustness(
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            reward_profile=args.reward_profile,
+            map_template=args.map_template,
+            operational_profile=args.operational_profile,
+            budget_profile=args.budget_profile,
+            seeds=tuple(budget.behavior_seeds),
+            names=requested_scenarios or None,
+            episodes_per_scenario=budget.scenario_episodes,
+            checkpoint_selection=args.checkpoint_selection,
+            checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir,
+            load_brain=args.load_brain,
+            load_modules=args.load_modules,
+            save_brain=args.save_brain,
+        )
+        behavior_evaluation = _default_behavior_evaluation()
+        behavior_evaluation["robustness_matrix"] = robustness_payload
+        summary = {
+            "config": {
+                "world": {
+                    "width": args.width,
+                    "height": args.height,
+                    "food_count": args.food_count,
+                    "day_length": args.day_length,
+                    "night_length": args.night_length,
+                    "max_steps": budget.max_steps,
+                    "reward_profile": args.reward_profile,
+                    "map_template": args.map_template,
+                },
+                "budget": budget.to_summary(),
+                "training_regime": {"name": "noise_robustness"},
+                "operational_profile": {"name": args.operational_profile},
+            },
+            "behavior_evaluation": behavior_evaluation,
+        }
+        if args.checkpoint_selection != "none":
+            summary["checkpointing"] = _default_checkpointing_summary(
+                selection=args.checkpoint_selection,
+                metric=args.checkpoint_metric,
+                checkpoint_interval=budget.checkpoint_interval,
+                selection_scenario_episodes=budget.selection_scenario_episodes,
+                override_penalty_weight=args.checkpoint_override_penalty,
+                dominance_penalty_weight=args.checkpoint_dominance_penalty,
+                penalty_mode=args.checkpoint_penalty_mode,
+            )
+        if args.summary is not None:
+            SpiderSimulation.save_summary(summary, args.summary)
+        if args.behavior_csv is not None:
+            SpiderSimulation.save_behavior_csv(robustness_rows, args.behavior_csv)
+        if args.full_summary:
+            print(json.dumps(summary, indent=2, ensure_ascii=False))
+            return
+        printable_behavior_evaluation = _default_behavior_evaluation()
+        printable_behavior_evaluation["robustness_matrix"] = (
+            _short_robustness_matrix_summary(robustness_payload)
+        )
+        print(
+            json.dumps(
+                {
+                    "reward_profile": args.reward_profile,
+                    "map_template": args.map_template,
+                    "budget_profile": budget.profile,
+                    "benchmark_strength": budget.benchmark_strength,
+                    "training_regime": {"name": "noise_robustness"},
+                    "operational_profile": args.operational_profile,
+                    "behavior_evaluation": printable_behavior_evaluation,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return
+
     sim = SpiderSimulation(
         width=args.width,
         height=args.height,
@@ -513,8 +901,11 @@ def main() -> None:
         print(f"Loaded modules: {loaded}")
 
     behavior_rows = []
+    ablation_payload: dict[str, object] | None = None
+    learning_evidence_payload: dict[str, object] | None = None
     ablation_active = bool(args.ablation_suite or args.ablation_variant)
     learning_evidence_active = bool(args.learning_evidence)
+    claim_test_suite_active = bool(args.claim_test_suite)
     checkpoint_selection_run = False
     behavior_flags_active = bool(
         args.behavior_scenario
@@ -525,14 +916,7 @@ def main() -> None:
 
     requested_scenarios = []
     if not ablation_active:
-        requested_scenarios = list(args.scenario or [])
-        for name in args.behavior_scenario or []:
-            if name not in requested_scenarios:
-                requested_scenarios.append(name)
-        if args.scenario_suite or args.behavior_suite:
-            for name in SCENARIO_NAMES:
-                if name not in requested_scenarios:
-                    requested_scenarios.append(name)
+        requested_scenarios = _collect_requested_scenarios(args)
 
     ablation_scenarios = []
     if ablation_active:
@@ -556,19 +940,38 @@ def main() -> None:
                 if name not in learning_evidence_scenarios:
                     learning_evidence_scenarios.append(name)
 
-    primary_checkpoint_selection = (
-        args.checkpoint_selection
-        if args.checkpoint_selection != "none" and behavior_flags_active and requested_scenarios
-        else "none"
-    )
+    claim_test_seeds: tuple[int, ...] | None = None
+    if budget.behavior_seeds and budget.ablation_seeds:
+        claim_test_seeds = tuple(
+            dict.fromkeys((*budget.behavior_seeds, *budget.ablation_seeds))
+        )
+    elif budget.behavior_seeds:
+        claim_test_seeds = tuple(budget.behavior_seeds)
+    elif budget.ablation_seeds:
+        claim_test_seeds = tuple(budget.ablation_seeds)
+
+    if args.experiment_of_record:
+        primary_checkpoint_selection = args.checkpoint_selection
+    else:
+        primary_checkpoint_selection = (
+            args.checkpoint_selection
+            if args.checkpoint_selection != "none"
+            and behavior_flags_active
+            and requested_scenarios
+            else "none"
+        )
     should_train_or_eval = (
         budget.episodes > 0
         or budget.eval_episodes > 0
         or primary_checkpoint_selection != "none"
     )
-    if args.reflex_anneal_final_scale is not None and not should_train_or_eval:
+    if (
+        args.reflex_anneal_final_scale is not None
+        or args.training_regime is not None
+    ) and not should_train_or_eval:
         parser.error(
-            "--reflex-anneal-final-scale requires a workflow that trains or evaluates the base brain."
+            "--reflex-anneal-final-scale/--training-regime requires a workflow "
+            "that trains or evaluates the base brain."
         )
     if should_train_or_eval:
         checkpoint_selection_run = primary_checkpoint_selection != "none"
@@ -580,12 +983,16 @@ def main() -> None:
             debug_trace=args.debug_trace,
             checkpoint_selection=primary_checkpoint_selection,
             checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir if primary_checkpoint_selection != "none" else None,
             checkpoint_scenario_names=requested_scenarios or list(SCENARIO_NAMES),
             selection_scenario_episodes=budget.selection_scenario_episodes,
             reflex_anneal_final_scale=args.reflex_anneal_final_scale,
             curriculum_profile=args.curriculum_profile,
+            training_regime=args.training_regime,
         )
     else:
         sim._set_runtime_budget(
@@ -665,6 +1072,9 @@ def main() -> None:
             episodes_per_scenario=budget.scenario_episodes,
             checkpoint_selection=args.checkpoint_selection,
             checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
         )
@@ -702,6 +1112,9 @@ def main() -> None:
             episodes_per_scenario=budget.scenario_episodes,
             checkpoint_selection=args.checkpoint_selection,
             checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
         )
@@ -736,12 +1149,54 @@ def main() -> None:
             episodes_per_scenario=budget.scenario_episodes,
             checkpoint_selection=args.checkpoint_selection,
             checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
         )
         _ensure_behavior_evaluation(summary)
         summary["behavior_evaluation"]["learning_evidence"] = learning_evidence_payload
         behavior_rows.extend(learning_evidence_rows)
+
+    if claim_test_suite_active:
+        checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
+        claim_test_payload, claim_test_rows = SpiderSimulation.run_claim_test_suite(
+            claim_tests=args.claim_test,
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            reward_profile=args.reward_profile,
+            map_template=args.map_template,
+            brain_config=base_brain_config,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+            budget_profile=args.budget_profile,
+            long_budget_profile=args.learning_evidence_long_budget_profile,
+            seeds=claim_test_seeds,
+            episodes_per_scenario=budget.scenario_episodes,
+            checkpoint_selection=args.checkpoint_selection,
+            checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir,
+            ablation_payload=ablation_payload,
+            learning_evidence_payload=learning_evidence_payload,
+        )
+        _ensure_behavior_evaluation(summary)
+        summary["behavior_evaluation"]["claim_tests"] = claim_test_payload
+        behavior_rows.extend(claim_test_rows)
 
     if (
         args.curriculum_profile != "none"
@@ -768,6 +1223,9 @@ def main() -> None:
             metric=args.checkpoint_metric,
             checkpoint_interval=budget.checkpoint_interval,
             selection_scenario_episodes=budget.selection_scenario_episodes,
+            override_penalty_weight=args.checkpoint_override_penalty,
+            dominance_penalty_weight=args.checkpoint_dominance_penalty,
+            penalty_mode=args.checkpoint_penalty_mode,
         )
 
     if args.summary is not None:
@@ -953,6 +1411,18 @@ def main() -> None:
                     for name, data in summary["behavior_evaluation"]["learning_evidence"]["conditions"].items()
                 },
             }
+        if "claim_tests" in summary["behavior_evaluation"]:
+            printable["behavior_evaluation"]["claim_tests"] = (
+                _short_claim_test_suite_summary(
+                    summary["behavior_evaluation"]["claim_tests"]
+                )
+            )
+        if "robustness_matrix" in summary["behavior_evaluation"]:
+            printable["behavior_evaluation"]["robustness_matrix"] = (
+                _short_robustness_matrix_summary(
+                    summary["behavior_evaluation"]["robustness_matrix"]
+                )
+            )
     if "checkpointing" in summary:
         printable["checkpointing"] = {
             "selection": summary["checkpointing"]["selection"],

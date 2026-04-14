@@ -29,6 +29,15 @@ class PerceptTrace:
 
 @dataclass
 class SpiderState:
+    """Physical, physiological, and perception-derived state for one spider.
+
+    Position, body metrics, counters, heading, and last movement describe the
+    spider's physical and physiological state. The four MemorySlot fields are
+    perception-derived cognitive state: they store TTL-bounded targets sourced
+    from local perception, contact events, or movement history.
+    """
+
+    # Physical position and body state.
     x: int
     y: int
     hunger: float
@@ -39,6 +48,8 @@ class SpiderState:
     recent_contact: float
     sleep_phase: str
     rest_streak: int
+
+    # Episode bookkeeping and learned-behavior counters.
     last_reward: float
     total_reward: float
     food_eaten: int
@@ -54,6 +65,8 @@ class SpiderState:
     last_move_dy: int
     heading_dx: int
     heading_dy: int
+
+    # Perception-derived cognitive state and short percept traces.
     food_memory: MemorySlot
     predator_memory: MemorySlot
     shelter_memory: MemorySlot
@@ -141,6 +154,9 @@ class TickContext:
     motor_noise_applied: bool
     snapshot: TickSnapshot
     reward_components: dict[str, float]
+    execution_difficulty: float = 0.0
+    execution_components: dict[str, float] = field(default_factory=dict)
+    motor_slip_info: dict[str, object] = field(default_factory=dict)
     info: dict[str, object] = field(default_factory=dict)
     event_log: list[TickEvent] = field(default_factory=list)
     moved: bool = False

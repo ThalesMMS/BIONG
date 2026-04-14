@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Iterable
+from math import atan2, degrees
+from typing import TYPE_CHECKING, Final, Iterable, Literal, Mapping, Protocol
 
 import numpy as np
 
@@ -18,10 +19,18 @@ from .interfaces import (
     SleepObservation,
     VisualObservation,
 )
-from .maps import BLOCKED, CLUTTER, NARROW
+from .maps import BLOCKED, CLUTTER, NARROW, OPEN
 
 if TYPE_CHECKING:
     from .world import SpiderWorld
+
+
+VisibilityZone = Literal["foveal", "peripheral", "outside"]
+
+
+class HasPosition(Protocol):
+    x: float
+    y: float
 
 
 @dataclass(frozen=True)
@@ -46,6 +55,16 @@ class PerceivedTarget:
 
 
 NO_TARGET_DISTANCE = 10**9
+DOMINANT_PREDATOR_TYPE_NONE = 0.0
+DOMINANT_PREDATOR_TYPE_VISUAL = 0.5
+DOMINANT_PREDATOR_TYPE_OLFACTORY = 1.0
+
+
+TERRAIN_DIFFICULTY: Final[Mapping[str, float]] = {
+    OPEN: 0.0,
+    CLUTTER: 0.4,
+    NARROW: 0.7,
+}
 
 
 def predator_motion_salience(
@@ -54,15 +73,31 @@ def predator_motion_salience(
     predator_view: PerceivedTarget | None = None,
 ) -> float:
     """
-    Return the explicit motion salience currently contributed by the predator.
+    Compute the motion salience contributed by a predator.
+    
+    Returns the world's configured predator motion bonus when the predator is perceived (the provided view indicates visibility or occlusion) and the predator's mode is "CHASE" or "INVESTIGATE"; otherwise returns 0.0. If no predator_view is provided or it has no position, the function falls back to the first available predator candidate.
+    
+    Parameters:
+        predator_view (PerceivedTarget | None): Optional perceived view of a predator; used to determine whether the predator is currently perceived and to locate the corresponding predator entity.
+    
+    Returns:
+        float: The motion salience value (the configured predator motion bonus) when conditions are met, `0.0` otherwise.
     """
     perceived = (
         predator_view is not None
         and (predator_view.visible > 0.0 or predator_view.occluded > 0.0)
     )
+    predator = (
+        _predator_for_position(world, predator_view.position)
+        if predator_view is not None and predator_view.position is not None
+        else None
+    )
+    if predator is None:
+        predators = _predator_candidates(world)
+        predator = predators[0] if predators else None
     return (
         float(world.operational_profile.perception["predator_motion_bonus"])
-        if perceived and world.lizard.mode in {"CHASE", "INVESTIGATE"}
+        if perceived and predator is not None and predator.mode in {"CHASE", "INVESTIGATE"}
         else 0.0
     )
 
@@ -84,40 +119,42 @@ OBSERVATION_LEAKAGE_AUDIT = {
     },
     "predator_dist": {
         "classification": "privileged_world_signal",
-        "risk": "high",
+        "risk": "resolved",
+        "status": "removed_from_observations",
         "modules": ["alert", "action_context", "motor_context"],
         "source": "spider_cortex_sim.perception.observe_world",
-        "evidence": "predator_dist_real = world.manhattan(world.spider_pos(), world.lizard_pos())",
-        "notes": "Uses the lizard's real position even when useful detection should depend on vision, smell, or memory.",
+        "evidence": "obs['meta']['diagnostic']['diagnostic_predator_dist']",
+        "notes": "Removed from network-facing observations and retained only as diagnostic metadata for leakage audits and offline analysis.",
     },
     "home_vector": {
         "classification": "world_derived_navigation_hint",
-        "risk": "high",
+        "risk": "resolved",
+        "status": "removed_from_observations",
         "modules": ["sleep", "alert"],
         "source": "spider_cortex_sim.perception.observe_world",
-        "evidence": "shelter_target = world.safest_shelter_target(); home_dx/home_dy/home_dist = world._relative(shelter_target)",
-        "notes": "Provides a ready-made direction toward safe shelter, which greatly shortens the navigation problem.",
+        "evidence": "obs['meta']['diagnostic'] contains diagnostic_home_dx, diagnostic_home_dy, and diagnostic_home_dist",
+        "notes": "Removed from network-facing observations and retained only as diagnostic metadata for leakage audits and offline analysis.",
     },
     "predator_memory_vector": {
-        "classification": "world_owned_memory",
-        "risk": "medium",
+        "classification": "plausible_memory",
+        "risk": "low",
         "modules": ["alert"],
         "source": "spider_cortex_sim.memory.refresh_memory + spider_cortex_sim.memory.memory_vector",
-        "notes": "Plausible as explicit memory, but the update remains world-owned rather than learned.",
+        "notes": "Derived from predator memory that is written only from visual perception or local contact events.",
     },
     "shelter_memory_vector": {
-        "classification": "world_owned_memory",
-        "risk": "high",
+        "classification": "plausible_memory",
+        "risk": "low",
         "modules": ["sleep"],
         "source": "spider_cortex_sim.memory.refresh_memory + spider_cortex_sim.memory.memory_vector",
-        "notes": "Inherits the target from safest_shelter_target and therefore can act as a persistent privileged waypoint.",
+        "notes": "Derived from shelter memory that stores perceived shelter cells rather than a world-selected best shelter.",
     },
     "escape_memory_vector": {
-        "classification": "world_owned_memory",
-        "risk": "medium",
+        "classification": "plausible_memory",
+        "risk": "low",
         "modules": ["alert"],
         "source": "spider_cortex_sim.memory.refresh_memory + spider_cortex_sim.memory.memory_vector",
-        "notes": "The escape route is derived from the world's last movement, without uncertainty or agent-driven selection.",
+        "notes": "Derived from movement history and world-boundary clamping without walkability or shelter-policy queries.",
     },
 }
 
@@ -147,24 +184,93 @@ def _clip_signed(value: float) -> float:
     return float(np.clip(value, -1.0, 1.0))
 
 
+def _fov_thresholds(world: "SpiderWorld") -> tuple[float, float]:
+    """
+    Compute configured field-of-view half-angle thresholds.
+    
+    Reads `fov_half_angle` (default 60.0) and `peripheral_half_angle` (default 90.0) from the world's perception configuration, clips each to the range [0.0, 180.0], and returns the foveal half-angle and the peripheral half-angle (the latter is at least the foveal value).
+    
+    Returns:
+        tuple[float, float]: (foveal_half_angle, peripheral_half_angle) in degrees.
+    """
+    cfg = world.operational_profile.perception
+    foveal_half_angle = float(np.clip(cfg.get("fov_half_angle", 60.0), 0.0, 180.0))
+    peripheral_half_angle = float(np.clip(cfg.get("peripheral_half_angle", 90.0), 0.0, 180.0))
+    return foveal_half_angle, max(foveal_half_angle, peripheral_half_angle)
+
+
+def _compute_target_visibility_zone(
+    world: "SpiderWorld",
+    source: tuple[int, int],
+    target: tuple[int, int],
+) -> VisibilityZone:
+    """
+    Classify a target into the spider's foveal, peripheral, or outside visual zone.
+    """
+    source = tuple(source)
+    target = tuple(target)
+    if source != world.spider_pos():
+        return "foveal"
+    heading_x = float(world.state.heading_dx)
+    heading_y = float(world.state.heading_dy)
+    if heading_x == 0.0 and heading_y == 0.0:
+        return "foveal"
+    rel_x = float(target[0] - source[0])
+    rel_y = float(target[1] - source[1])
+    if rel_x == 0 and rel_y == 0:
+        return "foveal"
+    cross = heading_x * rel_y - heading_y * rel_x
+    dot = heading_x * rel_x + heading_y * rel_y
+    angle = abs(degrees(atan2(cross, dot)))
+    foveal_half_angle, peripheral_half_angle = _fov_thresholds(world)
+    if angle <= foveal_half_angle:
+        return "foveal"
+    if angle <= peripheral_half_angle:
+        return "peripheral"
+    return "outside"
+
+
 def _heading_allows_target(
     world: "SpiderWorld",
     source: tuple[int, int],
     target: tuple[int, int],
 ) -> bool:
     """
-    Check whether a target falls inside the spider's forward-facing 180 degree FOV.
+    Determine whether the target lies within the spider's configured visual field (foveal or peripheral).
+    
+    Returns:
+        bool: True if the target is classified as inside the visual field, False if classified as "outside".
     """
-    if source != world.spider_pos():
-        return True
-    heading = (int(world.state.heading_dx), int(world.state.heading_dy))
-    if heading == (0, 0):
-        return True
-    rel_x = int(target[0] - source[0])
-    rel_y = int(target[1] - source[1])
-    if rel_x == 0 and rel_y == 0:
-        return True
-    return (heading[0] * rel_x + heading[1] * rel_y) >= 0
+    return _compute_target_visibility_zone(world, source, target) != "outside"
+
+
+def _apply_visibility_zone_certainty(
+    world: "SpiderWorld",
+    certainty: float,
+    zone: VisibilityZone,
+) -> float:
+    """
+    Adjusts a visual certainty value based on the target's visibility zone.
+    
+    Parameters:
+        certainty (float): Input certainty value (expected in [0.0, 1.0]) to be adjusted.
+        zone (VisibilityZone): Visibility zone of the target; one of "foveal", "peripheral", or "outside".
+    
+    Returns:
+        float: The adjusted certainty clipped to the range [0.0, 1.0]. Returns 0.0 when `zone` is "outside"; applies a configurable penalty when `zone` is "peripheral".
+    """
+    if zone == "outside":
+        return 0.0
+    if zone == "peripheral":
+        penalty = float(
+            np.clip(
+                world.operational_profile.perception.get("peripheral_certainty_penalty", 0.35),
+                0.0,
+                1.0,
+            )
+        )
+        certainty -= penalty
+    return float(np.clip(certainty, 0.0, 1.0))
 
 
 def _apply_visual_noise(world: "SpiderWorld", target: PerceivedTarget) -> PerceivedTarget:
@@ -316,12 +422,14 @@ def visibility_confidence(
     dist: int,
     radius: int,
     motion_bonus: float = 0.0,
+    visibility_zone: VisibilityZone = "foveal",
+    zone: VisibilityZone | None = None,
 ) -> float:
     """
     Compute a visibility certainty score for a target from a source location.
-    
-    The score starts from a distance-based falloff, then is adjusted by a motion bonus and penalties for target/source terrain and night; final value is clipped to the range [0.0, 1.0].
-    
+
+    The score starts from a distance-based falloff, then is adjusted by a motion bonus and penalties for target/source terrain, night, and visual zone; final value is clipped to the range [0.0, 1.0].
+
     Parameters:
         world (SpiderWorld): World context used to query terrain and time-of-day.
         source (tuple[int, int]): Grid coordinates of the observer.
@@ -329,7 +437,9 @@ def visibility_confidence(
         dist (int): Manhattan distance between source and target.
         radius (int): Effective sensing radius used to scale distance falloff.
         motion_bonus (float): Additive bonus for source or target motion (default 0.0).
-    
+        visibility_zone: Foveal/peripheral/outside visual zone for the target.
+        zone: Alias for visibility_zone. When provided, this takes precedence.
+
     Returns:
         float: Certainty in [0.0, 1.0] that the target is visible from the source.
     """
@@ -346,7 +456,8 @@ def visibility_confidence(
         certainty -= cfg["visibility_source_narrow_penalty"]
     if world.is_night():
         certainty -= cfg["visibility_night_penalty"]
-    return float(np.clip(certainty, 0.0, 1.0))
+    effective_zone = zone if zone is not None else visibility_zone
+    return _apply_visibility_zone_certainty(world, certainty, effective_zone)
 
 
 def line_cells(origin: tuple[int, int], target: tuple[int, int]) -> list[tuple[int, int]]:
@@ -434,40 +545,47 @@ def visible_object(
     apply_noise: bool = True,
 ) -> PerceivedTarget:
     """
-    Selects the nearest candidate within the Manhattan `radius` and returns its perceived metrics from the `origin` perspective.
+    Select the nearest candidate within Manhattan `radius` and return its perceived metrics from `origin`'s perspective.
     
-    Evaluates candidates in `positions` that lie within `radius` of `origin` (or the spider position when `origin` is None). If any candidates have line of sight, the nearest visible candidate is returned; otherwise the nearest occluded candidate is returned; if no candidates are within range, a "no target" perception is returned.
+    Examines `positions` within `radius` of `origin` (or the spider position when `origin` is None). Targets classified as `"outside"` by the field-of-view model are ignored. If any candidate with line of sight exists the nearest visible candidate is chosen; otherwise the nearest occluded candidate is chosen; if none are in range a "no target" perception is returned. The returned perception may be modified by visual noise when `apply_noise` is True.
     
     Parameters:
-        origin (tuple[int, int] | None): Source position for perception; when None, the spider position is used.
-        motion_bonus (float): Additive bonus applied to visibility confidence to reflect recent motion.
+        origin (tuple[int, int] | None): Observer position; when None use the spider position.
+        motion_bonus (float): Additive bonus to visibility confidence reflecting recent motion.
+        apply_noise (bool): When True, apply visual noise model to the produced PerceivedTarget.
     
     Returns:
-        PerceivedTarget: Perception summary for the selected candidate:
-            visible: `1.0` when the target's visibility certainty meets or exceeds the configured visibility threshold, `0.0` otherwise.
-            certainty: Confidence in the target's visibility (clipped to [0.0, 1.0]); for occluded targets this is a heuristic occlusion certainty.
-            occluded: `1.0` if the returned target was occluded, `0.0` otherwise.
-            dx, dy: Relative direction components from `origin` to the selected target; set to `0.0` when no visible target is reported.
+        PerceivedTarget: Summary of the selected candidate with fields:
+            visible: `1.0` if certainty meets or exceeds the configured visibility threshold, `0.0` otherwise.
+            certainty: Confidence in visibility (clipped to [0.0, 1.0]); for occluded targets a heuristic occlusion certainty.
+            occluded: `1.0` when the returned target was occluded, `0.0` otherwise.
+            dx, dy: Relative direction components from `origin` to the selected target (set to `0.0` when not visible).
             dist: Manhattan distance to the selected target, or `NO_TARGET_DISTANCE` when no candidate is found.
-            position: Exact selected grid cell, or `None` when no candidate is found.
+            position: Grid coordinates of the selected target, or `None` when no candidate is found.
     """
-    source = origin if origin is not None else world.spider_pos()
+    source = tuple(origin) if origin is not None else world.spider_pos()
     best_visible = None
+    best_visible_zone: VisibilityZone | None = None
     best_visible_dist = radius + 1
     best_occluded = None
+    best_occluded_zone: VisibilityZone | None = None
     best_occluded_dist = radius + 1
     for pos in positions:
+        pos = tuple(pos)
         dist = world.manhattan(source, pos)
         if dist > radius:
             continue
-        if not _heading_allows_target(world, source, pos):
+        visibility_zone = _compute_target_visibility_zone(world, source, pos)
+        if visibility_zone == "outside":
             continue
         if has_line_of_sight(world, source, pos):
             if dist < best_visible_dist or (dist == best_visible_dist and tuple(pos) < tuple(best_visible)):
                 best_visible = pos
+                best_visible_zone = visibility_zone
                 best_visible_dist = dist
         elif dist < best_occluded_dist or (dist == best_occluded_dist and tuple(pos) < tuple(best_occluded)):
             best_occluded = pos
+            best_occluded_zone = visibility_zone
             best_occluded_dist = dist
 
     cfg = world.operational_profile.perception
@@ -479,6 +597,7 @@ def visible_object(
             dist=best_visible_dist,
             radius=radius,
             motion_bonus=motion_bonus,
+            visibility_zone=best_visible_zone or "foveal",
         )
         visible = 1.0 if certainty >= cfg["visibility_binary_threshold"] else 0.0
         dx, dy, _ = world._relative(best_visible, origin=source)
@@ -502,9 +621,14 @@ def visible_object(
             cfg["occluded_certainty_base"]
             - cfg["occluded_certainty_decay_per_step"] * max(0, best_occluded_dist - 1),
         )
+        certainty = _apply_visibility_zone_certainty(
+            world,
+            certainty,
+            best_occluded_zone or "foveal",
+        )
         target = PerceivedTarget(
             visible=0.0,
-            certainty=float(np.clip(certainty, 0.0, 1.0)),
+            certainty=float(certainty),
             occluded=1.0,
             dx=0.0,
             dy=0.0,
@@ -579,22 +703,376 @@ def smell_gradient(
     )
 
 
-def lizard_detects_spider(world: "SpiderWorld") -> bool:
+def _predator_candidates(
+    world: "SpiderWorld",
+    predators: Iterable[object] | None = None,
+) -> list[object]:
     """
-    Determine whether the lizard detects the spider.
+    Return an explicit list of predator objects to consider for perception and threat calculations.
+
+    Parameters:
+        world: The SpiderWorld instance used as the fallback source of predators.
+        predators: Optional iterable of predator objects to use instead of the world's configured predators.
+
+    Returns:
+        A list of predator objects. If `predators` is provided, a list copy of its items is returned. Otherwise, the function returns `world.predators` if non-empty; if that is empty or missing, it returns a single-element list containing `world.lizard` when available; returns an empty list if no predators can be obtained.
+    """
+    if predators is not None:
+        return list(predators)
+    predator_list = list(getattr(world, "predators", []))
+    if predator_list:
+        return predator_list
+    try:
+        return [world.lizard]
+    except AttributeError:
+        return []
+
+
+def _predator_position(predator: HasPosition) -> tuple[int, int]:
+    """
+    Extract the predator's grid coordinates as integers.
     
-    Detection is false if the spider's shelter role is "deep", if the spider is beyond the lizard's effective detection range (the lizard's base range adjusted for recent spider motion, terrain penalties, and shelter-role penalties), or if there is no line of sight from the lizard to the spider. When in range and visible, a visibility certainty is computed (including an optional motion bonus) and reduced by an additional inside penalty when the spider is inside; detection occurs if that final certainty meets or exceeds the configured lizard detection threshold.
+    Parameters:
+        predator (HasPosition): An object exposing numeric `x` and `y` attributes.
     
     Returns:
-        `True` if the lizard's computed visibility certainty is at or above the configured detection threshold, `False` otherwise.
+        tuple[int, int]: The `(x, y)` grid coordinates cast to `int`.
+    """
+    return int(predator.x), int(predator.y)
+
+
+def _uses_world_level_profile(predator: object) -> bool:
+    """
+    Determine whether a predator should use the world-level fallback profile fields.
+    
+    Parameters:
+        predator (object): Object that may provide a `profile` attribute.
+    
+    Returns:
+        True when the predator has no explicit `profile`, False otherwise.
+    """
+    return getattr(predator, "profile", None) is None
+
+
+def _predator_profile_fields(world: "SpiderWorld", predator: object) -> dict[str, object]:
+    """
+    Builds a perception profile mapping for a predator, suitable for downstream detection and threat computations.
+    
+    Parameters:
+        world (SpiderWorld): World object providing operational perception defaults and lizard-based fallback values.
+        predator (object): Predator object which may have a `profile` attribute; if absent, world-level lizard defaults are used.
+    
+    Returns:
+        dict[str, object]: Mapping with the following keys:
+            - "name" (str): Predator name identifier.
+            - "vision_range" (int): Vision range in grid units.
+            - "smell_range" (int): Smell range in grid units.
+            - "detection_style" (str): Either "visual" or "olfactory".
+            - "move_interval" (int): Minimum move interval (at least 1).
+            - "detection_threshold" (float): Threshold used to determine detection.
+    """
+    cfg = world.operational_profile.perception
+    if _uses_world_level_profile(predator):
+        return {
+            "name": "lizard",
+            "vision_range": int(world.lizard_vision_range),
+            "smell_range": int(world.predator_smell_range),
+            "detection_style": "visual",
+            "move_interval": max(1, int(world.lizard_move_interval)),
+            "detection_threshold": float(cfg["lizard_detection_threshold"]),
+        }
+    profile = getattr(predator, "profile")
+    return {
+        "name": str(getattr(profile, "name", "predator")),
+        "vision_range": int(getattr(profile, "vision_range")),
+        "smell_range": int(getattr(profile, "smell_range")),
+        "detection_style": str(getattr(profile, "detection_style", "visual")),
+        "move_interval": max(1, int(getattr(profile, "move_interval", 1))),
+        "detection_threshold": float(getattr(profile, "detection_threshold", 0.0)),
+    }
+
+
+def _predator_detection_style(world: "SpiderWorld", predator: object) -> str:
+    """
+    Return the predator's detection style used for grouping (for example, "visual" or "olfactory").
+    
+    The value is read from the predator's profile when present; if the predator lacks a specific profile, world-level predator defaults are used.
+    
+    Parameters:
+        world: The world instance providing defaults and context.
+        predator: A predator object (or mapping) expected to contain a `profile` with a `detection_style` field.
+    
+    Returns:
+        detection_style (str): The detection style string (e.g., "visual" or "olfactory").
+    """
+    return str(_predator_profile_fields(world, predator)["detection_style"])
+
+
+def _predator_for_position(
+    world: "SpiderWorld",
+    position: tuple[int, int] | None,
+) -> object | None:
+    """
+    Return the predator object whose integer (x, y) position matches the given grid position.
+    
+    Parameters:
+        world (SpiderWorld): World context used to enumerate predator candidates.
+        position (tuple[int, int] | None): Grid (x, y) coordinates to match; if None, no lookup is performed.
+    
+    Returns:
+        object | None: The predator whose (x, y) equals `position`, or `None` if no match is found or `position` is None.
+    """
+    if position is None:
+        return None
+    for predator in _predator_candidates(world):
+        if _predator_position(predator) == tuple(position):
+            return predator
+    return None
+
+
+def _predator_visual_view(
+    world: "SpiderWorld",
+    predator: object,
+    *,
+    apply_noise: bool,
+) -> PerceivedTarget:
+    """
+    Obtain the visual perception of the given predator from its grid position.
+    
+    Parameters:
+        predator (object): Predator-like object exposing numeric `x` and `y` attributes used as the candidate position.
+        apply_noise (bool): If true, apply the world's visual noise model to the resulting percept.
+    
+    Returns:
+        PerceivedTarget: A perception record for the predator at its position as observed from the spider (may indicate no target if out of range or fully occluded).
+    """
+    return visible_object(
+        world,
+        [_predator_position(predator)],
+        radius=visible_range(world),
+        apply_noise=apply_noise,
+    )
+
+
+def _no_target_perceived_target() -> PerceivedTarget:
+    """Return a canonical no-target predator percept."""
+    return PerceivedTarget(
+        visible=0.0,
+        certainty=0.0,
+        occluded=0.0,
+        dx=0.0,
+        dy=0.0,
+        dist=NO_TARGET_DISTANCE,
+        position=None,
+    )
+
+
+def _normalized_proximity(dist: int, radius: int) -> float:
+    """
+    Compute a proximity score from a Manhattan distance relative to a sensing radius.
+    
+    Parameters:
+        dist (int): Manhattan distance to the target. A value >= NO_TARGET_DISTANCE indicates no target and yields 0.0.
+        radius (int): Sensing radius used to normalize proximity; treated as radius+1 in the denominator to avoid division by zero.
+    
+    Returns:
+        float: Proximity in the range [0.0, 1.0], where 1.0 corresponds to distance 0 and values decrease linearly to 0.0 as distance approaches or exceeds radius+1.
+    """
+    if dist >= NO_TARGET_DISTANCE:
+        return 0.0
+    return float(np.clip(1.0 - dist / float(max(1, radius + 1)), 0.0, 1.0))
+
+
+def _visual_threat_score(world: "SpiderWorld", view: PerceivedTarget) -> float:
+    """
+    Compute a normalized visual threat score for a perceived predator view.
+    
+    The score combines the view's certainty, proximity (relative to the world's visible range), and whether the predator is visible or occluded, using fixed weights, and is clipped to the range [0, 1].
+    
+    Parameters:
+        world (SpiderWorld): World context used to determine visible range for proximity normalization.
+        view (PerceivedTarget): Perceived predator view whose certainty, visibility/occlusion, and distance are used.
+    
+    Returns:
+        float: Threat score in [0.0, 1.0], where larger values indicate greater visual threat.
+    """
+    if view.position is None:
+        return 0.0
+    proximity = _normalized_proximity(view.dist, visible_range(world))
+    return float(
+        np.clip(
+            0.6 * float(view.certainty)
+            + 0.25 * proximity
+            + 0.15 * max(float(view.visible), float(view.occluded)),
+            0.0,
+            1.0,
+        )
+    )
+
+
+def _select_best_predator_view(
+    world: "SpiderWorld",
+    candidates: list[object],
+    *,
+    apply_noise: bool,
+) -> PerceivedTarget | None:
+    """
+    Select the most threatening predator from a list and return its visual percept.
+
+    Evaluates each candidate by computing the same visual percept that will be
+    returned to the caller and scoring it by (threat_score, certainty, -dist,
+    position). Returns the winner's already-computed view, or None if the
+    candidate list is empty.
+    """
+    best_predator = None
+    best_view = None
+    best_tie_break: tuple[float, float, float, tuple[int, int]] | None = None
+    for predator in candidates:
+        base_view = _predator_visual_view(world, predator, apply_noise=apply_noise)
+        tie_break = _predator_view_tie_break(world, predator, base_view)
+        if best_tie_break is None or tie_break > best_tie_break:
+            best_predator = predator
+            best_view = base_view
+            best_tie_break = tie_break
+    if best_predator is None:
+        return None
+    return best_view
+
+
+def _predator_view_tie_break(
+    world: "SpiderWorld",
+    predator: object,
+    view: PerceivedTarget,
+) -> tuple[float, float, float, tuple[int, int]]:
+    """Return the canonical tie-break tuple for predator visual views."""
+    return (
+        _visual_threat_score(world, view),
+        float(view.certainty),
+        -float(view.dist),
+        _predator_position(predator),
+    )
+
+
+def _sample_predator_views(
+    world: "SpiderWorld",
+    predators: Iterable[object] | None = None,
+    *,
+    apply_noise: bool,
+) -> dict[int, PerceivedTarget]:
+    """Sample each candidate predator's visual view exactly once."""
+    return {
+        id(predator): _predator_visual_view(world, predator, apply_noise=apply_noise)
+        for predator in _predator_candidates(world, predators)
+    }
+
+
+def _predator_views_by_type_from_sampled_views(
+    world: "SpiderWorld",
+    sampled_predator_views: Mapping[int, PerceivedTarget],
+    predators: Iterable[object] | None = None,
+) -> dict[str, PerceivedTarget]:
+    """Select the strongest sampled predator view for each detection style."""
+    best_views: dict[str, PerceivedTarget] = {}
+    best_tie_breaks: dict[str, tuple[float, float, float, tuple[int, int]]] = {}
+    for predator in _predator_candidates(world, predators):
+        view = sampled_predator_views.get(id(predator))
+        if view is None:
+            continue
+        detection_style = _predator_detection_style(world, predator)
+        tie_break = _predator_view_tie_break(world, predator, view)
+        if detection_style not in best_tie_breaks or tie_break > best_tie_breaks[detection_style]:
+            best_views[detection_style] = view
+            best_tie_breaks[detection_style] = tie_break
+    return best_views
+
+
+def predators_visible_to_spider(
+    world: "SpiderWorld",
+    predators: Iterable[object] | None = None,
+    *,
+    apply_noise: bool = True,
+) -> dict[str, PerceivedTarget]:
+    """
+    Selects the single most threatening predator percept for each detection style and returns them keyed by detection style.
+
+    For each detection style (e.g., "visual", "olfactory"), the function evaluates candidate predators and selects the predator with the highest visual threat score; ties are resolved by higher certainty, then by shorter Manhattan distance, then by predator position. The returned PerceivedTarget for each selected predator is produced with visual noise applied according to the `apply_noise` flag.
+
+    Parameters:
+        world (SpiderWorld): The world context used to evaluate perception and threat.
+        predators (Iterable[object] | None): Optional iterable of predator objects to consider. If None, the world's predator candidates are used.
+        apply_noise (bool): If True, apply the world's visual noise model to the returned PerceivedTarget objects; if False, return deterministic base views.
+
+    Returns:
+        dict[str, PerceivedTarget]: Mapping from detection style string to the selected PerceivedTarget for that style. Styles with no candidates are omitted.
+    """
+    sampled_predator_views = _sample_predator_views(
+        world,
+        predators,
+        apply_noise=apply_noise,
+    )
+    return _predator_views_by_type_from_sampled_views(
+        world,
+        sampled_predator_views,
+        predators,
+    )
+
+
+def _predator_view_from_views(
+    world: "SpiderWorld",
+    predator_views_by_type: Mapping[str, PerceivedTarget] | None,
+) -> PerceivedTarget:
+    """
+    Select the most threatening predator view from an already sampled per-type mapping.
+
+    This lets callers reuse the same noisy sampled views for both the single
+    predator percept and the per-type threat features without advancing visual
+    noise twice in the same tick.
+    """
+    if not predator_views_by_type:
+        return _no_target_perceived_target()
+
+    best_view: PerceivedTarget | None = None
+    best_tie_break: tuple[float, float, float, tuple[int, int]] | None = None
+    for view in predator_views_by_type.values():
+        position = view.position if view.position is not None else (-1, -1)
+        tie_break = (
+            _visual_threat_score(world, view),
+            float(view.certainty),
+            -float(view.dist),
+            position,
+        )
+        if best_tie_break is None or tie_break > best_tie_break:
+            best_view = view
+            best_tie_break = tie_break
+    return best_view if best_view is not None else _no_target_perceived_target()
+
+
+def predator_detects_spider(world: "SpiderWorld", predator: object) -> bool:
+    """
+    Determine whether a specific predator currently detects the spider.
     """
     cfg = world.operational_profile.perception
     shelter_role = world.shelter_role_at(world.spider_pos())
     if shelter_role == "deep":
         return False
-    dist = world.manhattan(world.spider_pos(), world.lizard_pos())
-    effective_range = world.lizard_vision_range
-    if world.state.last_move_dx != 0 or world.state.last_move_dy != 0:
+    profile = _predator_profile_fields(world, predator)
+    source = _predator_position(predator)
+    if profile["detection_style"] == "olfactory":
+        strength, _, _, _ = smell_gradient(
+            world,
+            [world.spider_pos()],
+            radius=max(1, int(profile["smell_range"])),
+            origin=source,
+            apply_noise=False,
+        )
+        if shelter_role == "inside":
+            strength -= float(cfg["lizard_detection_inside_penalty"])
+        return bool(float(strength) >= float(profile["detection_threshold"]))
+
+    dist = world.manhattan(world.spider_pos(), source)
+    effective_range = int(profile["vision_range"])
+    spider_is_moving = world.state.last_move_dx != 0 or world.state.last_move_dy != 0
+    if spider_is_moving:
         effective_range += round(cfg["lizard_detection_range_motion_bonus"])
     if world.terrain_at(world.spider_pos()) == CLUTTER:
         effective_range -= round(cfg["lizard_detection_range_clutter_penalty"])
@@ -604,45 +1082,156 @@ def lizard_detects_spider(world: "SpiderWorld") -> bool:
         effective_range -= round(cfg["lizard_detection_range_inside_penalty"])
     if dist > max(1, effective_range):
         return False
-    if not has_line_of_sight(world, world.lizard_pos(), world.spider_pos()):
+    if not has_line_of_sight(world, source, world.spider_pos()):
         return False
     certainty = visibility_confidence(
         world,
-        source=world.lizard_pos(),
+        source=source,
         target=world.spider_pos(),
         dist=dist,
         radius=max(1, effective_range),
-        motion_bonus=cfg["lizard_detection_motion_bonus"]
-        if world.state.last_move_dx != 0 or world.state.last_move_dy != 0
-        else 0.0,
+        motion_bonus=cfg["lizard_detection_motion_bonus"] if spider_is_moving else 0.0,
     )
     if shelter_role == "inside":
         certainty -= cfg["lizard_detection_inside_penalty"]
-    return bool(certainty >= cfg["lizard_detection_threshold"])
+    return bool(certainty >= float(profile["detection_threshold"]))
+
+
+def lizard_detects_spider(world: "SpiderWorld") -> bool:
+    """
+    Run the world's primary predator detection check for the spider.
+    
+    This is a backward-compatible wrapper that calls the generic predator detection logic
+    for the world's primary predator (`world.lizard`).
+    
+    Returns:
+        True if the primary predator detects the spider, False otherwise.
+    """
+    return predator_detects_spider(world, world.lizard)
 
 
 def predator_visible_to_spider(
     world: "SpiderWorld",
+    predators: Iterable[object] | None = None,
     *,
     apply_noise: bool = True,
 ) -> PerceivedTarget:
     """
-    Compute the spider's perception of the predator (lizard).
+    Select the single most threatening visible predator and return its visual percept.
+
+    Evaluates candidate predators (from the provided iterable or the world) by computing a base, noise-free visual view for each and scoring them by visual threat, certainty, distance, and position. The selected predator's visual view is returned with visual noise applied when requested.
+
+    Parameters:
+        world (SpiderWorld): The simulation world used to compute views and scoring.
+        predators (Iterable[object] | None): Optional iterable of predator objects to consider; if None, world predators are used.
+        apply_noise (bool): If True, apply the world's visual noise model to the returned percept.
+
+    Returns:
+        PerceivedTarget: The visual percept for the most threatening visible predator. If no predator is detected, returns a "no target" PerceivedTarget with zeros for perception fields and position set to None.
+    """
+    best = _select_best_predator_view(
+        world, _predator_candidates(world, predators), apply_noise=apply_noise
+    )
+    if best is None:
+        return _no_target_perceived_target()
+    return best
+
+
+def compute_per_type_threats(
+    world: "SpiderWorld",
+    *,
+    sampled_predator_views: Mapping[int, PerceivedTarget] | None = None,
+    predator_views_by_type: Mapping[str, PerceivedTarget] | None = None,
+) -> dict[str, float]:
+    """
+    Compute aggregated threat intensities for visual and olfactory predators and determine the dominant predator type.
+
+    The policy-facing threat values use the same noisy visual and olfactory
+    percepts as the observation view, so occlusion/noise affect these features
+    consistently with predator visibility and smell inputs.
     
     Returns:
-        PerceivedTarget: Describes the predator with fields:
-            - `visible`: `1.0` if the predator is considered visible (certainty >= configured visibility threshold), `0.0` otherwise.
-            - `certainty`: visibility confidence score in the range `[0.0, 1.0]`.
-            - `occluded`: `1.0` when the predator is only occluded, `0.0` otherwise.
-            - `dx`, `dy`: relative vector from the spider to the predator; set to `0.0` when not visible.
-            - `dist`: Manhattan distance to the predator.
+        dict[str, float]: Mapping with keys:
+            - "visual_predator_threat": float in [0,1] representing the maximum visual-threat score among visual predators.
+            - "olfactory_predator_threat": float in [0,1] representing the maximum olfactory-threat score among olfactory predators.
+            - "dominant_predator_type": numeric code identifying the dominant predator type; one of DOMINANT_PREDATOR_TYPE_NONE, DOMINANT_PREDATOR_TYPE_OLFACTORY, or DOMINANT_PREDATOR_TYPE_VISUAL.
     """
-    return visible_object(
-        world,
-        [world.lizard_pos()],
-        radius=visible_range(world),
-        apply_noise=apply_noise,
-    )
+    threats = {
+        "visual_predator_threat": 0.0,
+        "olfactory_predator_threat": 0.0,
+        "dominant_predator_type": DOMINANT_PREDATOR_TYPE_NONE,
+    }
+    predators = _predator_candidates(world)
+    if sampled_predator_views is None:
+        sampled_predator_views = _sample_predator_views(
+            world,
+            predators,
+            apply_noise=True,
+        )
+    if predator_views_by_type is None:
+        predator_views_by_type = _predator_views_by_type_from_sampled_views(
+            world,
+            sampled_predator_views,
+            predators,
+        )
+    for predator in predators:
+        profile = _predator_profile_fields(world, predator)
+        position = _predator_position(predator)
+        detection_style = str(profile["detection_style"])
+        distance = world.manhattan(world.spider_pos(), position)
+        visual_view = sampled_predator_views.get(id(predator))
+        if visual_view is None:
+            visual_view = (
+                predator_views_by_type.get(detection_style)
+                if predator_views_by_type is not None
+                else None
+            )
+        if visual_view is None:
+            visual_view = _predator_visual_view(world, predator, apply_noise=True)
+        if detection_style == "olfactory":
+            smell_strength, _, _, _ = smell_gradient(
+                world,
+                [position],
+                radius=max(1, int(profile["smell_range"])),
+            )
+            proximity = _normalized_proximity(distance, int(profile["smell_range"]))
+            confidence = max(float(smell_strength), 0.5 * float(visual_view.certainty))
+            threat_value = float(np.clip(0.55 * confidence + 0.45 * proximity, 0.0, 1.0))
+            threats["olfactory_predator_threat"] = max(
+                threats["olfactory_predator_threat"],
+                threat_value,
+            )
+        else:
+            proximity = _normalized_proximity(distance, int(profile["vision_range"]))
+            confidence = max(float(visual_view.certainty), float(visual_view.occluded))
+            threat_value = float(np.clip(0.55 * confidence + 0.45 * proximity, 0.0, 1.0))
+            threats["visual_predator_threat"] = max(
+                threats["visual_predator_threat"],
+                threat_value,
+            )
+
+    visual_threat = threats["visual_predator_threat"]
+    olfactory_threat = threats["olfactory_predator_threat"]
+    if visual_threat <= 0.0 and olfactory_threat <= 0.0:
+        threats["dominant_predator_type"] = DOMINANT_PREDATOR_TYPE_NONE
+    elif olfactory_threat > visual_threat:
+        threats["dominant_predator_type"] = DOMINANT_PREDATOR_TYPE_OLFACTORY
+    else:
+        threats["dominant_predator_type"] = DOMINANT_PREDATOR_TYPE_VISUAL
+    return threats
+
+
+def _unpack_trace_view(trace_view: dict[str, float]) -> tuple[float, float, float]:
+    """
+    Return the (dx, dy, strength) components from a trace-view mapping.
+    
+    Parameters:
+        trace_view (dict[str, float]): Mapping containing keys "dx", "dy", and "strength".
+    
+    Returns:
+        tuple[float, float, float]: A tuple (dx, dy, strength) converted to floats.
+    """
+    return float(trace_view["dx"]), float(trace_view["dy"]), float(trace_view["strength"])
 
 
 def serialize_observation_view(observation_key: str, view: ObservationView) -> np.ndarray:
@@ -671,21 +1260,31 @@ def build_visual_observation(
     shelter_trace_strength: float,
     predator_trace_strength: float,
     predator_motion_salience_value: float,
+    visual_predator_threat: float,
+    olfactory_predator_threat: float,
     day: float,
     night: float,
 ) -> VisualObservation:
     """
-    Create a VisualObservation by mapping perceived target metrics for food, shelter, and predator, and including day/night indicators.
+    Constructs a VisualObservation from perceived food, shelter, and predator targets plus heading, trace strengths, predator salience/threats, and day/night flags.
     
     Parameters:
-        food_view (PerceivedTarget): Perception tuple for the nearest food target; its fields populate the food_* observation fields.
-        shelter_view (PerceivedTarget): Perception tuple for the nearest shelter target; its fields populate the shelter_* observation fields.
-        predator_view (PerceivedTarget): Perception tuple for the predator; its fields populate the predator_* observation fields.
-        day (float): Day indicator value included in the observation.
-        night (float): Night indicator value included in the observation.
+        food_view (PerceivedTarget): Perception for the nearest food target; populates food_* fields.
+        shelter_view (PerceivedTarget): Perception for the nearest shelter target; populates shelter_* fields.
+        predator_view (PerceivedTarget): Perception for the predator; populates predator_* fields.
+        heading_dx (float): Heading x component included as heading_dx.
+        heading_dy (float): Heading y component included as heading_dy.
+        food_trace_strength (float): Trace strength value for food_trace_strength.
+        shelter_trace_strength (float): Trace strength value for shelter_trace_strength.
+        predator_trace_strength (float): Trace strength value for predator_trace_strength.
+        predator_motion_salience_value (float): Motion salience value included as predator_motion_salience.
+        visual_predator_threat (float): Visual predator threat score included as visual_predator_threat.
+        olfactory_predator_threat (float): Olfactory predator threat score included as olfactory_predator_threat.
+        day (float): Day indicator value included as day.
+        night (float): Night indicator value included as night.
     
     Returns:
-        VisualObservation: An observation whose `*_visible`, `*_certainty`, `*_occluded`, `*_dx`, and `*_dy` fields are taken from the corresponding PerceivedTarget inputs, and whose `day` and `night` fields are set from the provided values.
+        VisualObservation: Observation whose food_*, shelter_*, and predator_* perception fields are taken from the corresponding PerceivedTarget inputs, and which includes heading, trace strengths, predator salience/threats, and day/night values.
     """
     return VisualObservation(
         food_visible=food_view.visible,
@@ -709,6 +1308,8 @@ def build_visual_observation(
         shelter_trace_strength=shelter_trace_strength,
         predator_trace_strength=predator_trace_strength,
         predator_motion_salience=predator_motion_salience_value,
+        visual_predator_threat=visual_predator_threat,
+        olfactory_predator_threat=olfactory_predator_threat,
         day=day,
         night=night,
     )
@@ -769,21 +1370,7 @@ def build_hunger_observation(
     food_trace: tuple[float, float, float],
     food_memory: tuple[float, float, float],
 ) -> HungerObservation:
-    """
-    Builds a HungerObservation aggregating the agent's hunger state, immediate food perception, smell gradient, and remembered food memory.
-    
-    Parameters:
-        world (SpiderWorld): The world state used to read the current hunger value.
-        on_food (float): Indicator whether the agent is currently on a food cell (typically 0.0 or 1.0).
-        food_view (PerceivedTarget): Perceived target metrics for the nearest food (visibility, certainty, occlusion, relative dx/dy, distance).
-        food_smell_strength (float): Normalized smell strength for food (0.0-1.0).
-        food_smell_dx (float): Normalized x component of the food smell gradient.
-        food_smell_dy (float): Normalized y component of the food smell gradient.
-        food_memory (tuple[float, float, float]): Memory triple (dx, dy, age) representing the stored direction to remembered food and its age.
-    
-    Returns:
-        HungerObservation: Observation populated with hunger, on-food flag, food perception fields, smell gradient, and food memory fields.
-    """
+    """Build the hunger observation from food perception, smell, trace, and memory signals."""
     food_trace_dx, food_trace_dy, food_trace_strength = food_trace
     food_mem_dx, food_mem_dy, food_mem_age = food_memory
     return HungerObservation(
@@ -811,30 +1398,13 @@ def build_sleep_observation(
     *,
     on_shelter: float,
     night: float,
-    home_dx: float,
-    home_dy: float,
-    home_dist: float,
     sleep_phase_level: float,
     rest_streak_norm: float,
     shelter_role_level: float,
     shelter_trace: tuple[float, float, float],
     shelter_memory: tuple[float, float, float],
 ) -> SleepObservation:
-    """
-    Builds a SleepObservation populated from the world state and the provided shelter/home/sleep context.
-    
-    Parameters:
-        home_dx (float): x component of the vector from the agent to its home/shelter.
-        home_dy (float): y component of the vector from the agent to its home/shelter.
-        home_dist (float): distance from the agent to its home/shelter.
-        sleep_phase_level (float): normalized level of the current sleep phase.
-        rest_streak_norm (float): normalized streak of recent restful periods.
-        shelter_role_level (float): numeric level describing the agent's shelter role (e.g., open/exposed vs protected).
-        shelter_memory (tuple[float, float, float]): `(dx, dy, age)` memory tuple for the remembered shelter location.
-    
-    Returns:
-        SleepObservation: dataclass containing fatigue, hunger, on_shelter, night, home vector and distance, health, recent_pain, sleep phase/rest metrics, sleep_debt, shelter role level, and shelter memory fields populated from `world` and the provided arguments.
-    """
+    """Build the sleep observation from shelter state, circadian state, trace, and memory."""
     shelter_trace_dx, shelter_trace_dy, shelter_trace_strength = shelter_trace
     shelter_mem_dx, shelter_mem_dy, shelter_mem_age = shelter_memory
     return SleepObservation(
@@ -842,9 +1412,6 @@ def build_sleep_observation(
         hunger=world.state.hunger,
         on_shelter=on_shelter,
         night=night,
-        home_dx=home_dx,
-        home_dy=home_dy,
-        home_dist=home_dist,
         health=world.state.health,
         recent_pain=world.state.recent_pain,
         sleep_phase_level=sleep_phase_level,
@@ -864,11 +1431,11 @@ def build_alert_observation(
     world: "SpiderWorld",
     *,
     predator_view: PerceivedTarget,
-    predator_dist_norm: float,
     predator_smell_strength: float,
     predator_motion_salience_value: float,
-    home_dx: float,
-    home_dy: float,
+    visual_predator_threat: float,
+    olfactory_predator_threat: float,
+    dominant_predator_type: float,
     on_shelter: float,
     night: float,
     predator_trace: tuple[float, float, float],
@@ -876,38 +1443,43 @@ def build_alert_observation(
     escape_memory: tuple[float, float, float],
 ) -> AlertObservation:
     """
-    Builds an AlertObservation containing predator perception, smell and home vectors, recent sensory state, shelter/night flags, and memory entries.
+    Constructs an AlertObservation combining current predator perception, threat metrics, internal state, and trace/memory vectors.
     
     Parameters:
-        world (SpiderWorld): World state used only to read recent_pain and recent_contact.
-        predator_view (PerceivedTarget): Perceived predator metrics (visible, certainty, occluded, dx, dy, dist).
-        predator_dist_norm (float): Predator distance normalized for the observation vector.
-        predator_smell_strength (float): Smell gradient strength for the predator.
-        home_dx (float): Normalized x component of the home (shelter) direction.
-        home_dy (float): Normalized y component of the home (shelter) direction.
-        on_shelter (float): Indicator (0/1) whether the agent is on shelter.
-        night (float): Indicator (0/1) whether it is night.
-        predator_memory (tuple[float, float, float]): (dx, dy, age) memory triple for predator memory.
-        escape_memory (tuple[float, float, float]): (dx, dy, age) memory triple for escape memory.
+        predator_view (PerceivedTarget): Perceptual summary of the most relevant predator (visible/certainty/occluded/dx/dy).
+        predator_smell_strength (float): Olfactory signal strength for the predator at the spider (0-1).
+        predator_motion_salience_value (float): Motion-based salience bonus contributed by predator movement.
+        visual_predator_threat (float): Aggregated visual-threat score (0-1).
+        olfactory_predator_threat (float): Aggregated olfactory-threat score (0-1).
+        dominant_predator_type (float): Numeric encoding of the dominant predator detection type (none/visual/olfactory).
+        on_shelter (float): Indicator that the spider is on shelter (0 or 1).
+        night (float): Night indicator (0 or 1).
+        predator_trace (tuple[float, float, float]): Trace vector from predator sensing as (dx, dy, strength).
+        predator_memory (tuple[float, float, float]): Stored predator memory as (dx, dy, age).
+        escape_memory (tuple[float, float, float]): Stored escape memory as (dx, dy, age).
     
     Returns:
-        AlertObservation: Observation populated with predator perception fields, smell strength, home vector,
-        recent pain/contact values, shelter/night flags, and predator/escape memory triples.
+        AlertObservation: A populated AlertObservation containing predator perception fields, threat values, internal pain/contact state, shelter/night flags, predator trace and memory, and escape memory.
     """
     predator_trace_dx, predator_trace_dy, predator_trace_strength = predator_trace
     predator_mem_dx, predator_mem_dy, predator_mem_age = predator_memory
     escape_mem_dx, escape_mem_dy, escape_mem_age = escape_memory
+    dominant_predator_none = 1.0 if dominant_predator_type == DOMINANT_PREDATOR_TYPE_NONE else 0.0
+    dominant_predator_visual = 1.0 if dominant_predator_type == DOMINANT_PREDATOR_TYPE_VISUAL else 0.0
+    dominant_predator_olfactory = 1.0 if dominant_predator_type == DOMINANT_PREDATOR_TYPE_OLFACTORY else 0.0
     return AlertObservation(
         predator_visible=predator_view.visible,
         predator_certainty=predator_view.certainty,
         predator_occluded=predator_view.occluded,
         predator_dx=predator_view.dx,
         predator_dy=predator_view.dy,
-        predator_dist=predator_dist_norm,
         predator_smell_strength=predator_smell_strength,
         predator_motion_salience=predator_motion_salience_value,
-        home_dx=home_dx,
-        home_dy=home_dy,
+        visual_predator_threat=visual_predator_threat,
+        olfactory_predator_threat=olfactory_predator_threat,
+        dominant_predator_none=dominant_predator_none,
+        dominant_predator_visual=dominant_predator_visual,
+        dominant_predator_olfactory=dominant_predator_olfactory,
         recent_pain=world.state.recent_pain,
         recent_contact=world.state.recent_contact,
         on_shelter=on_shelter,
@@ -930,26 +1502,11 @@ def build_action_context_observation(
     on_food: float,
     on_shelter: float,
     predator_view: PerceivedTarget,
-    predator_dist_norm: float,
     day: float,
     night: float,
     shelter_role_level: float,
 ) -> ActionContextObservation:
-    """
-    Builds the action-center arbitration observation containing internal state, recent sensations, local affordances, predator signals, circadian flags, recent movement, and shelter/sleep indicators.
-    
-    Parameters:
-        on_food (float): Indicator (0.0-1.0) whether the agent is currently on food.
-        on_shelter (float): Indicator (0.0-1.0) whether the agent is currently on shelter.
-        predator_view (PerceivedTarget): Perceived predator data used for visibility and certainty.
-        predator_dist_norm (float): Normalized predator distance (0.0-1.0).
-        day (float): Day indicator (1.0 for day, 0.0 for night).
-        night (float): Night indicator (1.0 for night, 0.0 for day).
-        shelter_role_level (float): Numeric encoding of the agent's current shelter role.
-    
-    Returns:
-        ActionContextObservation: Observation populated with the arbitration context consumed by the action center.
-    """
+    """Build the action-center arbitration context from local state and perceived threat."""
     return ActionContextObservation(
         hunger=world.state.hunger,
         fatigue=world.state.fatigue,
@@ -960,7 +1517,6 @@ def build_action_context_observation(
         on_shelter=on_shelter,
         predator_visible=predator_view.visible,
         predator_certainty=predator_view.certainty,
-        predator_dist=predator_dist_norm,
         day=day,
         night=night,
         last_move_dx=float(world.state.last_move_dx),
@@ -976,38 +1532,33 @@ def build_motor_context_observation(
     on_food: float,
     on_shelter: float,
     predator_view: PerceivedTarget,
-    predator_dist_norm: float,
     day: float,
     night: float,
     shelter_role_level: float,
 ) -> MotorContextObservation:
+    """Build the motor execution context used to execute the action-center intent.
+
+    The context includes local embodiment signals so the motor stage can see
+    body orientation, terrain movement cost, and fatigue.
     """
-    Assembles the motor execution context consumed by the motor cortex correction stage.
-    
-    Returns:
-        MotorContextObservation: observation containing:
-            - on_food: provided on-food flag
-            - on_shelter: provided on-shelter flag
-            - predator_visible: visibility value from `predator_view`
-            - predator_certainty: certainty value from `predator_view`
-            - predator_dist: provided normalized predator distance
-            - day: provided day indicator
-            - night: provided night indicator
-            - last_move_dx: most recent horizontal move from world state
-            - last_move_dy: most recent vertical move from world state
-            - shelter_role_level: provided shelter role level
-    """
+    terrain_difficulty = TERRAIN_DIFFICULTY.get(
+        world.terrain_at(world.spider_pos()),
+        0.0,
+    )
     return MotorContextObservation(
         on_food=on_food,
         on_shelter=on_shelter,
         predator_visible=predator_view.visible,
         predator_certainty=predator_view.certainty,
-        predator_dist=predator_dist_norm,
         day=day,
         night=night,
         last_move_dx=float(world.state.last_move_dx),
         last_move_dy=float(world.state.last_move_dy),
         shelter_role_level=shelter_role_level,
+        heading_dx=float(world.state.heading_dx),
+        heading_dy=float(world.state.heading_dy),
+        terrain_difficulty=terrain_difficulty,
+        fatigue=world.state.fatigue,
     )
 
 
@@ -1023,14 +1574,12 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
     Returns:
         dict[str, object]: A dictionary containing:
             - Serialized observation vectors keyed by view name: "visual", "sensory", "hunger", "sleep", "alert", "action_context", "motor_context". "motor_extra" is provided as a copy of "motor_context" for compatibility.
-            - "meta": a dict of diagnostic fields including nearest distances (food, shelter, predator), predator distance used for perception, day/night flags, on_shelter/on_food booleans, predator visibility flag, lizard position and mode, shelter role and terrain at the spider, phase and sleep metrics, heading, configured profiles, predator motion salience, per-vision PerceivedTarget entries under "vision", perceptual trace views under "percept_traces", memory vectors with TTLs under "memory_vectors", and individual memory ages (or None when absent).
+            - "meta": a dict of diagnostic fields including nearest distances, diagnostic-only privileged values under "diagnostic", day/night flags, on_shelter/on_food booleans, predator visibility flag, lizard position and mode, shelter role and terrain at the spider, phase and sleep metrics, heading, configured profiles, predator motion salience, per-vision PerceivedTarget entries under "vision", perceptual trace views under "percept_traces", memory vectors with TTLs under "memory_vectors", and individual memory ages (or None when absent).
     """
     from .memory import MEMORY_TTLS, memory_vector
 
     _, food_dist = world.nearest(world.food_positions)
-    shelter_target = world.safest_shelter_target()
     _, shelter_dist = world.nearest(world.shelter_cells)
-    home_dx, home_dy, home_dist = world._relative(shelter_target)
     phase_sin, phase_cos = world.phase_features()
     day = 0.0 if world.is_night() else 1.0
     night = 1.0 - day
@@ -1046,22 +1595,25 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
     food_trace_view = world._trace_view(world.state.food_trace)
     shelter_trace_view = world._trace_view(world.state.shelter_trace)
     predator_trace_view = world._trace_view(world.state.predator_trace)
-    food_trace_dx = float(food_trace_view["dx"])
-    food_trace_dy = float(food_trace_view["dy"])
-    food_trace_strength = float(food_trace_view["strength"])
-    shelter_trace_dx = float(shelter_trace_view["dx"])
-    shelter_trace_dy = float(shelter_trace_view["dy"])
-    shelter_trace_strength = float(shelter_trace_view["strength"])
-    predator_trace_dx = float(predator_trace_view["dx"])
-    predator_trace_dy = float(predator_trace_view["dy"])
-    predator_trace_strength = float(predator_trace_view["strength"])
+    food_trace_dx, food_trace_dy, food_trace_strength = _unpack_trace_view(food_trace_view)
+    shelter_trace_dx, shelter_trace_dy, shelter_trace_strength = _unpack_trace_view(shelter_trace_view)
+    predator_trace_dx, predator_trace_dy, predator_trace_strength = _unpack_trace_view(predator_trace_view)
 
-    food_view = visible_object(world, world.food_positions, radius=visible_range(world))
-    shelter_view = visible_object(world, world.shelter_cells, radius=visible_range(world))
-    predator_view = predator_visible_to_spider(world)
+    vision_radius = visible_range(world)
+    food_view = visible_object(world, world.food_positions, radius=vision_radius)
+    shelter_view = visible_object(world, world.shelter_cells, radius=vision_radius)
+    sampled_predator_views = _sample_predator_views(world, apply_noise=True)
+    predator_views_by_type = _predator_views_by_type_from_sampled_views(
+        world,
+        sampled_predator_views,
+    )
+    predator_view = _predator_view_from_views(world, predator_views_by_type)
+    per_type_threats = compute_per_type_threats(
+        world,
+        sampled_predator_views=sampled_predator_views,
+        predator_views_by_type=predator_views_by_type,
+    )
     motion_salience = predator_motion_salience(world, predator_view=predator_view)
-    predator_dist_real = world.manhattan(world.spider_pos(), world.lizard_pos())
-    predator_dist_norm = min(1.0, predator_dist_real / float(world.width + world.height))
 
     food_smell_strength, food_smell_dx, food_smell_dy, _ = smell_gradient(
         world,
@@ -1070,7 +1622,7 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
     )
     predator_smell_strength, predator_smell_dx, predator_smell_dy, _ = smell_gradient(
         world,
-        [world.lizard_pos()],
+        world.predator_positions(),
         radius=world.predator_smell_range,
     )
 
@@ -1089,6 +1641,8 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         shelter_trace_strength=shelter_trace_strength,
         predator_trace_strength=predator_trace_strength,
         predator_motion_salience_value=motion_salience,
+        visual_predator_threat=per_type_threats["visual_predator_threat"],
+        olfactory_predator_threat=per_type_threats["olfactory_predator_threat"],
         day=day,
         night=night,
     )
@@ -1116,9 +1670,6 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         world,
         on_shelter=on_shelter,
         night=night,
-        home_dx=home_dx,
-        home_dy=home_dy,
-        home_dist=home_dist,
         sleep_phase_level=sleep_phase,
         rest_streak_norm=rest_norm,
         shelter_role_level=shelter_role_level,
@@ -1128,11 +1679,11 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
     alert_observation = build_alert_observation(
         world,
         predator_view=predator_view,
-        predator_dist_norm=predator_dist_norm,
         predator_smell_strength=predator_smell_strength,
         predator_motion_salience_value=motion_salience,
-        home_dx=home_dx,
-        home_dy=home_dy,
+        visual_predator_threat=per_type_threats["visual_predator_threat"],
+        olfactory_predator_threat=per_type_threats["olfactory_predator_threat"],
+        dominant_predator_type=per_type_threats["dominant_predator_type"],
         on_shelter=on_shelter,
         night=night,
         predator_trace=(predator_trace_dx, predator_trace_dy, predator_trace_strength),
@@ -1144,7 +1695,6 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         on_food=on_food,
         on_shelter=on_shelter,
         predator_view=predator_view,
-        predator_dist_norm=predator_dist_norm,
         day=day,
         night=night,
         shelter_role_level=shelter_role_level,
@@ -1154,7 +1704,6 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         on_food=on_food,
         on_shelter=on_shelter,
         predator_view=predator_view,
-        predator_dist_norm=predator_dist_norm,
         day=day,
         night=night,
         shelter_role_level=shelter_role_level,
@@ -1177,10 +1726,33 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         if obs[key].shape != (dim,):
             raise ValueError(f"Observation '{key}' expected shape {(dim,)}, received {obs[key].shape}")
 
+    # Diagnostic-only privileged values are kept out of network-facing observations
+    # but remain available here for audits and offline inspection.
+    predator_positions = world.predator_positions()
+    diagnostic_predator_dist = min(
+        (world.manhattan(world.spider_pos(), position) for position in predator_positions),
+        default=NO_TARGET_DISTANCE,
+    )
+    diagnostic_home_dx, diagnostic_home_dy, diagnostic_home_dist = world._relative(
+        world.safest_shelter_target()
+    )
+    dominant_type_value = float(per_type_threats["dominant_predator_type"])
+    if dominant_type_value == DOMINANT_PREDATOR_TYPE_VISUAL:
+        dominant_type_label = "visual"
+    elif dominant_type_value == DOMINANT_PREDATOR_TYPE_OLFACTORY:
+        dominant_type_label = "olfactory"
+    else:
+        dominant_type_label = "none"
+
     obs["meta"] = {
         "food_dist": food_dist,
         "shelter_dist": shelter_dist,
-        "predator_dist": predator_dist_real,
+        "diagnostic": {
+            "diagnostic_predator_dist": diagnostic_predator_dist,
+            "diagnostic_home_dx": diagnostic_home_dx,
+            "diagnostic_home_dy": diagnostic_home_dy,
+            "diagnostic_home_dist": diagnostic_home_dist,
+        },
         "predator_dist_visible": predator_view.dist,
         "night": bool(night),
         "day": bool(day),
@@ -1205,11 +1777,26 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         "noise_profile": world.noise_profile.name,
         "heading": {"dx": int(world.state.heading_dx), "dy": int(world.state.heading_dy)},
         "predator_motion_salience": motion_salience,
+        "visual_predator_threat": per_type_threats["visual_predator_threat"],
+        "olfactory_predator_threat": per_type_threats["olfactory_predator_threat"],
+        "dominant_predator_type": dominant_type_value,
+        "dominant_predator_type_label": dominant_type_label,
         "vision": {
             "food": asdict(food_view),
             "shelter": asdict(shelter_view),
             "predator": asdict(predator_view),
+            "predators_by_type": {
+                style: asdict(view)
+                for style, view in predator_views_by_type.items()
+            },
         },
+        "predators": [
+            {
+                "index": idx,
+                **asdict(predator),
+            }
+            for idx, predator in enumerate(_predator_candidates(world))
+        ],
         "percept_traces": {
             "food": food_trace_view,
             "shelter": shelter_trace_view,

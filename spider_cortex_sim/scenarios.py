@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Dict, Mapping, Sequence
 
+from .interfaces import ACTION_DELTAS
+from .maps import build_map_template
 from .metrics import (
     BehaviorCheckSpec,
     BehavioralEpisodeScore,
@@ -10,11 +12,24 @@ from .metrics import (
     build_behavior_check,
     build_behavior_score,
 )
-from .predator import LizardState
+from .predator import (
+    LizardState,
+    OLFACTORY_HUNTER_PROFILE,
+    VISUAL_HUNTER_PROFILE,
+)
 from .world import SpiderWorld
 
 
 BehaviorScoreFn = Callable[[EpisodeStats, Sequence[Dict[str, object]]], BehavioralEpisodeScore]
+
+TRACE_MAP_WIDTH_FALLBACK = 12
+TRACE_MAP_HEIGHT_FALLBACK = 12
+FAST_VISUAL_HUNTER_PROFILE = replace(
+    VISUAL_HUNTER_PROFILE,
+    name="fast_visual_hunter",
+    move_interval=1,
+    detection_threshold=0.45,
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +79,52 @@ def _safe_lizard_cell(world: SpiderWorld) -> tuple[int, int]:
     return candidates[0] if candidates else (world.width - 1, world.height - 1)
 
 
+def _food_visible_from_cell(
+    world: SpiderWorld,
+    source: tuple[int, int],
+    food: tuple[int, int],
+) -> bool:
+    """Return whether `food` is visibly detectable from `source`."""
+    radius = world._visible_range()
+    distance = world.manhattan(source, food)
+    if distance > radius or not world._has_line_of_sight(source, food):
+        return False
+    threshold = float(world.operational_profile.perception["visibility_binary_threshold"])
+    confidence = world._visibility_confidence(
+        source=source,
+        target=food,
+        dist=distance,
+        radius=radius,
+    )
+    return bool(confidence >= threshold)
+
+
+def _first_food_visible_frontier(
+    world: SpiderWorld,
+    spider: tuple[int, int],
+    food: tuple[int, int],
+) -> list[tuple[int, int]]:
+    """Return the nearest walkable cells where the spider first sees `food`."""
+    visited = {spider}
+    frontier = [spider]
+    while frontier:
+        visible_frontier = [
+            cell for cell in frontier if _food_visible_from_cell(world, cell, food)
+        ]
+        if visible_frontier:
+            return visible_frontier
+        next_frontier: list[tuple[int, int]] = []
+        for cell in frontier:
+            for dx, dy in world.move_deltas:
+                candidate = (cell[0] + dx, cell[1] + dy)
+                if candidate in visited or not world.is_walkable(candidate):
+                    continue
+                visited.add(candidate)
+                next_frontier.append(candidate)
+        frontier = next_frontier
+    return []
+
+
 def _entrance_ambush_cell(world: SpiderWorld, entrance: tuple[int, int]) -> tuple[int, int]:
     """
     Selects a walkable cell adjacent to a shelter entrance for placing the lizard, preferring cells closest to the entrance.
@@ -89,6 +150,43 @@ def _entrance_ambush_cell(world: SpiderWorld, entrance: tuple[int, int]) -> tupl
     return _safe_lizard_cell(world)
 
 
+def _open_field_foraging_food_cell(
+    world: SpiderWorld,
+    deep: tuple[int, int],
+) -> tuple[int, int]:
+    """
+    Choose a food spawn intended for open-field foraging that is reachable from the given deep shelter and biased toward an exposed direction.
+    
+    Parameters:
+        world (SpiderWorld): The world containing map template and distance utilities.
+        deep (tuple[int, int]): Coordinates of the deep shelter interior used as the foraging origin.
+    
+    Returns:
+        tuple[int, int]: Coordinates of the selected food spawn cell.
+    """
+    food_spawns = list(world.map_template.food_spawn_cells)
+    candidates = [
+        cell
+        for cell in food_spawns
+        if 4 <= world.manhattan(cell, deep) <= 6
+        and cell[0] > deep[0]
+        and abs(cell[1] - deep[1]) > abs(cell[0] - deep[0])
+    ]
+    if candidates:
+        return min(
+            candidates,
+            key=lambda cell: (
+                abs(world.manhattan(cell, deep) - 5),
+                cell[1],
+                cell[0],
+            ),
+        )
+    return sorted(
+        food_spawns,
+        key=lambda cell: -world.manhattan(cell, deep),
+    )[0]
+
+
 def _teleport_spider(
     world: SpiderWorld,
     position: tuple[int, int],
@@ -96,11 +194,23 @@ def _teleport_spider(
     reset_heading: bool = True,
 ) -> None:
     """
-    Reposition the spider and optionally restore its default heading.
+    Set the spider's map coordinates to `position` and, if requested, reset its heading.
+    
+    Parameters:
+        position (tuple[int, int]): Target (x, y) cell coordinates to place the spider.
+        reset_heading (bool): If True, call the world's heading reset routine after teleporting; if False, preserve the current heading.
     """
     world.state.x, world.state.y = position
     if reset_heading:
         world._reset_heading_after_teleport()
+
+
+def _set_predators(world: SpiderWorld, predators: Sequence[LizardState]) -> None:
+    """Replace the world's predator roster and refresh controllers."""
+    if not predators:
+        raise ValueError("At least one predator is required.")
+    world.predators = list(predators)
+    world._sync_predator_controllers()
 
 
 def _night_rest(world: SpiderWorld) -> None:
@@ -167,9 +277,9 @@ def _entrance_ambush(world: SpiderWorld) -> None:
 
 def _open_field_foraging(world: SpiderWorld) -> None:
     """
-    Set up the world state for the open-field foraging scenario.
+    Configure the world for the open-field foraging scenario.
     
-    Places the spider in a deep shelter, sets tick to 2 and the spider's hunger (0.88), fatigue (0.22), and sleep debt (0.20); selects a single food spawn farthest from the spider; places the lizard at a safe patrol spawn; and refreshes world memory with initial=True.
+    Places the spider in a deep shelter, advances the tick to the early-foraging phase, sets physiology (hunger, fatigue, sleep debt) to values that encourage foraging, places a single food spawn positioned to encourage exposed foraging near the deep shelter, spawns a distant patrolling predator, and refreshes the world's memory for the scenario start.
     """
     deep = _first_cell(world.shelter_deep_cells or world.shelter_interior_cells or world.shelter_entrance_cells)
     world.tick = 2
@@ -177,11 +287,7 @@ def _open_field_foraging(world: SpiderWorld) -> None:
     world.state.hunger = 0.88
     world.state.fatigue = 0.22
     world.state.sleep_debt = 0.20
-    far_food = sorted(
-        world.map_template.food_spawn_cells,
-        key=lambda cell: -world.manhattan(cell, deep),
-    )[0]
-    world.food_positions = [far_food]
+    world.food_positions = [_open_field_foraging_food_cell(world, deep)]
     lx, ly = _safe_lizard_cell(world)
     world.lizard = LizardState(x=lx, y=ly, mode="PATROL")
     world.refresh_memory(initial=True)
@@ -291,23 +397,46 @@ def _two_shelter_tradeoff(world: SpiderWorld) -> None:
 
 def _exposed_day_foraging(world: SpiderWorld) -> None:
     """
-    Set up an exposed daytime foraging scenario by configuring the world state and entities.
+    Configure the world for the exposed-day foraging scenario.
     
-    Mutates the given SpiderWorld in place: places the spider in a shelter cell (preferring deep, then interior, then entrance), sets the time to the start of day and scenario-specific hunger, fatigue, and sleep debt, spawns a single food at the food-spawn cell farthest from the spider, places a lizard at the lizard-spawn cell closest to that food in "PATROL" mode, and refreshes the world's memory.
-    
-    Parameters:
-        world (SpiderWorld): The world instance to configure; modified in place.
+    Teleports the spider into a shelter, sets the tick to the start of day and scenario-specific hunger, fatigue, and sleep-debt values, places a single food at the food-spawn cell farthest from the spider, spawns a lizard in `PATROL` at the lizard-spawn cell nearest that food while preferring walkable cells separated from the spider's first food-visible frontier (with all lizard-walkable cells as a fallback), and refreshes the world's memory.
     """
-    deep = _first_cell(world.shelter_deep_cells or world.shelter_interior_cells or world.shelter_entrance_cells)
+    spider = _first_cell(world.shelter_deep_cells or world.shelter_interior_cells or world.shelter_entrance_cells)
     world.tick = 1
-    _teleport_spider(world, deep)
+    _teleport_spider(world, spider)
     world.state.hunger = 0.94
     world.state.fatigue = 0.16
     world.state.sleep_debt = 0.18
-    world.food_positions = [max(world.map_template.food_spawn_cells, key=lambda cell: world.manhattan(cell, deep))]
+    world.food_positions = [max(world.map_template.food_spawn_cells, key=lambda cell: world.manhattan(cell, spider))]
+    food = world.food_positions[0]
+    lizard_candidates = [
+        cell
+        for cell in world.map_template.lizard_spawn_cells
+        if world.is_lizard_walkable(cell)
+    ]
+    if not lizard_candidates:
+        lizard_candidates = [
+            (x, y)
+            for x in range(world.width)
+            for y in range(world.height)
+            if world.is_lizard_walkable((x, y))
+        ]
+    if not lizard_candidates:
+        raise ValueError("exposed_day_foraging requires a lizard-walkable cell")
+    spider_frontier = _first_food_visible_frontier(world, spider, food)
+    # Refine separated_candidates from lizard_candidates with world.manhattan
+    # as a threat-radius heuristic around food and the first food-visible frontier.
+    separated_candidates = [
+        cell for cell in lizard_candidates if world.manhattan(cell, food) >= 3
+    ]
+    frontier_candidates = [
+        cell
+        for cell in separated_candidates
+        if all(world.manhattan(cell, frontier_cell) >= 3 for frontier_cell in spider_frontier)
+    ]
     lizard_spawn = min(
-        world.map_template.lizard_spawn_cells,
-        key=lambda cell: world.manhattan(cell, world.food_positions[0]),
+        frontier_candidates or separated_candidates or lizard_candidates,
+        key=lambda cell: world.manhattan(cell, food),
     )
     world.lizard = LizardState(x=lizard_spawn[0], y=lizard_spawn[1], mode="PATROL")
     world.refresh_memory(initial=True)
@@ -315,12 +444,9 @@ def _exposed_day_foraging(world: SpiderWorld) -> None:
 
 def _food_deprivation(world: SpiderWorld) -> None:
     """
-    Configure the world for a food-deprivation scenario with the spider sheltered and acutely hungry.
+    Configure a SpiderWorld for the food-deprivation scenario.
     
-    Mutates `world` in place: places the spider in a shelter and adjusts tick and physiological state to represent acute hunger, sets a single food spawn at the farthest food spawn from the spider, positions a lizard in "PATROL" at a safe spawn, and refreshes world memory with `initial=True`.
-    
-    Parameters:
-        world (SpiderWorld): The world instance to mutate for the scenario.
+    Places the spider in a shelter deep cell, sets the tick and physiological state to represent acute hunger, selects a single reachable-but-distant food spawn (preferentially choosing a food at Manhattan distance 4-6 from the spider, with fallbacks to distance >=4 or the farthest spawn), places a lizard in PATROL at a safe spawn, and refreshes world memory with initial=True.
     """
     deep = _first_cell(world.shelter_deep_cells or world.shelter_interior_cells or world.shelter_entrance_cells)
     world.tick = 4
@@ -328,11 +454,26 @@ def _food_deprivation(world: SpiderWorld) -> None:
     world.state.hunger = FOOD_DEPRIVATION_INITIAL_HUNGER
     world.state.fatigue = 0.22
     world.state.sleep_debt = 0.18
-    far_food = sorted(
+    # Timing/geometry calibration: at hunger 0.96 the death timer is roughly
+    # 12-15 ticks, so food must be reachable enough to test learned commitment.
+    distance_ranked_food = sorted(
         world.map_template.food_spawn_cells,
-        key=lambda cell: -world.manhattan(cell, deep),
-    )[0]
-    world.food_positions = [far_food]
+        key=lambda cell: (world.manhattan(cell, deep), cell[0], cell[1]),
+    )
+    calibrated_food = [
+        cell
+        for cell in distance_ranked_food
+        if 4 <= world.manhattan(cell, deep) <= 6
+    ]
+    if calibrated_food:
+        food = min(calibrated_food, key=lambda cell: (-world.manhattan(cell, deep), cell[0], cell[1]))
+    else:
+        safe_default = distance_ranked_food[-1] if distance_ranked_food else None
+        food = next(
+            (cell for cell in distance_ranked_food if world.manhattan(cell, deep) >= 4),
+            safe_default,
+        )
+    world.food_positions = [] if food is None else [food]
     lx, ly = _safe_lizard_cell(world)
     world.lizard = LizardState(x=lx, y=ly, mode="PATROL")
     world.refresh_memory(initial=True)
@@ -411,9 +552,9 @@ SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT = 0.92
 
 def _sleep_vs_exploration_conflict(world: SpiderWorld) -> None:
     """
-    Set up a night-time scenario that prioritizes sleep over exploration.
+    Create a night-time scenario that biases behavior toward sleep rather than exploration.
     
-    Places the spider at the shelter entrance, advances the clock to night, sets low hunger, high fatigue, and an elevated sleep debt, spawns a distant food source to discourage exploration, positions a non-threatening lizard on a safe patrol cell, and refreshes the world's memory.
+    Teleports the spider to the shelter entrance, advances the world clock to night, sets low hunger, high fatigue, and an elevated sleep debt, places a distant food spawn to discourage foraging, spawns a non-threatening patrol predator at a safe patrol cell, and refreshes the world's memory.
     """
     entrance = _first_cell(world.shelter_entrance_cells or world.shelter_interior_cells)
     far_food = sorted(
@@ -428,6 +569,213 @@ def _sleep_vs_exploration_conflict(world: SpiderWorld) -> None:
     world.food_positions = [far_food]
     lx, ly = _safe_lizard_cell(world)
     world.lizard = LizardState(x=lx, y=ly, mode="PATROL")
+    world.refresh_memory(initial=True)
+
+
+def _visual_olfactory_pincer(world: SpiderWorld) -> None:
+    """
+    Place the spider between a visible visual hunter and a hidden olfactory hunter and configure the world for the visual/olfactory pincer scenario.
+    
+    Sets the spider position and heading, initializes hunger/fatigue/sleep levels, places a single food target biased by x-coordinate, spawns one visual-hunter and one olfactory-hunter LizardState at nearby candidate cells, and refreshes world memory.
+    """
+    open_cells = sorted(
+        cell
+        for cell in world.map_template.traversable_cells
+        if cell not in world.shelter_cells
+    )
+    preferred_spider = (6, 6)
+    spider = (
+        preferred_spider
+        if preferred_spider in open_cells
+        else open_cells[len(open_cells) // 2]
+    )
+    world.tick = 2
+    _teleport_spider(world, spider, reset_heading=False)
+    world.state.heading_dx, world.state.heading_dy = 1, 0
+    world.state.hunger = 0.52
+    world.state.fatigue = 0.20
+    world.state.sleep_debt = 0.18
+    world.food_positions = [
+        max(
+            world.map_template.food_spawn_cells,
+            key=lambda cell: (cell[0], -abs(cell[1] - spider[1])),
+        )
+    ]
+
+    visual_candidates = [
+        cell
+        for cell in ((spider[0] + 2, spider[1]), (spider[0] + 3, spider[1]), (spider[0] + 2, spider[1] - 1))
+        if 0 <= cell[0] < world.width
+        and 0 <= cell[1] < world.height
+        and world.is_lizard_walkable(cell)
+    ]
+    if not visual_candidates:
+        visual_candidates = sorted(
+            (
+                cell
+                for cell in open_cells
+                if world.is_lizard_walkable(cell)
+                and cell != spider
+            ),
+            key=lambda cell: (
+                abs(world.manhattan(cell, spider) - 2),
+                -cell[0],
+                abs(cell[1] - spider[1]),
+            ),
+        )
+    visual_pos = visual_candidates[0]
+
+    olfactory_candidates = [
+        cell
+        for cell in (
+            (spider[0] - 2, spider[1] + 1),
+            (spider[0] - 2, spider[1]),
+            (spider[0] - 3, spider[1] + 1),
+            (spider[0] - 1, spider[1] + 2),
+            (spider[0] - 1, spider[1] + 3),
+        )
+        if 0 <= cell[0] < world.width
+        and 0 <= cell[1] < world.height
+        and world.is_lizard_walkable(cell)
+        and cell != visual_pos
+    ]
+    if not olfactory_candidates:
+        olfactory_candidates = sorted(
+            (
+                cell
+                for cell in open_cells
+                if world.is_lizard_walkable(cell)
+                and cell not in {spider, visual_pos}
+            ),
+            key=lambda cell: (
+                abs(world.manhattan(cell, spider) - 2),
+                cell[0],
+                abs(cell[1] - spider[1]),
+            ),
+        )
+    olfactory_pos = olfactory_candidates[0]
+
+    _set_predators(
+        world,
+        [
+            LizardState(
+                x=visual_pos[0],
+                y=visual_pos[1],
+                mode="PATROL",
+                profile=VISUAL_HUNTER_PROFILE,
+            ),
+            LizardState(
+                x=olfactory_pos[0],
+                y=olfactory_pos[1],
+                mode="PATROL",
+                profile=OLFACTORY_HUNTER_PROFILE,
+            ),
+        ],
+    )
+    world.refresh_memory(initial=True)
+
+
+def _olfactory_ambush(world: SpiderWorld) -> None:
+    """
+    Position the spider facing inward in its shelter and place a single olfactory predator waiting outside the entrance.
+    
+    Sets the world tick and the spider's heading and physiological state (hunger, fatigue, sleep debt), teleports the spider to an interior shelter cell, sets a single food spawn at the map cell farthest from that interior cell, and spawns one olfactory-mode predator in WAIT mode outside the entrance (preferring the entrance-adjacent cell when walkable, otherwise using a fallback ambush cell). Refreshes the world's memory after initialization.
+    """
+    interior = _first_cell(world.shelter_interior_cells or world.shelter_deep_cells)
+    entrance = _first_cell(world.shelter_entrance_cells)
+    world.tick = 2
+    _teleport_spider(world, interior, reset_heading=False)
+    world.state.heading_dx, world.state.heading_dy = -1, 0
+    world.state.hunger = 0.34
+    world.state.fatigue = 0.28
+    world.state.sleep_debt = 0.26
+    world.food_positions = [
+        max(world.map_template.food_spawn_cells, key=lambda cell: world.manhattan(cell, interior))
+    ]
+    preferred_predator = (entrance[0] + 1, entrance[1])
+    predator_pos = (
+        preferred_predator
+        if world.is_lizard_walkable(preferred_predator)
+        else _entrance_ambush_cell(world, entrance)
+    )
+    _set_predators(
+        world,
+        [
+            LizardState(
+                x=predator_pos[0],
+                y=predator_pos[1],
+                mode="WAIT",
+                wait_target=entrance,
+                failed_chases=1,
+                profile=OLFACTORY_HUNTER_PROFILE,
+            )
+        ],
+    )
+    world.refresh_memory(initial=True)
+
+
+def _visual_hunter_open_field(world: SpiderWorld) -> None:
+    """
+    Place the spider in open terrain with a fast visual hunter nearby for an open-field visual-hunter scenario.
+    
+    Mutates the world by teleporting the spider to an open cell, fixing its heading and physiological state (hunger, fatigue, sleep debt), placing a single biased food spawn, spawning a single fast visual predator in a nearby patrol position, and refreshing the world's memory (initial state).
+    """
+    open_cells = sorted(
+        cell
+        for cell in world.map_template.traversable_cells
+        if cell not in world.shelter_cells
+    )
+    preferred_spider = (6, 6)
+    spider = (
+        preferred_spider
+        if preferred_spider in open_cells
+        else open_cells[len(open_cells) // 2]
+    )
+    world.tick = 2
+    _teleport_spider(world, spider, reset_heading=False)
+    world.state.heading_dx, world.state.heading_dy = 1, 0
+    world.state.hunger = 0.62
+    world.state.fatigue = 0.18
+    world.state.sleep_debt = 0.16
+    world.food_positions = [
+        max(
+            world.map_template.food_spawn_cells,
+            key=lambda cell: (cell[0], -abs(cell[1] - spider[1])),
+        )
+    ]
+    predator_candidates = [
+        cell
+        for cell in ((spider[0] + 2, spider[1]), (spider[0] + 3, spider[1]), (spider[0] + 2, spider[1] - 1))
+        if 0 <= cell[0] < world.width
+        and 0 <= cell[1] < world.height
+        and world.is_lizard_walkable(cell)
+    ]
+    if not predator_candidates:
+        predator_candidates = sorted(
+            (
+                cell
+                for cell in open_cells
+                if world.is_lizard_walkable(cell)
+                and cell != spider
+            ),
+            key=lambda cell: (
+                abs(world.manhattan(cell, spider) - 2),
+                -cell[0],
+                abs(cell[1] - spider[1]),
+            ),
+        )
+    predator_pos = predator_candidates[0]
+    _set_predators(
+        world,
+        [
+            LizardState(
+                x=predator_pos[0],
+                y=predator_pos[1],
+                mode="PATROL",
+                profile=FAST_VISUAL_HUNTER_PROFILE,
+            )
+        ],
+    )
     world.refresh_memory(initial=True)
 
 
@@ -511,14 +859,14 @@ def _trace_action_selection_payloads(trace: Sequence[Dict[str, object]]) -> list
     """
     Extract payload dictionaries from action-selection messages in a trace.
     
-    Scans each trace item for a "messages" list and collects the "payload" dict from messages
-    whose "sender" is "action_center" and whose "topic" is "action.selection".
+    Scans each trace item for a "messages" list and returns the `payload` dict from messages
+    where `sender == "action_center"` and `topic == "action.selection"`.
     
     Parameters:
-    	trace (Sequence[Dict[str, object]]): Sequence of trace item dictionaries as produced by the simulation.
+        trace (Sequence[Dict[str, object]]): Sequence of trace item dictionaries produced by the simulation.
     
     Returns:
-    	list[Dict[str, object]]: A list of payload dictionaries extracted from matching messages.
+        list[Dict[str, object]]: List of payload dictionaries from matching action-selection messages.
     """
     payloads: list[Dict[str, object]] = []
     for item in trace:
@@ -537,17 +885,1118 @@ def _trace_action_selection_payloads(trace: Sequence[Dict[str, object]]) -> list
                 payloads.append(payload)
     return payloads
 
-def _payload_float(payload: Dict[str, Any], *path: str) -> float | None:
+
+def _trace_meta_mappings(trace: Sequence[Dict[str, object]]) -> list[Mapping[str, object]]:
     """
-    Extract a nested value from a payload by following the given key path and convert it to a float.
+    Collect observation `meta` mappings found in trace items and environment observation messages.
+    
+    Parameters:
+        trace (Sequence[Dict[str, object]]): Ordered sequence of trace records to scan for observation metadata.
+    
+    Returns:
+        list[Mapping[str, object]]: List of `meta` mapping objects extracted from `observation` / `next_observation` entries and from environment messages with `topic == "observation"`, in the order they were encountered.
+    """
+    metas: list[Mapping[str, object]] = []
+    for item in trace:
+        for key in ("observation", "next_observation"):
+            observation = item.get(key)
+            if not isinstance(observation, Mapping):
+                continue
+            meta = observation.get("meta")
+            if isinstance(meta, Mapping):
+                metas.append(meta)
+        messages = item.get("messages", [])
+        if not isinstance(messages, list):
+            continue
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            if message.get("sender") != "environment" or message.get("topic") != "observation":
+                continue
+            payload = message.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            meta = payload.get("meta")
+            if isinstance(meta, Mapping):
+                metas.append(meta)
+    return metas
+
+
+def _trace_max_predator_threat(
+    trace: Sequence[Dict[str, object]],
+    predator_type: str,
+) -> float:
+    """
+    Compute the maximum recorded predator threat score for a given predator type from trace metadata.
+    
+    Parameters:
+        trace (Sequence[Dict[str, object]]): Trace items to search for observation/message meta mappings.
+        predator_type (str): Predator label used as the key prefix (e.g., "visual" or "olfactory").
+    
+    Returns:
+        float: The highest threat value found for "{predator_type}_predator_threat", or 0.0 if none present.
+    """
+    key = f"{predator_type}_predator_threat"
+    values = [
+        _float_or_none(meta.get(key)) or 0.0
+        for meta in _trace_meta_mappings(trace)
+    ]
+    return float(max(values, default=0.0))
+
+
+def _trace_dominant_predator_types(trace: Sequence[Dict[str, object]]) -> set[str]:
+    """
+    Determine which dominant predator type labels appear in the trace metadata.
+    
+    Searches observation/message meta mappings for a `dominant_predator_type_label`, normalizes it to lowercase,
+    and returns any recognized labels.
+    
+    Returns:
+        set[str]: A set containing zero or more of the strings "visual" and "olfactory".
+    """
+    labels: set[str] = set()
+    for meta in _trace_meta_mappings(trace):
+        label = str(meta.get("dominant_predator_type_label") or "").strip().lower()
+        if label in {"visual", "olfactory"}:
+            labels.add(label)
+    return labels
+
+
+def _float_or_none(value: object) -> float | None:
+    """
+    Attempt to convert the given value to a float; return None when conversion is not possible.
+    
+    Parameters:
+        value (object): Value to convert to a float.
+    
+    Returns:
+        The converted float if conversion succeeds, `None` otherwise.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: object) -> int | None:
+    """
+    Convert a value to an integer if possible.
+    
+    Attempts to coerce the given value to an `int`. If the value cannot be converted
+    (e.g., is `None` or not a numeric/string representation), returns `None`.
+    
+    Parameters:
+        value (object): The value to convert to an integer.
+    
+    Returns:
+        int | None: The converted integer on success, `None` if conversion fails.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _state_position(state: Mapping[str, object]) -> tuple[int, int] | None:
+    """
+    Extract the spider's (x, y) tile coordinates from a state mapping.
+    
+    Parameters:
+        state (Mapping[str, object]): A state dictionary that may contain numeric coordinates under keys `"x"` and `"y"`, or a sequence under `"spider_pos"`.
+    
+    Returns:
+        A tuple `(x, y)` of integers when both coordinates are present and convertible to integers, `None` otherwise.
+    """
+    x = _int_or_none(state.get("x"))
+    y = _int_or_none(state.get("y"))
+    if x is not None and y is not None:
+        return (x, y)
+    pos = state.get("spider_pos")
+    if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+        x = _int_or_none(pos[0])
+        y = _int_or_none(pos[1])
+        if x is not None and y is not None:
+            return (x, y)
+    return None
+
+
+def _trace_tick(
+    item: Mapping[str, object],
+    state: Mapping[str, object],
+    fallback: int,
+) -> int:
+    """
+    Select the timestep tick for a trace item, falling back to state or a provided default.
+    
+    Parameters:
+        item (Mapping[str, object]): A trace record; may include a numeric "tick" field.
+        state (Mapping[str, object]): The extracted state dict; may include a numeric "tick" field.
+        fallback (int): The value to return if neither `item` nor `state` provide a valid tick.
+    
+    Returns:
+        int: The chosen tick: `item["tick"]` if present and integer-coercible, else `state["tick"]` if integer-coercible, else `fallback`.
+    """
+    tick = _int_or_none(item.get("tick"))
+    if tick is not None:
+        return tick
+    state_tick = _int_or_none(state.get("tick"))
+    if state_tick is not None:
+        return state_tick
+    return fallback
+
+
+def _state_alive(state: Mapping[str, object]) -> bool | None:
+    """
+    Determine whether the entity described by a state mapping is alive.
+    
+    Checks the mapping for an explicit boolean "alive" field; if absent, looks for a numeric "health" field and treats values greater than 0 as alive.
+    
+    Parameters:
+        state (Mapping[str, object]): A state dictionary or mapping that may contain "alive" or "health" keys.
+    
+    Returns:
+        True if the state indicates the entity is alive, False if it indicates death, or None if the alive status cannot be determined.
+    """
+    alive = state.get("alive")
+    if isinstance(alive, bool):
+        return alive
+    health = _float_or_none(state.get("health"))
+    if health is None:
+        return None
+    return health > 0.0
+
+
+def _state_food_distance(state: Mapping[str, object]) -> float | None:
+    """
+    Extract the spider's nearest-food distance from a state mapping.
+    
+    Checks the keys "food_dist", "food_distance", and "nearest_food_dist" in that order and returns the first value that can be coerced to a float.
+    
+    Parameters:
+        state (Mapping[str, object]): A state dictionary potentially containing food-distance fields.
+    
+    Returns:
+        float | None: The parsed distance if available, otherwise `None`.
+    """
+    for key in ("food_dist", "food_distance", "nearest_food_dist"):
+        distance = _float_or_none(state.get(key))
+        if distance is not None:
+            return distance
+    return None
+
+
+def _observation_meta_food_distance(observation: object) -> float | None:
+    """Return observation meta.food_dist as a float, or None when absent."""
+    if not isinstance(observation, dict):
+        return None
+    meta = observation.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    return _float_or_none(meta.get("food_dist"))
+
+
+def _environment_observation_food_distances(item: Mapping[str, object]) -> list[float]:
+    """
+    Return list[float] post-step distances from environment observation messages.
+
+    Scans dict messages with sender "environment" and topic "observation".
+    """
+    distances: list[float] = []
+    messages = item.get("messages", [])
+    if not isinstance(messages, list):
+        return distances
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("sender") != "environment":
+            continue
+        if message.get("topic") != "observation":
+            continue
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        distance = _observation_meta_food_distance(payload)
+        if distance is not None:
+            distances.append(distance)
+    return distances
+
+
+def _trace_pre_observation_food_distances(item: Mapping[str, object]) -> list[float]:
+    """Return list[float] pre-step food distances from item["observation"]."""
+    distances: list[float] = []
+    distance = _observation_meta_food_distance(item.get("observation"))
+    if distance is not None:
+        distances.append(distance)
+    return distances
+
+
+def _trace_post_observation_food_distances(item: Mapping[str, object]) -> list[float]:
+    """Return list[float] post-step distances from next_observation and environment messages."""
+    distances: list[float] = []
+    distance = _observation_meta_food_distance(item.get("next_observation"))
+    if distance is not None:
+        distances.append(distance)
+    distances.extend(_environment_observation_food_distances(item))
+    return distances
+
+
+def _observation_food_distances(item: Mapping[str, object]) -> list[float]:
+    """
+    Extracts food-distance samples from a single execution trace item.
+    
+    Scans pre-step observation metadata and post-step next/environment observation data, returning each numeric distance found in encounter order.
+    
+    Parameters:
+        item (Mapping[str, object]): A trace record (usually a dict) representing a single step, which may contain "observation", "next_observation", and "messages".
+    
+    Returns:
+        list[float]: Collected food-distance values found in the trace item, in the order they were discovered.
+    """
+    distances: list[float] = []
+    distances.extend(_trace_pre_observation_food_distances(item))
+    distances.extend(_trace_post_observation_food_distances(item))
+    return distances
+
+
+def _trace_distance_deltas(item: Mapping[str, object]) -> Mapping[str, object] | None:
+    """
+    Return Mapping[str, object] from item["distance_deltas"], or item["info"]["distance_deltas"].
+
+    Example: {"distance_deltas": {"food": 2}} -> {"food": 2}; missing keys return None.
+    """
+    distance_deltas = item.get("distance_deltas")
+    if isinstance(distance_deltas, Mapping):
+        return distance_deltas
+    info = item.get("info")
+    if not isinstance(info, Mapping):
+        return None
+    distance_deltas = info.get("distance_deltas")
+    if isinstance(distance_deltas, Mapping):
+        return distance_deltas
+    return None
+
+
+def _trace_pre_tick_snapshot_payload(item: Mapping[str, object]) -> Mapping[str, object] | None:
+    """
+    Return Mapping[str, object] from the first pre_tick snapshot event, or None.
+
+    Example: {"event_log": [{"stage": "pre_tick", "name": "snapshot", "payload": {...}}]} -> payload.
+    """
+    event_log = item.get("event_log")
+    if not isinstance(event_log, list):
+        return None
+    for event in event_log:
+        if not isinstance(event, Mapping):
+            continue
+        if event.get("stage") != "pre_tick" or event.get("name") != "snapshot":
+            continue
+        payload = event.get("payload")
+        if isinstance(payload, Mapping):
+            return payload
+    return None
+
+
+def _trace_food_distances(trace: Sequence[Dict[str, object]]) -> list[float]:
+    """
+    Collects all reported spider-to-food distance samples from a trace.
+    
+    Parameters:
+        trace (Sequence[Dict[str, object]]): Execution trace items containing observation-derived food distances, optional `state` fields with a food distance, and optional `distance_deltas` mapping which may include a `food` delta.
+    
+    Returns:
+        list[float]: All extracted food-distance samples in the order encountered. Samples include distances from observation metadata, distances present in `state`, and at most one synthesized post-step distance from `distance_deltas["food"]` when no explicit post-step distance is present.
+    """
+    distances: list[float] = []
+    for item in trace:
+        observation_distances = _observation_food_distances(item)
+        distances.extend(observation_distances)
+        pre_distances = _trace_pre_observation_food_distances(item)
+        post_distances = _trace_post_observation_food_distances(item)
+        state_distance = None
+        state = item.get("state")
+        if isinstance(state, dict):
+            state_distance = _state_food_distance(state)
+            if state_distance is not None:
+                distances.append(state_distance)
+        distance_deltas = _trace_distance_deltas(item)
+        food_delta = (
+            _float_or_none(distance_deltas.get("food"))
+            if isinstance(distance_deltas, Mapping)
+            else None
+        )
+        has_explicit_post_distance = bool(post_distances) or state_distance is not None
+        if food_delta is not None and pre_distances and not has_explicit_post_distance:
+            distances.append(pre_distances[-1] - food_delta)
+    return distances
+
+
+def _trace_cell(value: object) -> tuple[int, int] | None:
+    """
+    Return a tuple[int, int] cell from a two-item sequence, or None.
+
+    Example: [2, 3] -> (2, 3); malformed or non-numeric values return None.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    x = _int_or_none(value[0])
+    y = _int_or_none(value[1])
+    if x is None or y is None:
+        return None
+    return (x, y)
+
+
+def _trace_food_positions(*sources: Mapping[str, object]) -> list[tuple[int, int]]:
+    """
+    Return list[tuple[int, int]] food cells from the first source exposing food position keys.
+
+    Example: {"food_positions": [[1, 2], [3, 4]]} -> [(1, 2), (3, 4)]; missing keys return [].
+    """
+    for source in sources:
+        for key in ("food_positions", "food_position", "food_pos"):
+            value = source.get(key)
+            if key == "food_positions" and isinstance(value, (list, tuple)):
+                cells = [_trace_cell(cell) for cell in value]
+                return [cell for cell in cells if cell is not None]
+            cell = _trace_cell(value)
+            if cell is not None:
+                return [cell]
+    return []
+
+
+def _trace_previous_position(item: Mapping[str, object]) -> tuple[int, int] | None:
+    """
+    Return tuple[int, int] pre-step spider position from prev_state, snapshot, or reversed movement.
+
+    Example: {"state": {"spider_pos": [3, 2], "last_move_dx": 1, "last_move_dy": 0}} -> (2, 2).
+    """
+    prev_state = item.get("prev_state")
+    if isinstance(prev_state, Mapping):
+        pos = _state_position(prev_state)
+        if pos is not None:
+            return pos
+
+    snapshot = _trace_pre_tick_snapshot_payload(item)
+    if snapshot is not None:
+        pos = _trace_cell(snapshot.get("spider_pos"))
+        if pos is not None:
+            return pos
+
+    state = item.get("state")
+    if not isinstance(state, Mapping):
+        return None
+    pos = _state_position(state)
+    if pos is None:
+        return None
+    move_dx = _int_or_none(state.get("last_move_dx"))
+    move_dy = _int_or_none(state.get("last_move_dy"))
+    if move_dx is not None and move_dy is not None:
+        return (pos[0] - move_dx, pos[1] - move_dy)
+    action = item.get("executed_action") or item.get("action") or item.get("intended_action")
+    if isinstance(action, str) and action in ACTION_DELTAS:
+        dx, dy = ACTION_DELTAS[action]
+        return (pos[0] - dx, pos[1] - dy)
+    return None
+
+
+def _trace_reconstructed_initial_food_distance(item: Mapping[str, object]) -> float | None:
+    """
+    Return a scalar pre-step food distance reconstructed from first-item fallbacks, or None.
+
+    Example: post distance 6 with {"distance_deltas": {"food": 2}} -> 8.0; missing data returns None.
+    """
+    prev_state = item.get("prev_state")
+    if isinstance(prev_state, Mapping):
+        distance = _state_food_distance(prev_state)
+        if distance is not None:
+            return distance
+
+    snapshot = _trace_pre_tick_snapshot_payload(item)
+    if snapshot is not None:
+        distance = _float_or_none(snapshot.get("prev_food_dist"))
+        if distance is not None:
+            return distance
+
+    distance_deltas = _trace_distance_deltas(item)
+    food_delta = (
+        _float_or_none(distance_deltas.get("food"))
+        if isinstance(distance_deltas, Mapping)
+        else None
+    )
+    if food_delta is not None:
+        post_distances = _trace_post_observation_food_distances(item)
+        if post_distances:
+            return post_distances[0] + food_delta
+        state = item.get("state")
+        if isinstance(state, Mapping):
+            state_distance = _state_food_distance(state)
+            if state_distance is not None:
+                return state_distance + food_delta
+
+    state = item.get("state")
+    sources: list[Mapping[str, object]] = [item]
+    if isinstance(state, Mapping):
+        sources.append(state)
+    if isinstance(prev_state, Mapping):
+        sources.append(prev_state)
+    previous_pos = _trace_previous_position(item)
+    food_positions = _trace_food_positions(*sources)
+    if previous_pos is None or not food_positions:
+        return None
+    return float(
+        min(abs(previous_pos[0] - x) + abs(previous_pos[1] - y) for x, y in food_positions)
+    )
+
+
+def _trace_initial_food_distance(trace: Sequence[Dict[str, object]]) -> float | None:
+    """
+    Return scalar initial pre-step food distance from explicit observations, or None.
+
+    Example: {"observation": {"meta": {"food_dist": 8}}} -> 8.0; post-only traces return None.
+    """
+    for item in trace:
+        pre_distances = _trace_pre_observation_food_distances(item)
+        if pre_distances:
+            return pre_distances[0]
+    return None
+
+
+def _trace_shelter_cells(state: Mapping[str, object]) -> set[tuple[int, int]]:
+    """
+    Compute the set of shelter cell coordinates from a serialized world state.
+    
+    Parameters:
+        state (Mapping[str, object]): Trace/state dictionary that may contain `map_template` (str),
+            `width` (int), and `height` (int). Width/height fall back to trace defaults when absent
+            or non-numeric.
+    
+    Returns:
+        set[tuple[int, int]]: Set of (x, y) coordinates belonging to the template shelter cells.
+        Returns an empty set when `map_template` is missing or not a string, or when the named map
+        template cannot be built.
+    """
+    template_name = state.get("map_template")
+    if not isinstance(template_name, str):
+        return set()
+    width = _int_or_none(state.get("width")) or TRACE_MAP_WIDTH_FALLBACK
+    height = _int_or_none(state.get("height")) or TRACE_MAP_HEIGHT_FALLBACK
+    try:
+        template = build_map_template(template_name, width=width, height=height)
+    except ValueError:
+        return set()
+    return set(template.shelter_cells)
+
+
+def _trace_shelter_template_key(state: Mapping[str, object]) -> tuple[str, int, int] | None:
+    """
+    Return tuple[str, int, int] from state map_template, width, and height, or None.
+
+    Example: {"map_template": "central_burrow"} -> ("central_burrow", 12, 12) using fallbacks.
+    """
+    template_name = state.get("map_template")
+    if not isinstance(template_name, str):
+        return None
+    width = _int_or_none(state.get("width")) or TRACE_MAP_WIDTH_FALLBACK
+    height = _int_or_none(state.get("height")) or TRACE_MAP_HEIGHT_FALLBACK
+    return (template_name, width, height)
+
+
+def _trace_shelter_exit(
+    trace: Sequence[Dict[str, object]],
+) -> tuple[bool, int | None]:
+    """
+    Determine whether the spider left any recognized shelter during the trace and, if so, when.
+    
+    Parameters:
+        trace (Sequence[Dict[str, object]]): Ordered trace items containing optional `state` dictionaries and tick information.
+    
+    Returns:
+        tuple[bool, int | None]: `(escaped, tick)` where `escaped` is `True` if the spider is observed outside the computed shelter cells or has `shelter_role == "outside"` at any trace item; `tick` is the trace tick of the first such observation (or `None` when no exit is detected).
+    """
+    shelter_cells_cache: set[tuple[int, int]] = set()
+    shelter_template_key: tuple[str, int, int] | None = None
+    for index, item in enumerate(trace):
+        state = item.get("state")
+        if not isinstance(state, dict):
+            continue
+        tick = _trace_tick(item, state, index)
+        pos = _state_position(state)
+        current_template_key = _trace_shelter_template_key(state)
+        if current_template_key is None:
+            shelter_cells = set()
+        elif current_template_key != shelter_template_key:
+            shelter_template_key = current_template_key
+            shelter_cells_cache = _trace_shelter_cells(state)
+            shelter_cells = shelter_cells_cache
+        else:
+            shelter_cells = shelter_cells_cache
+        if pos is not None and shelter_cells:
+            if pos not in shelter_cells:
+                return True, tick
+            continue
+        if state.get("shelter_role") == "outside":
+            return True, tick
+    return False, None
+
+
+def _trace_death_tick(trace: Sequence[Dict[str, object]]) -> int | None:
+    """
+    Finds the trace tick corresponding to the first transition from alive to not alive.
+    
+    Scans trace records for the earliest item whose `state` indicates the agent is not alive while the previous known alive value was True (or unknown). Returns the tick associated with that record when available.
+    
+    Returns:
+        int | None: The tick of the first death transition, or `None` if no death is observed.
+    """
+    previous_alive: bool | None = None
+    for index, item in enumerate(trace):
+        state = item.get("state")
+        if not isinstance(state, dict):
+            continue
+        alive = _state_alive(state)
+        if alive is None:
+            continue
+        if not alive and previous_alive is not False:
+            return _trace_tick(item, state, index)
+        previous_alive = alive
+    return None
+
+
+def _hunger_valence_rate(trace: Sequence[Dict[str, object]]) -> float:
+    """
+    Compute the proportion of action-selection payloads whose `winning_valence` equals "hunger".
+    
+    Parameters:
+        trace (Sequence[Dict[str, object]]): Execution trace records from which action-selection payloads are extracted.
+    
+    Returns:
+        float: Proportion in [0.0, 1.0] of action-selection payloads with `winning_valence == "hunger"`. Returns 0.0 when no action-selection payloads are present.
+    """
+    payloads = _trace_action_selection_payloads(trace)
+    if not payloads:
+        return 0.0
+    hunger_ticks = sum(
+        _payload_text(payload, "winning_valence") == "hunger"
+        for payload in payloads
+    )
+    return float(hunger_ticks / len(payloads))
+
+
+def _predator_visible_flag(value: object) -> bool | None:
+    """Coerce bool, numeric, and string predator-visibility values to bool.
+
+    Numeric values are converted with _float_or_none and are True when >= 0.5.
+    True strings are "true", "yes", and "visible"; false strings are
+    "false", "no", "hidden", and "none". Returns None when conversion fails.
+    """
+    if isinstance(value, bool):
+        return value
+    numeric = _float_or_none(value)
+    if numeric is not None:
+        return numeric >= 0.5
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "visible"}:
+            return True
+        if lowered in {"false", "no", "hidden", "none"}:
+            return False
+    return None
+
+
+def _mapping_predator_visible(source: Mapping[str, object]) -> bool:
+    """Return True when a nested mapping contains a visible predator flag.
+
+    ``source`` is expected to be a Mapping[str, object]. The lookup checks
+    "predator_visible", "prev_predator_visible", nested "meta",
+    "vision.predator.{visible,certainty}", and "evidence.threat". Flag values
+    are interpreted by _predator_visible_flag, including the >= 0.5 numeric
+    threshold used for certainty values, and Mapping values are searched
+    recursively. Returns False when no checked flag indicates visibility.
+    """
+    for key in ("predator_visible", "prev_predator_visible"):
+        visible = _predator_visible_flag(source.get(key))
+        if visible:
+            return True
+
+    meta = source.get("meta")
+    if isinstance(meta, Mapping) and _mapping_predator_visible(meta):
+        return True
+
+    vision = source.get("vision")
+    if isinstance(vision, Mapping):
+        predator = vision.get("predator")
+        if isinstance(predator, Mapping):
+            for key in ("visible", "certainty"):
+                visible = _predator_visible_flag(predator.get(key))
+                if visible:
+                    return True
+
+    evidence = source.get("evidence")
+    if isinstance(evidence, Mapping):
+        threat = evidence.get("threat")
+        if isinstance(threat, Mapping) and _mapping_predator_visible(threat):
+            return True
+
+    return False
+
+
+def _trace_predator_visible(item: Mapping[str, object]) -> bool:
+    """
+    Determine whether a trace item reports predator visibility via any supported channel.
+    
+    Parameters:
+        item (Mapping[str, object]): A trace item or composite event dictionary to inspect.
+    
+    Returns:
+        `true` if any inspected field or embedded payload indicates predator visibility, `false` otherwise.
+    """
+    if _mapping_predator_visible(item):
+        return True
+
+    for key in ("state", "observation", "next_observation", "debug"):
+        value = item.get(key)
+        if isinstance(value, Mapping) and _mapping_predator_visible(value):
+            return True
+
+    snapshot = _trace_pre_tick_snapshot_payload(item)
+    if snapshot is not None and _mapping_predator_visible(snapshot):
+        return True
+
+    messages = item.get("messages", [])
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            payload = message.get("payload")
+            if isinstance(payload, Mapping) and _mapping_predator_visible(payload):
+                return True
+
+    return False
+
+
+def _trace_peak_food_progress(trace: Sequence[Dict[str, object]]) -> float:
+    """
+    Return the maximum reduction in food distance observed across a trace (>= 0.0).
+    """
+    initial_food_distance = _trace_initial_food_distance(trace)
+    if initial_food_distance is None and trace:
+        initial_food_distance = _trace_reconstructed_initial_food_distance(trace[0])
+    food_distances = _trace_food_distances(trace)
+    if initial_food_distance is None and food_distances:
+        initial_food_distance = food_distances[0]
+    if initial_food_distance is None or not food_distances:
+        return 0.0
+    return float(
+        max(0.0, *(initial_food_distance - distance for distance in food_distances))
+    )
+
+
+def _trace_corridor_metrics(
+    trace: Sequence[Dict[str, object]],
+) -> Dict[str, object]:
+    """
+    Compute trace-derived diagnostics for corridor-gauntlet failures.
+    """
+    left_shelter, shelter_exit_tick = _trace_shelter_exit(trace)
+    return {
+        "left_shelter": bool(left_shelter),
+        "shelter_exit_tick": shelter_exit_tick,
+        "predator_visible_ticks": sum(
+            1 for item in trace if _trace_predator_visible(item)
+        ),
+        "peak_food_progress": _trace_peak_food_progress(trace),
+        "death_tick": _trace_death_tick(trace),
+    }
+
+
+def _extract_exposed_day_trace_metrics(
+    trace: Sequence[Dict[str, object]],
+) -> Dict[str, object]:
+    """
+    Compute trace-derived diagnostics useful for exposed-day foraging classification.
 
     Parameters:
-        payload (Dict[str, Any]): Nested dictionary to traverse.
-        *path (str): Sequence of keys describing the nested lookup path.
+        trace (Sequence[Dict[str, object]]): Ordered trace items (event/state dictionaries) for an episode.
 
     Returns:
-        float | None: The value at the end of the path converted to float, or `None` if any key
-        is missing, an intermediate value is not a dict, or conversion fails.
+        Dict[str, object]: Diagnostics with the following keys:
+            - "shelter_exit_tick" (Optional[int]): Tick when the spider first left a recognized shelter, or None.
+            - "left_shelter" (bool): True if the spider was observed outside shelter at any point.
+            - "peak_food_progress" (float): Maximum reduction in food distance relative to the initial distance (>= 0.0).
+            - "predator_visible_ticks" (int): Count of trace items where the predator is considered visible.
+            - "final_distance_to_food" (Optional[float]): Last observed food distance, or None if unavailable.
+    """
+    left_shelter, shelter_exit_tick = _trace_shelter_exit(trace)
+    food_distances = _trace_food_distances(trace)
+    return {
+        "shelter_exit_tick": shelter_exit_tick,
+        "left_shelter": bool(left_shelter),
+        "peak_food_progress": _trace_peak_food_progress(trace),
+        "predator_visible_ticks": sum(
+            1 for item in trace if _trace_predator_visible(item)
+        ),
+        "final_distance_to_food": food_distances[-1] if food_distances else None,
+    }
+
+
+def _food_approached(metrics: Mapping[str, object]) -> bool:
+    """
+    Determine whether the agent made an approach toward the target food during the episode.
+    
+    Considers `min_food_distance_reached` relative to `initial_food_distance` when both are present; if either is missing, falls back to the sign of `food_distance_delta` to infer approach.
+    
+    Parameters:
+        metrics (Mapping[str, object]): Episode-derived metrics. Expected keys (optional): 
+            `min_food_distance_reached`, `initial_food_distance`, `food_distance_delta`.
+    
+    Returns:
+        bool: `True` if the agent made a measurable approach toward the food, `False` otherwise.
+    """
+    min_food_distance = _float_or_none(metrics.get("min_food_distance_reached"))
+    initial_food_distance = _float_or_none(metrics.get("initial_food_distance"))
+    if min_food_distance is not None and initial_food_distance is not None:
+        return min_food_distance < initial_food_distance
+    food_distance_delta = _float_or_none(metrics.get("food_distance_delta"))
+    return food_distance_delta is not None and food_distance_delta > 0.0
+
+
+def _classify_food_deprivation_failure(metrics: Mapping[str, object]) -> str:
+    """
+    Assigns a failure or outcome label for a food-deprivation episode from derived diagnostic metrics.
+
+    Parameters:
+        metrics (Mapping[str, object]): Derived episode metrics used to classify outcome. Recognized keys:
+            - checks_passed: truthy indicates the scenario checks were satisfied.
+            - left_shelter: whether the agent left its shelter.
+            - hunger_valence_rate: fraction of action-selection ticks favoring hunger (numeric).
+            - min_food_distance_reached: minimum observed distance to the target food (numeric).
+            - initial_food_distance: initial distance to the target food (numeric).
+            - food_distance_delta: change in food distance; positive indicates progress toward food (numeric).
+            - alive: whether the agent survived the episode.
+            - food_eaten: number of food items consumed (int).
+
+    Returns:
+        str: One of the outcome labels:
+            - "success": scenario checks passed.
+            - "no_commitment": agent did not leave shelter or showed insufficient hunger-driven commitment.
+            - "orientation_failure": agent left shelter but did not approach the target food.
+            - "timing_failure": agent died before consuming food or died despite eating without meeting checks.
+            - "scoring_mismatch": agent survived and approached/acted but failed the scenario checks.
+    """
+    if metrics.get("checks_passed", False):
+        return "success"
+
+    left_shelter = bool(metrics.get("left_shelter", False))
+    hunger_valence_rate = _float_or_none(metrics.get("hunger_valence_rate")) or 0.0
+    approached_food = _food_approached(metrics)
+
+    if not left_shelter or hunger_valence_rate < 0.5:
+        return "no_commitment"
+    if not approached_food:
+        return "orientation_failure"
+
+    alive = bool(metrics.get("alive", False))
+    food_eaten = _int_or_none(metrics.get("food_eaten")) or 0
+    if not alive and food_eaten <= 0:
+        return "timing_failure"
+    if alive:
+        return "scoring_mismatch"
+    return "timing_failure"
+
+
+def _clamp01(value: float) -> float:
+    """
+    Clamp a numeric value to the inclusive range 0.0-1.0.
+    
+    Parameters:
+        value (float): Input value to be clamped.
+    
+    Returns:
+        float: The input coerced to a float and constrained to be between 0.0 and 1.0 inclusive.
+    """
+    return float(max(0.0, min(1.0, value)))
+
+
+def _memory_vector_freshness(value: object) -> float:
+    """Return [0,1] freshness for a non-zero dx/dy Mapping, using normalized age or age/ttl via _float_or_none and _clamp01."""
+    if not isinstance(value, Mapping):
+        return 0.0
+    dx = _float_or_none(value.get("dx")) or 0.0
+    dy = _float_or_none(value.get("dy")) or 0.0
+    if abs(dx) + abs(dy) <= 0.0:
+        return 0.0
+    age = _float_or_none(value.get("age"))
+    if age is None:
+        return 0.0
+    if 0.0 <= age <= 1.0:
+        return _clamp01(1.0 - age)
+    ttl = _float_or_none(value.get("ttl"))
+    if ttl is None or ttl <= 0.0:
+        return 0.0
+    return _clamp01(1.0 - (age / ttl))
+
+
+def _food_signal_strength(source: Mapping[str, object]) -> float:
+    """
+    Get the strongest food-direction cue strength available in a nested payload or metadata mapping.
+    
+    Scans the provided mapping for many possible food-cue fields (e.g. visibility, certainty, smell/trace strengths, memory freshness, nested `evidence` sections, `meta`, `vision.food`, `percept_traces.food`, `memory_vectors.food`, `food_trace`, and `food_memory`) and returns the maximum normalized strength found. Handles nested mappings recursively and clamps individual values into the [0.0, 1.0] range before taking the maximum.
+    
+    Parameters:
+        source (Mapping[str, object]): A mapping (payload/state/meta) that may contain one or more food-cue fields or nested mappings.
+    
+    Returns:
+        float: The strongest detected food-direction cue strength in the range 0.0-1.0; 0.0 when no cue is present.
+    """
+    strengths = [
+        _clamp01(v)
+        for key in (
+            "food_visible",
+            "food_certainty",
+            "food_smell_strength",
+            "food_trace_strength",
+            "food_memory_freshness",
+        )
+        if (v := _float_or_none(source.get(key))) is not None
+    ]
+
+    evidence = source.get("evidence")
+    if isinstance(evidence, Mapping):
+        for key in ("hunger", "visual", "sensory"):
+            values = evidence.get(key)
+            if isinstance(values, Mapping):
+                strengths.append(_food_signal_strength(values))
+
+    meta = source.get("meta")
+    if isinstance(meta, Mapping):
+        strengths.append(_food_signal_strength(meta))
+
+    vision = source.get("vision")
+    if isinstance(vision, Mapping):
+        food_view = vision.get("food")
+        if isinstance(food_view, Mapping):
+            for key in ("visible", "certainty"):
+                value = _float_or_none(food_view.get(key))
+                if value is not None:
+                    strengths.append(_clamp01(value))
+
+    hunger = source.get("hunger")
+    if isinstance(hunger, Mapping):
+        strengths.append(_food_signal_strength(hunger))
+
+    percept_traces = source.get("percept_traces")
+    if isinstance(percept_traces, Mapping):
+        food_trace = percept_traces.get("food")
+        if isinstance(food_trace, Mapping):
+            value = _float_or_none(food_trace.get("strength"))
+            if value is not None:
+                strengths.append(_clamp01(value))
+
+    memory_vectors = source.get("memory_vectors")
+    if isinstance(memory_vectors, Mapping):
+        strengths.append(_memory_vector_freshness(memory_vectors.get("food")))
+
+    if "food_memory_dx" in source or "food_memory_dy" in source:
+        flat_memory = {
+            "dx": source.get("food_memory_dx"),
+            "dy": source.get("food_memory_dy"),
+            "age": source.get("food_memory_age"),
+            "ttl": source.get("food_memory_ttl"),
+        }
+        flat_memory_strength = _memory_vector_freshness(flat_memory)
+        if flat_memory_strength > 0.0:
+            strengths.append(flat_memory_strength)
+        else:
+            dx = _float_or_none(source.get("food_memory_dx")) or 0.0
+            dy = _float_or_none(source.get("food_memory_dy")) or 0.0
+            if abs(dx) + abs(dy) > 0.0:
+                strengths.append(1.0)
+
+    state_food_trace = source.get("food_trace")
+    if isinstance(state_food_trace, Mapping):
+        value = _float_or_none(state_food_trace.get("strength"))
+        if value is not None:
+            strengths.append(_clamp01(value))
+
+    state_food_memory = source.get("food_memory")
+    if isinstance(state_food_memory, Mapping):
+        memory_strength = _memory_vector_freshness(state_food_memory)
+        if memory_strength > 0.0:
+            strengths.append(memory_strength)
+        elif state_food_memory.get("target") is not None:
+            age = _float_or_none(state_food_memory.get("age"))
+            ttl = _float_or_none(state_food_memory.get("ttl"))
+            if age is not None and ttl is not None and ttl > 0.0:
+                strengths.append(_clamp01(1.0 - (age / ttl)))
+
+    return max(strengths, default=0.0)
+
+
+def _trace_food_signal_strengths(trace: Sequence[Dict[str, object]]) -> list[float]:
+    """
+    Compute a per-tick food-signal strength series from trace items.
+    
+    For each trace item, inspects `state`, `observation`, `next_observation`, and any message `payload` objects and computes the strongest food-direction cue present by calling `_food_signal_strength` on each available mapping; the per-item value is the maximum strength found (or 0.0 if none).
+    
+    Parameters:
+        trace (Sequence[Dict[str, object]]): Ordered trace items produced by the environment/agent.
+    
+    Returns:
+        list[float]: Per-tick maximum food-signal strengths aligned to `trace` (0.0 if no signal).
+    """
+    strengths: list[float] = []
+    for item in trace:
+        item_strengths: list[float] = []
+        state = item.get("state")
+        if isinstance(state, Mapping):
+            item_strengths.append(_food_signal_strength(state))
+        for key in ("observation", "next_observation"):
+            observation = item.get(key)
+            if isinstance(observation, Mapping):
+                item_strengths.append(_food_signal_strength(observation))
+        messages = item.get("messages", [])
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, Mapping):
+                    continue
+                payload = message.get("payload")
+                if isinstance(payload, Mapping):
+                    item_strengths.append(_food_signal_strength(payload))
+        strengths.append(max(item_strengths, default=0.0))
+    return strengths
+
+
+def _classify_open_field_foraging_failure(metrics: Mapping[str, object]) -> str:
+    """
+    Classify an open-field foraging episode into a single outcome label based on diagnostic metrics.
+    
+    Parameters:
+        metrics (Mapping[str, object]): Diagnostic values computed for an episode. Recognized keys include:
+            - checks_passed: truthy when scenario checks indicate full success.
+            - left_shelter: whether the agent left shelter.
+            - hunger_valence_rate: numeric measure of hunger-driven action preference.
+            - initial_food_signal_strength, max_food_signal_strength: numeric food-cue strength estimates.
+            - initial_food_distance, min_food_distance_reached, food_distance_delta: numeric distance/progress metrics.
+            - food_eaten: count of food items consumed.
+            - alive: final alive status.
+        Missing or unknown keys are treated as absent/zero where appropriate.
+    
+    Returns:
+        str: One of:
+            - "success": checks indicate full success.
+            - "never_left_shelter": agent did not leave shelter.
+            - "no_hunger_commitment": left shelter but hunger-driven commitment was insufficient.
+            - "left_without_food_signal": left shelter with no detectable food cue.
+            - "orientation_failure": food cues were present but the agent did not approach food.
+            - "progressed_then_died": the agent approached food but died before completion.
+            - "stall": the agent left shelter, trace-confirmed no predator visibility, made no food progress, and survived.
+            - "scoring_mismatch": outcome did not match any above category (ambiguous/unexpected).
+    """
+    if metrics.get("checks_passed", False):
+        return "success"
+
+    if not bool(metrics.get("left_shelter", False)):
+        return "never_left_shelter"
+
+    hunger_valence_rate = _float_or_none(metrics.get("hunger_valence_rate")) or 0.0
+    if hunger_valence_rate < 0.5:
+        return "no_hunger_commitment"
+
+    initial_food_signal_strength = _float_or_none(
+        metrics.get("initial_food_signal_strength")
+    ) or 0.0
+    if initial_food_signal_strength <= 0.0:
+        return "left_without_food_signal"
+
+    food_eaten = _int_or_none(metrics.get("food_eaten")) or 0
+    approached_food = food_eaten > 0 or _food_approached(metrics)
+    predator_visible_ticks = _int_or_none(metrics.get("predator_visible_ticks"))
+    alive = bool(metrics.get("alive", False))
+
+    if (
+        not approached_food
+        and "predator_visible_ticks" in metrics
+        and predator_visible_ticks == 0
+        and alive
+    ):
+        return "stall"
+    if not approached_food:
+        return "orientation_failure"
+    if not alive:
+        return "progressed_then_died"
+    return "scoring_mismatch"
+
+
+def _classify_corridor_gauntlet_failure(
+    stats: EpisodeStats,
+    trace_metrics: Mapping[str, object],
+    full_success: bool,
+) -> str:
+    """
+    Assign a corridor-gauntlet outcome label from stats and trace diagnostics.
+    """
+    if full_success:
+        return "success"
+
+    if not bool(trace_metrics.get("left_shelter", False)):
+        return "frozen_in_shelter"
+
+    food_distance_delta = float(stats.food_distance_delta)
+    predator_contacts = int(stats.predator_contacts)
+    alive = bool(stats.alive)
+
+    if predator_contacts > 0 and not alive:
+        return "contact_failure_died"
+    if predator_contacts > 0 and alive:
+        return "contact_failure_survived"
+    if alive and predator_contacts == 0 and food_distance_delta <= 0.0:
+        return "survived_no_progress"
+    if food_distance_delta > 0.0 and not alive and predator_contacts == 0:
+        return "progress_then_died"
+    return "scoring_mismatch"
+
+
+def _classify_exposed_day_foraging_failure(metrics: Mapping[str, object]) -> str:
+    """
+    Assign an exposed-day foraging outcome label from trace-backed diagnostics.
+    """
+    if metrics.get("checks_passed", False):
+        return "success"
+
+    if not bool(metrics.get("left_shelter", False)):
+        return "cautious_inert"
+
+    food_eaten = _int_or_none(metrics.get("food_eaten")) or 0
+    food_distance_delta = _float_or_none(metrics.get("food_distance_delta")) or 0.0
+    peak_food_progress = _float_or_none(metrics.get("peak_food_progress")) or 0.0
+    made_food_progress = bool(
+        food_eaten > 0
+        or food_distance_delta > 0.0
+        or peak_food_progress > 0.0
+    )
+    predator_visible_ticks = _int_or_none(metrics.get("predator_visible_ticks")) or 0
+    alive = bool(metrics.get("alive", False))
+
+    if predator_visible_ticks > 0 and not made_food_progress:
+        return "threatened_retreat"
+    if made_food_progress and not alive:
+        return "foraging_and_died"
+    if made_food_progress:
+        return "partial_progress"
+    if predator_visible_ticks == 0 and alive:
+        return "stall"
+    return "scoring_mismatch"
+
+
+def _payload_float(payload: Dict[str, Any], *path: str) -> float | None:
+    """
+    Extract a nested value from a payload by key path and coerce it to float.
+    
+    Parameters:
+        payload (Dict[str, Any]): Nested mapping to traverse.
+        *path (str): Sequence of keys describing the lookup path inside `payload`.
+    
+    Returns:
+        float | None: The numeric value at the end of the path converted to `float`, or `None` if any key is missing, an intermediate value is not a mapping, or conversion to float fails.
     """
     current: Any = payload
     for key in path:
@@ -602,6 +2051,26 @@ def _weak_scenario_diagnostics(
     predator_contacts: int,
     full_success: bool,
 ) -> dict[str, object]:
+    """
+    Builds a compact set of diagnostic metrics summarizing food-progress and survival outcome for a scenario.
+    
+    Parameters:
+        food_distance_delta (float): Net change in distance to target food (positive means closer).
+        food_eaten (int): Number of food items consumed during the episode.
+        hunger_reduction (float): Reduction in hunger (positive means hunger decreased).
+        alive (bool): Whether the agent was alive at the end of the episode.
+        predator_contacts (int): Number of predator contact events recorded.
+        full_success (bool): Whether the scenario was fully completed (highest success level).
+    
+    Returns:
+        dict[str, object]: A mapping containing:
+            - "progress_band" (str): coarse category of progress as returned by _progress_band.
+            - "outcome_band" (str): overall outcome category (e.g., "full_success", "survived_but_unfinished", "regressed_and_died", "partial_progress_died", "stalled_and_died").
+            - "partial_progress" (bool): true if any progress was made (food eaten, positive distance delta, or hunger reduced).
+            - "died_after_progress" (bool): true if the agent died after making some progress.
+            - "died_without_contact" (bool): true if the agent died without predator contacts.
+            - "survived_without_progress" (bool): true if the agent survived but made no progress.
+    """
     progress_band = _progress_band(
         food_distance_delta=float(food_distance_delta),
         food_eaten=int(food_eaten),
@@ -632,6 +2101,49 @@ def _weak_scenario_diagnostics(
         "died_without_contact": died_without_contact,
         "survived_without_progress": survived_without_progress,
     }
+
+
+def _module_response_for_type(
+    stats: EpisodeStats,
+    predator_type: str,
+) -> Mapping[str, float]:
+    """
+    Retrieve module response shares for a predator type from episode statistics.
+    
+    Returns a mapping of module names to response-share floats for the specified predator_type; returns an empty mapping if the stats field is missing, malformed, or does not contain the requested predator_type.
+    
+    Parameters:
+        stats (EpisodeStats): Episode-level aggregated statistics possibly containing `module_response_by_predator_type`.
+        predator_type (str): Predator type key to look up (e.g., "visual", "olfactory").
+    
+    Returns:
+        Mapping[str, float]: Mapping from module name to its response share value.
+    """
+    responses = getattr(stats, "module_response_by_predator_type", {})
+    if not isinstance(responses, Mapping):
+        return {}
+    response = responses.get(predator_type, {})
+    return response if isinstance(response, Mapping) else {}
+
+
+def _module_share_for_type(
+    stats: EpisodeStats,
+    predator_type: str,
+    module_name: str,
+) -> float:
+    """
+    Fetches the module's response share for a given predator type and module name.
+    
+    Parameters:
+        stats (EpisodeStats): Episode statistics holding module responses keyed by predator type.
+        predator_type (str): Predator type label (e.g., "visual" or "olfactory").
+        module_name (str): Module identifier whose share to retrieve (e.g., "visual_cortex").
+    
+    Returns:
+        float: The module's share value (coerced to a float, typically in [0,1]); returns 0.0 if the value is missing or cannot be parsed as a number.
+    """
+    response = _module_response_for_type(stats, predator_type)
+    return float(_float_or_none(response.get(module_name)) or 0.0)
 
 
 NIGHT_REST_CHECKS: Sequence[BehaviorCheckSpec] = (
@@ -682,7 +2194,28 @@ EXPOSED_DAY_FORAGING_CHECKS: Sequence[BehaviorCheckSpec] = (
 FOOD_DEPRIVATION_CHECKS: Sequence[BehaviorCheckSpec] = (
     BehaviorCheckSpec("hunger_reduced", "Reduces hunger or manages to eat under deprivation.", "eat or hunger reduction >= 0.18"),
     BehaviorCheckSpec("approaches_food", "Makes progress toward food.", "> 0"),
+    BehaviorCheckSpec(
+        "commits_to_foraging",
+        "Spider leaves shelter and prioritizes hunger.",
+        "left_shelter and hunger_valence_rate >= 0.5",
+    ),
     BehaviorCheckSpec("survives_deprivation", "Survives the deprivation episode.", "true"),
+)
+VISUAL_OLFACTORY_PINCER_CHECKS: Sequence[BehaviorCheckSpec] = (
+    BehaviorCheckSpec("dual_threat_detected", "Both visual and olfactory predator pressures are represented.", "visual and olfactory threats > 0"),
+    BehaviorCheckSpec("type_specific_response", "Visual threat favors visual_cortex while olfactory threat favors sensory_cortex.", "module preference splits by predator type"),
+    BehaviorCheckSpec("survives_pincer", "Survives the dual-threat pincer without direct contact.", "alive and predator_contacts=0"),
+)
+OLFACTORY_AMBUSH_CHECKS: Sequence[BehaviorCheckSpec] = (
+    BehaviorCheckSpec("olfactory_threat_detected", "Registers the olfactory predator despite no visual contact.", "olfactory threat > 0 and predator_visible=false"),
+    BehaviorCheckSpec("sensory_cortex_engaged", "Sensory cortex dominates the response to the olfactory ambush.", "sensory_cortex >= visual_cortex"),
+    BehaviorCheckSpec("survives_olfactory_ambush", "Survives the ambush without direct contact.", "alive and predator_contacts=0"),
+)
+OLFACTORY_AMBUSH_WINDOW_TICKS = 4
+VISUAL_HUNTER_OPEN_FIELD_CHECKS: Sequence[BehaviorCheckSpec] = (
+    BehaviorCheckSpec("visual_threat_detected", "Registers the fast visual hunter in open terrain.", "visual threat > 0"),
+    BehaviorCheckSpec("visual_cortex_engaged", "Visual cortex dominates the response to the open-field hunter.", "visual_cortex >= sensory_cortex"),
+    BehaviorCheckSpec("survives_visual_hunter", "Survives the open-field visual-hunter encounter.", "alive and predator_contacts=0"),
 )
 CONFLICT_PASS_RATE = 0.8
 FOOD_VS_PREDATOR_CONFLICT_CHECKS: Sequence[BehaviorCheckSpec] = (
@@ -802,20 +2335,24 @@ def _score_entrance_ambush(stats: EpisodeStats, trace: Sequence[Dict[str, object
 
 def _score_open_field_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
     """
-    Evaluate open-field foraging performance and produce a BehavioralEpisodeScore containing progress, viability, and survival checks.
+    Score open-field foraging performance by producing progress, viability, and survival checks plus trace-derived diagnostics and a failure-mode classification.
+    
+    Computes three behavior checks (food distance progress, foraging viability, and alive), extracts trace-backed diagnostics (initial and min food distances, shelter exit tick, death tick, hunger valence rate, per-tick food-signal strengths), derives weak-scenario diagnostic bands, and classifies a `failure_mode` from the aggregated metrics.
     
     Parameters:
-        stats (EpisodeStats): Aggregated episode statistics used to compute food progress, food eaten, alive status, and predator contact metrics.
-        trace (Sequence[Dict[str, object]]): Execution trace (ignored by this scorer).
+        stats (EpisodeStats): Aggregated episode statistics used to compute food progress, food eaten, survival, and predator contacts.
+        trace (Sequence[Dict[str, object]]): Execution trace used to derive commitment/orientation diagnostics and food-cue signals.
     
     Returns:
-        BehavioralEpisodeScore: A score composed of three checks (food distance progress, foraging viability, and alive) and the following behavior metrics:
-            - `food_distance_delta`: numeric progress toward food,
-            - `food_eaten`: number of food items consumed,
-            - `alive`: whether the agent survived the episode,
-            - `predator_contacts`: number of predator contact events.
+        BehavioralEpisodeScore: A score whose checks cover food progress, foraging viability, and survival. The returned `behavior_metrics` includes at least:
+            - `food_distance_delta`, `food_eaten`, `alive`, `predator_contacts`
+            - `initial_food_distance`, `min_food_distance_reached`
+            - `left_shelter`, `shelter_exit_tick`, `death_tick`
+            - `hunger_valence_rate`
+            - `initial_food_signal_strength`, `max_food_signal_strength`, `food_signal_tick_rate`
+            - `predator_visible_ticks`
+          plus weak-scenario diagnostic fields and a computed `failure_mode`.
     """
-    del trace
     food_progress = float(stats.food_distance_delta)
     foraging_viable = bool(stats.food_eaten > 0 or food_progress >= 2.0)
     checks = (
@@ -824,6 +2361,32 @@ def _score_open_field_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, ob
         build_behavior_check(OPEN_FIELD_FORAGING_CHECKS[2], passed=bool(stats.alive), value=bool(stats.alive)),
     )
     full_success = all(check.passed for check in checks)
+    initial_food_distance = _trace_initial_food_distance(trace)
+    if initial_food_distance is None and trace:
+        initial_food_distance = _trace_reconstructed_initial_food_distance(trace[0])
+    food_distances = _trace_food_distances(trace)
+    if initial_food_distance is None and food_distances:
+        initial_food_distance = food_distances[0]
+    min_food_distance_reached = min(food_distances) if food_distances else None
+    left_shelter, shelter_exit_tick = _trace_shelter_exit(trace)
+    death_tick = _trace_death_tick(trace)
+    hunger_valence_rate = _hunger_valence_rate(trace)
+    predator_visible_ticks = (
+        sum(1 for item in trace if _trace_predator_visible(item))
+        if trace
+        else None
+    )
+    food_signal_strengths = _trace_food_signal_strengths(trace)
+    initial_food_signal_strength = (
+        food_signal_strengths[0] if food_signal_strengths else 0.0
+    )
+    max_food_signal_strength = max(food_signal_strengths, default=0.0)
+    food_signal_tick_rate = (
+        sum(1 for value in food_signal_strengths if value > 0.0)
+        / len(food_signal_strengths)
+        if food_signal_strengths
+        else 0.0
+    )
     diagnostics = _weak_scenario_diagnostics(
         food_distance_delta=food_progress,
         food_eaten=int(stats.food_eaten),
@@ -831,17 +2394,34 @@ def _score_open_field_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, ob
         predator_contacts=int(stats.predator_contacts),
         full_success=full_success,
     )
+    behavior_metrics = {
+        "food_distance_delta": food_progress,
+        "food_eaten": int(stats.food_eaten),
+        "alive": bool(stats.alive),
+        "predator_contacts": int(stats.predator_contacts),
+        "initial_food_distance": initial_food_distance,
+        "min_food_distance_reached": min_food_distance_reached,
+        "left_shelter": bool(left_shelter),
+        "shelter_exit_tick": shelter_exit_tick,
+        "death_tick": death_tick,
+        "hunger_valence_rate": hunger_valence_rate,
+        "predator_visible_ticks": predator_visible_ticks,
+        "initial_food_signal_strength": initial_food_signal_strength,
+        "max_food_signal_strength": max_food_signal_strength,
+        "food_signal_tick_rate": food_signal_tick_rate,
+        **diagnostics,
+    }
+    behavior_metrics["failure_mode"] = _classify_open_field_foraging_failure(
+        {
+            **behavior_metrics,
+            "checks_passed": full_success,
+        }
+    )
     return build_behavior_score(
         stats=stats,
         objective="Validate reproducible open-field foraging with an explicit progress metric.",
         checks=checks,
-        behavior_metrics={
-            "food_distance_delta": food_progress,
-            "food_eaten": int(stats.food_eaten),
-            "alive": bool(stats.alive),
-            "predator_contacts": int(stats.predator_contacts),
-            **diagnostics,
-        },
+        behavior_metrics=behavior_metrics,
     )
 
 
@@ -914,17 +2494,16 @@ def _score_recover_after_failed_chase(stats: EpisodeStats, trace: Sequence[Dict[
 
 def _score_corridor_gauntlet(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
     """
-    Evaluate corridor gauntlet episode performance by measuring food approach progress, predator contacts, and survival.
+    Evaluate corridor gauntlet episode performance with trace-backed diagnostics.
     
     Parameters:
         stats (EpisodeStats): Aggregated episode statistics used to compute checks and metrics.
-        trace (Sequence[Dict[str, object]]): Execution trace (ignored by this scorer).
+        trace (Sequence[Dict[str, object]]): Execution trace used to derive shelter exit, predator visibility, progress, and death diagnostics.
     
     Returns:
         BehavioralEpisodeScore: Score object containing three behavior checks (food progress, zero predator contacts, alive)
-        and metrics: `food_distance_delta`, `predator_contacts`, `alive`, and `predator_mode_transitions`.
+        and metrics including `failure_mode`, `left_shelter`, `shelter_exit_tick`, `predator_visible_ticks`, `peak_food_progress`, and `death_tick`.
     """
-    del trace
     food_progress = float(stats.food_distance_delta)
     checks = (
         build_behavior_check(CORRIDOR_GAUNTLET_CHECKS[0], passed=food_progress > 0.0, value=food_progress),
@@ -939,17 +2518,25 @@ def _score_corridor_gauntlet(stats: EpisodeStats, trace: Sequence[Dict[str, obje
         predator_contacts=int(stats.predator_contacts),
         full_success=full_success,
     )
+    trace_metrics = _trace_corridor_metrics(trace)
+    behavior_metrics = {
+        "food_distance_delta": food_progress,
+        "predator_contacts": int(stats.predator_contacts),
+        "alive": bool(stats.alive),
+        "predator_mode_transitions": int(stats.predator_mode_transitions),
+        **trace_metrics,
+        **diagnostics,
+    }
+    behavior_metrics["failure_mode"] = _classify_corridor_gauntlet_failure(
+        stats,
+        trace_metrics,
+        full_success,
+    )
     return build_behavior_score(
         stats=stats,
         objective="Validate narrow-corridor progress without relying only on aggregated reward.",
         checks=checks,
-        behavior_metrics={
-            "food_distance_delta": food_progress,
-            "predator_contacts": int(stats.predator_contacts),
-            "alive": bool(stats.alive),
-            "predator_mode_transitions": int(stats.predator_mode_transitions),
-            **diagnostics,
-        },
+        behavior_metrics=behavior_metrics,
     )
 
 
@@ -992,19 +2579,15 @@ def _score_two_shelter_tradeoff(stats: EpisodeStats, trace: Sequence[Dict[str, o
 
 def _score_exposed_day_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
     """
-    Assess exposed-day foraging performance based on food-distance progress and predator contacts.
+    Score an exposed-day foraging episode and attach trace-derived diagnostics and a failure-mode label.
     
-    The execution trace is ignored by this scorer.
+    Parameters:
+        stats (EpisodeStats): Aggregated episode statistics used to evaluate objective checks and numeric metrics.
+        trace (Sequence[Dict[str, object]]): Ordered trace items used to extract shelter/exit, food-distance, and predator-visibility diagnostics.
     
     Returns:
-        BehavioralEpisodeScore: Aggregated score containing three checks (positive food-distance progress, zero predator contacts, and survival) and a behavior_metrics dictionary with keys:
-            - `food_distance_delta`: float progress in food distance,
-            - `predator_contacts`: int number of predator contacts,
-            - `alive`: bool whether the agent survived,
-            - `final_health`: float final health value,
-          plus additional diagnostic fields produced by the scenario diagnostics helper.
+        BehavioralEpisodeScore: The scenario score including three behavioral checks (food-distance progress, zero predator contacts, survival) and a `behavior_metrics` mapping. `behavior_metrics` contains numeric and boolean summaries from `stats` (e.g., `food_distance_delta`, `food_eaten`, `predator_contacts`, `alive`, `final_health`), trace-derived diagnostics (e.g., `left_shelter`, `shelter_exit_tick`, `peak_food_progress`, `predator_visible_ticks`), weaker diagnostic bands, and a `failure_mode` string produced by the exposed-day failure classifier.
     """
-    del trace
     food_progress = float(stats.food_distance_delta)
     checks = (
         build_behavior_check(EXPOSED_DAY_FORAGING_CHECKS[0], passed=food_progress > 0.0, value=food_progress),
@@ -1019,42 +2602,76 @@ def _score_exposed_day_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, o
         predator_contacts=int(stats.predator_contacts),
         full_success=full_success,
     )
+    trace_metrics = _extract_exposed_day_trace_metrics(trace)
+    behavior_metrics = {
+        "food_distance_delta": food_progress,
+        "food_eaten": int(stats.food_eaten),
+        "predator_contacts": int(stats.predator_contacts),
+        "alive": bool(stats.alive),
+        "final_health": float(stats.final_health),
+        **trace_metrics,
+        **diagnostics,
+    }
+    behavior_metrics["failure_mode"] = _classify_exposed_day_foraging_failure(
+        {
+            **behavior_metrics,
+            "checks_passed": full_success,
+        }
+    )
     return build_behavior_score(
         stats=stats,
         objective="Validate exposed daytime foraging with a reproducible progress metric.",
         checks=checks,
-        behavior_metrics={
-            "food_distance_delta": food_progress,
-            "predator_contacts": int(stats.predator_contacts),
-            "alive": bool(stats.alive),
-            "final_health": float(stats.final_health),
-            **diagnostics,
-        },
+        behavior_metrics=behavior_metrics,
     )
 
 
 def _score_food_deprivation(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
     """
-    Evaluate agent recovery and foraging progress for the food deprivation scenario.
+    Compute the scenario score for the food deprivation scenario, producing pass/fail checks and behavior metrics describing recovery and foraging progress.
     
     Parameters:
-        stats (EpisodeStats): Aggregated episode metrics used to build checks and metrics.
-        trace (Sequence[Dict[str, object]]): Execution trace (ignored by this scorer).
+        stats: Aggregated episode metrics used to evaluate checks and populate metrics.
+        trace: Ordered execution trace used to derive per-tick diagnostics (distances, shelter exit, death tick, action-selection payloads).
     
     Returns:
-        BehavioralEpisodeScore: Score containing the scenario objective, per-check results, and behavior metrics including:
-            - food_eaten: number of food items consumed during the episode.
-            - food_distance_delta: change in distance to food (positive indicates progress toward food).
-            - hunger_reduction: amount hunger decreased from the scenario initial value (clamped at zero).
+        BehavioralEpisodeScore: Contains the scenario objective, per-check results, and a behavior_metrics mapping. behavior_metrics includes:
+            - food_eaten: number of food items consumed.
+            - food_distance_delta: net change in distance to food (positive indicates progress).
+            - hunger_reduction: reduction in hunger from the scenario's initial value (clamped at zero).
             - alive: whether the agent survived the episode.
-            - plus diagnostic fields produced by the scenario diagnostic helper.
+            - min_food_distance_reached: smallest trace-derived distance to food or None.
+            - left_shelter: whether the spider exited the scenario shelter.
+            - shelter_exit_tick: tick of first shelter exit, or None.
+            - death_tick: tick where the spider first became not alive, or None.
+            - hunger_valence_rate: fraction of action-selection ticks where hunger was the winning valence.
+            - failure_mode: classifier label describing the dominant failure mode.
+            - plus additional diagnostic fields produced by the scenario diagnostic helper.
     """
-    del trace
     hunger_reduction = float(max(0.0, FOOD_DEPRIVATION_INITIAL_HUNGER - stats.final_hunger))
+    initial_food_distance = _trace_initial_food_distance(trace)
+    if initial_food_distance is None and trace:
+        initial_food_distance = _trace_reconstructed_initial_food_distance(trace[0])
+    food_distances = _trace_food_distances(trace)
+    if initial_food_distance is None and food_distances:
+        initial_food_distance = food_distances[0]
+    min_food_distance_reached = min(food_distances) if food_distances else None
+    left_shelter, shelter_exit_tick = _trace_shelter_exit(trace)
+    death_tick = _trace_death_tick(trace)
+    hunger_valence_rate = _hunger_valence_rate(trace)
+    commits_to_foraging = bool(left_shelter and hunger_valence_rate >= 0.5)
     checks = (
         build_behavior_check(FOOD_DEPRIVATION_CHECKS[0], passed=(stats.food_eaten > 0 or hunger_reduction >= 0.18), value=hunger_reduction),
         build_behavior_check(FOOD_DEPRIVATION_CHECKS[1], passed=stats.food_distance_delta > 0.0, value=float(stats.food_distance_delta)),
-        build_behavior_check(FOOD_DEPRIVATION_CHECKS[2], passed=bool(stats.alive), value=bool(stats.alive)),
+        build_behavior_check(
+            FOOD_DEPRIVATION_CHECKS[2],
+            passed=commits_to_foraging,
+            value={
+                "left_shelter": bool(left_shelter),
+                "hunger_valence_rate": hunger_valence_rate,
+            },
+        ),
+        build_behavior_check(FOOD_DEPRIVATION_CHECKS[3], passed=bool(stats.alive), value=bool(stats.alive)),
     )
     full_success = all(check.passed for check in checks)
     diagnostics = _weak_scenario_diagnostics(
@@ -1065,16 +2682,282 @@ def _score_food_deprivation(stats: EpisodeStats, trace: Sequence[Dict[str, objec
         predator_contacts=int(stats.predator_contacts),
         full_success=full_success,
     )
+    behavior_metrics = {
+        "food_eaten": int(stats.food_eaten),
+        "food_distance_delta": float(stats.food_distance_delta),
+        "hunger_reduction": hunger_reduction,
+        "alive": bool(stats.alive),
+        "min_food_distance_reached": min_food_distance_reached,
+        "left_shelter": bool(left_shelter),
+        "shelter_exit_tick": shelter_exit_tick,
+        "death_tick": death_tick,
+        "hunger_valence_rate": hunger_valence_rate,
+        **diagnostics,
+    }
+    behavior_metrics["failure_mode"] = _classify_food_deprivation_failure(
+        {
+            **behavior_metrics,
+            "checks_passed": full_success,
+            "initial_food_distance": initial_food_distance,
+        }
+    )
     return build_behavior_score(
         stats=stats,
         objective="Validate measurable recovery or food progress under homeostatic deprivation.",
         checks=checks,
+        behavior_metrics=behavior_metrics,
+    )
+
+
+def _score_visual_olfactory_pincer(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+) -> BehavioralEpisodeScore:
+    """
+    Evaluate the agent's response when visual and olfactory predator threats occur simultaneously.
+    
+    Builds three checks (dual detection, type-specific module engagement, and surviving without predator contact) and returns a BehaviorEpisodeScore populated with those checks and behavior_metrics that include visual/olfactory threat peaks, dominant predator types seen, per-type module share values, predator contact and response maps, and the final alive flag.
+    
+    Returns:
+        BehavioralEpisodeScore: Score object containing the composed checks and a behavior_metrics mapping with keys such as
+        "visual_predator_threat_peak", "olfactory_predator_threat_peak", "dominant_predator_types_seen",
+        per-type cortex share values, predator contact/response maps, and "alive".
+    """
+    visual_peak = _trace_max_predator_threat(trace, "visual")
+    olfactory_peak = _trace_max_predator_threat(trace, "olfactory")
+    dominant_types_seen = sorted(_trace_dominant_predator_types(trace))
+    visual_response = _module_response_for_type(stats, "visual")
+    olfactory_response = _module_response_for_type(stats, "olfactory")
+    visual_visual_share = _module_share_for_type(stats, "visual", "visual_cortex")
+    visual_sensory_share = _module_share_for_type(stats, "visual", "sensory_cortex")
+    olfactory_visual_share = _module_share_for_type(stats, "olfactory", "visual_cortex")
+    olfactory_sensory_share = _module_share_for_type(stats, "olfactory", "sensory_cortex")
+    dual_detected = bool(
+        visual_peak > 0.0
+        and olfactory_peak > 0.0
+        and (
+            (visual_peak > 0.0 and olfactory_peak > 0.0)
+            or (
+                sum(float(value) for value in visual_response.values()) > 0.0
+                and sum(float(value) for value in olfactory_response.values()) > 0.0
+            )
+        )
+    )
+    type_specific_response = bool(
+        dual_detected
+        and visual_visual_share > 0.0
+        and olfactory_sensory_share > 0.0
+        and visual_visual_share > visual_sensory_share
+        and olfactory_sensory_share > olfactory_visual_share
+    )
+    survives_cleanly = bool(stats.alive and stats.predator_contacts == 0)
+    checks = (
+        build_behavior_check(
+            VISUAL_OLFACTORY_PINCER_CHECKS[0],
+            passed=dual_detected,
+            value={"visual_peak": visual_peak, "olfactory_peak": olfactory_peak},
+        ),
+        build_behavior_check(
+            VISUAL_OLFACTORY_PINCER_CHECKS[1],
+            passed=type_specific_response,
+            value={
+                "visual_visual_cortex": visual_visual_share,
+                "visual_sensory_cortex": visual_sensory_share,
+                "olfactory_visual_cortex": olfactory_visual_share,
+                "olfactory_sensory_cortex": olfactory_sensory_share,
+            },
+        ),
+        build_behavior_check(
+            VISUAL_OLFACTORY_PINCER_CHECKS[2],
+            passed=survives_cleanly,
+            value={
+                "alive": bool(stats.alive),
+                "predator_contacts": int(stats.predator_contacts),
+            },
+        ),
+    )
+    return build_behavior_score(
+        stats=stats,
+        objective="Measure whether the agent distinguishes simultaneous visual and olfactory predator pressure.",
+        checks=checks,
         behavior_metrics={
-            "food_eaten": int(stats.food_eaten),
-            "food_distance_delta": float(stats.food_distance_delta),
-            "hunger_reduction": hunger_reduction,
+            "visual_predator_threat_peak": visual_peak,
+            "olfactory_predator_threat_peak": olfactory_peak,
+            "dominant_predator_types_seen": dominant_types_seen,
+            "visual_visual_cortex_share": visual_visual_share,
+            "visual_sensory_cortex_share": visual_sensory_share,
+            "olfactory_visual_cortex_share": olfactory_visual_share,
+            "olfactory_sensory_cortex_share": olfactory_sensory_share,
+            "module_response_by_predator_type": {
+                "visual": dict(visual_response),
+                "olfactory": dict(olfactory_response),
+            },
+            "predator_contacts_by_type": dict(stats.predator_contacts_by_type),
+            "predator_response_latency_by_type": dict(stats.predator_response_latency_by_type),
             "alive": bool(stats.alive),
-            **diagnostics,
+        },
+    )
+
+
+def _score_olfactory_ambush(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+) -> BehavioralEpisodeScore:
+    """
+    Evaluate an olfactory ambush scenario for whether olfactory threat drives sensory-cortex-led responses and safe survival.
+    
+    Parameters:
+        stats (EpisodeStats): Aggregated episode statistics (module responses, contacts, survival, etc.).
+        trace (Sequence[Dict[str, object]]): Ordered trace records from the episode used to extract time-series diagnostics.
+    
+    Returns:
+        BehavioralEpisodeScore: Scoring object containing pass/fail checks, derived behavior metrics, and failure-mode diagnostics for the olfactory-ambush scenario.
+    """
+    initial_trace = trace[:OLFACTORY_AMBUSH_WINDOW_TICKS]
+    visual_peak = _trace_max_predator_threat(trace, "visual")
+    visual_peak_initial = _trace_max_predator_threat(initial_trace, "visual")
+    olfactory_peak = _trace_max_predator_threat(trace, "olfactory")
+    olfactory_peak_initial = _trace_max_predator_threat(initial_trace, "olfactory")
+    sensory_share = _module_share_for_type(stats, "olfactory", "sensory_cortex")
+    visual_share = _module_share_for_type(stats, "olfactory", "visual_cortex")
+    predator_visible_ticks = sum(1 for item in trace if _trace_predator_visible(item))
+    predator_visible_ticks_initial = sum(
+        1 for item in initial_trace if _trace_predator_visible(item)
+    )
+    olfactory_detected = bool(
+        olfactory_peak_initial > 0.0
+        and (
+            olfactory_peak_initial > 0.0
+            or sum(
+                float(value)
+                for value in _module_response_for_type(stats, "olfactory").values()
+            )
+            > 0.0
+        )
+    )
+    sensory_engaged = bool(
+        olfactory_detected
+        and sensory_share > 0.0
+        and sensory_share > visual_share
+        and (not initial_trace or visual_peak_initial <= 0.05)
+    )
+    survives_cleanly = bool(stats.alive and stats.predator_contacts == 0)
+    checks = (
+        build_behavior_check(
+            OLFACTORY_AMBUSH_CHECKS[0],
+            passed=olfactory_detected
+            and (not initial_trace or predator_visible_ticks_initial == 0),
+            value={
+                "olfactory_peak": olfactory_peak,
+                "olfactory_peak_initial": olfactory_peak_initial,
+                "visual_peak": visual_peak,
+                "visual_peak_initial": visual_peak_initial,
+                "predator_visible_ticks": predator_visible_ticks,
+                "predator_visible_ticks_initial": predator_visible_ticks_initial,
+            },
+        ),
+        build_behavior_check(
+            OLFACTORY_AMBUSH_CHECKS[1],
+            passed=sensory_engaged,
+            value={
+                "sensory_cortex_share": sensory_share,
+                "visual_cortex_share": visual_share,
+            },
+        ),
+        build_behavior_check(
+            OLFACTORY_AMBUSH_CHECKS[2],
+            passed=survives_cleanly,
+            value={
+                "alive": bool(stats.alive),
+                "predator_contacts": int(stats.predator_contacts),
+            },
+        ),
+    )
+    return build_behavior_score(
+        stats=stats,
+        objective="Measure whether hidden olfactory threat recruits sensory-cortex-led response without visual contact.",
+        checks=checks,
+        behavior_metrics={
+            "olfactory_predator_threat_peak": olfactory_peak,
+            "olfactory_predator_threat_peak_initial": olfactory_peak_initial,
+            "visual_predator_threat_peak": visual_peak,
+            "visual_predator_threat_peak_initial": visual_peak_initial,
+            "predator_visible_ticks": predator_visible_ticks,
+            "predator_visible_ticks_initial": predator_visible_ticks_initial,
+            "olfactory_sensory_cortex_share": sensory_share,
+            "olfactory_visual_cortex_share": visual_share,
+            "predator_contacts_by_type": dict(stats.predator_contacts_by_type),
+            "alive": bool(stats.alive),
+        },
+    )
+
+
+def _score_visual_hunter_open_field(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+) -> BehavioralEpisodeScore:
+    """
+    Evaluate episode behavior in an open-field scenario with a fast visual predator.
+    
+    Builds three checks that detect (1) whether a visual predator signal was present, (2) whether the visual-cortex module dominated the sensory module for the visual predator, and (3) whether the spider survived without predator contacts. Returns a BehaviorScore containing those checks and metrics including the visual threat peak, module share values, per-type contact and response-latency maps, and final alive status.
+    
+    Returns:
+        BehavioralEpisodeScore: Aggregated score, checks, and behavior metrics for the visual-hunter open-field scenario.
+    """
+    visual_peak = _trace_max_predator_threat(trace, "visual")
+    visual_share = _module_share_for_type(stats, "visual", "visual_cortex")
+    sensory_share = _module_share_for_type(stats, "visual", "sensory_cortex")
+    visual_detected = bool(
+        visual_peak > 0.0
+        and (
+            visual_peak > 0.0
+            or sum(
+                float(value)
+                for value in _module_response_for_type(stats, "visual").values()
+            )
+            > 0.0
+        )
+    )
+    visual_engaged = bool(
+        visual_detected
+        and visual_share > 0.0
+        and visual_share > sensory_share
+    )
+    survives_cleanly = bool(stats.alive and stats.predator_contacts == 0)
+    checks = (
+        build_behavior_check(
+            VISUAL_HUNTER_OPEN_FIELD_CHECKS[0],
+            passed=visual_detected,
+            value=visual_peak,
+        ),
+        build_behavior_check(
+            VISUAL_HUNTER_OPEN_FIELD_CHECKS[1],
+            passed=visual_engaged,
+            value={
+                "visual_cortex_share": visual_share,
+                "sensory_cortex_share": sensory_share,
+            },
+        ),
+        build_behavior_check(
+            VISUAL_HUNTER_OPEN_FIELD_CHECKS[2],
+            passed=survives_cleanly,
+            value={
+                "alive": bool(stats.alive),
+                "predator_contacts": int(stats.predator_contacts),
+            },
+        ),
+    )
+    return build_behavior_score(
+        stats=stats,
+        objective="Measure whether open-field visual threat recruits visual-cortex-led predator response.",
+        checks=checks,
+        behavior_metrics={
+            "visual_predator_threat_peak": visual_peak,
+            "visual_visual_cortex_share": visual_share,
+            "visual_sensory_cortex_share": sensory_share,
+            "predator_contacts_by_type": dict(stats.predator_contacts_by_type),
+            "predator_response_latency_by_type": dict(stats.predator_response_latency_by_type),
+            "alive": bool(stats.alive),
         },
     )
 
@@ -1377,9 +3260,17 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         description="Hungry spider crosses a narrow corridor with the lizard on the escape axis.",
         objective="Measure food progress and safety in a controlled risk corridor.",
         behavior_checks=CORRIDOR_GAUNTLET_CHECKS,
-        diagnostic_focus="Distinguish safe stalling, partial progress, and death in the narrow corridor.",
-        success_interpretation="Success requires advancing through the corridor, avoiding contact, and surviving the risk.",
-        failure_interpretation="Failure may mean stalling, dying after partial progress, or showing no response under pressure.",
+        diagnostic_focus="Trace-backed failure_mode classification for corridor traversal, shelter exit, predator visibility, peak food progress, contact, and death timing.",
+        success_interpretation="Full success requires positive food-distance progress through the corridor, zero predator contacts, and survival to episode end.",
+        failure_interpretation=(
+            'Use behavior_metrics.failure_mode: "success" means all corridor checks passed; '
+            '"frozen_in_shelter" means no trace-confirmed shelter exit; '
+            '"contact_failure_died" means predator contact occurred and the spider died; '
+            '"contact_failure_survived" means predator contact occurred but the spider survived; '
+            '"survived_no_progress" means the spider survived without contact but made no food-distance progress; '
+            '"progress_then_died" means the spider made food-distance progress, avoided contact, then died; '
+            '"scoring_mismatch" means stats and trace diagnostics reached an unexpected combination.'
+        ),
         budget_note="Under the short budget, this scenario often shows avoided contact without enough progress for full success.",
         max_steps=20,
         map_template="corridor_escape",
@@ -1405,10 +3296,14 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         description="Daytime foraging with food in open terrain and a nearby lizard patrol.",
         objective="Measure daytime foraging progress in open terrain under a nearby patrol.",
         behavior_checks=EXPOSED_DAY_FORAGING_CHECKS,
-        diagnostic_focus="Separate retreat, stalling, and death during exposed daytime foraging.",
+        diagnostic_focus=(
+            "Hypothesis: previous geometry placed lizard on food, forcing spider into "
+            "threat override before food signal was available; separate retreat, "
+            "stalling, partial progress, and death during exposed daytime foraging."
+        ),
         success_interpretation="Success requires progress toward food without contact while staying alive under the nearby patrol.",
-        failure_interpretation="Failure may mean retreating away from food, lack of useful progress, or dying before the goal.",
-        budget_note="Under the short budget, this scenario often reveals retreat and death even without direct predator contact.",
+        failure_interpretation="Use behavior_metrics.failure_mode to distinguish cautious_inert, threatened_retreat, foraging_and_died, partial_progress, stall, and scoring_mismatch under the heuristic lizard-food/frontier spacing.",
+        budget_note="Geometry fix applies a threat-radius heuristic around food and the first food-visible frontier; remaining failures indicate arbitration or training limits.",
         max_steps=20,
         map_template="exposed_feeding_ground",
         setup=_exposed_day_foraging,
@@ -1419,14 +3314,60 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         description="Spider starts with acute hunger and must recover homeostasis with distant food.",
         objective="Measure homeostatic recovery or explicit food progress under deprivation.",
         behavior_checks=FOOD_DEPRIVATION_CHECKS,
-        diagnostic_focus="Separate food approach from effective homeostatic recovery under deprivation.",
+        diagnostic_focus=(
+            "Primary hypothesis: spider commits to foraging but homeostasis death timer "
+            "(~12-15 ticks at hunger 0.96) must beat calibrated 4-6 Manhattan-distance food, "
+            "with farther >=4 spawns only as fallback"
+        ),
         success_interpretation="Success requires measurable hunger reduction, progress toward food, and survival.",
-        failure_interpretation="Failure can hide real partial progress when the spider approaches food but dies before reducing hunger.",
-        budget_note="Under the short budget, this scenario often records useful approach without full homeostatic recovery.",
+        failure_interpretation="Use behavior_metrics.failure_mode to distinguish no_commitment, orientation_failure, timing_failure, and scoring_mismatch during reproducible diagnosis.",
+        budget_note="Tests whether learned behavior can beat the calibrated geometric race condition instead of asking it to survive an unreachable far-food timer.",
         max_steps=22,
         map_template="central_burrow",
         setup=_food_deprivation,
         score_episode=_score_food_deprivation,
+    ),
+    "visual_olfactory_pincer": ScenarioSpec(
+        name="visual_olfactory_pincer",
+        description="Spider is pinned between a visible hunter ahead and an olfactory hunter behind.",
+        objective="Test whether predator-type-specific signals recruit distinct module responses under dual threat.",
+        behavior_checks=VISUAL_OLFACTORY_PINCER_CHECKS,
+        diagnostic_focus="Dual-threat detection, predator-type differentiation, and split visual-vs-sensory response.",
+        success_interpretation="Success requires representing both predator types, showing type-specific module preference, and surviving without contact.",
+        failure_interpretation="Failure suggests collapsed threat representation, weak specialization, or inability to escape the pincer safely.",
+        budget_note="Short specialization probe for the new multi-predator ecology: both threat types are present on the opening frame.",
+        max_steps=16,
+        map_template="exposed_feeding_ground",
+        setup=_visual_olfactory_pincer,
+        score_episode=_score_visual_olfactory_pincer,
+    ),
+    "olfactory_ambush": ScenarioSpec(
+        name="olfactory_ambush",
+        description="An olfactory predator waits outside the shelter entrance while the spider faces inward.",
+        objective="Test sensory-cortex-led response to hidden olfactory threat near refuge geometry.",
+        behavior_checks=OLFACTORY_AMBUSH_CHECKS,
+        diagnostic_focus="Olfactory-only threat perception, suppressed visual evidence, and sensory-cortex recruitment.",
+        success_interpretation="Success requires detecting the hidden threat, preferring sensory-cortex response, and surviving the ambush cleanly.",
+        failure_interpretation="Failure suggests the hidden predator is missed, treated as a generic threat, or still produces avoidable contact.",
+        budget_note="Designed to isolate olfactory pressure without visible predator evidence on the opening frame.",
+        max_steps=18,
+        map_template="entrance_funnel",
+        setup=_olfactory_ambush,
+        score_episode=_score_olfactory_ambush,
+    ),
+    "visual_hunter_open_field": ScenarioSpec(
+        name="visual_hunter_open_field",
+        description="A fast visual hunter pressures the spider in exposed terrain.",
+        objective="Test visual-cortex-led response to a fast visual predator in open terrain.",
+        behavior_checks=VISUAL_HUNTER_OPEN_FIELD_CHECKS,
+        diagnostic_focus="Visual threat detection, visual-cortex engagement, and survival in exposed terrain.",
+        success_interpretation="Success requires explicit visual threat detection, stronger visual than sensory response, and survival without contact.",
+        failure_interpretation="Failure suggests weak visual specialization or inability to stabilize behavior under open-field pursuit pressure.",
+        budget_note="Pairs with olfactory_ambush to contrast visual-specialist and olfactory-specialist predator ecologies.",
+        max_steps=16,
+        map_template="exposed_feeding_ground",
+        setup=_visual_hunter_open_field,
+        score_episode=_score_visual_hunter_open_field,
     ),
     "food_vs_predator_conflict": ScenarioSpec(
         name="food_vs_predator_conflict",

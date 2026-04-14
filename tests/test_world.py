@@ -1,5 +1,6 @@
 import unittest
 from collections import deque
+from collections.abc import Mapping, Sequence
 from unittest.mock import patch
 
 import numpy as np
@@ -9,15 +10,88 @@ from spider_cortex_sim.agent import SpiderBrain
 from spider_cortex_sim.interfaces import (
     ACTION_DELTAS,
     ACTION_CONTEXT_INTERFACE,
+    LOCOMOTION_ACTIONS,
     MOTOR_CONTEXT_INTERFACE,
     OBSERVATION_INTERFACE_BY_KEY,
     ActionContextObservation,
     MotorContextObservation,
 )
-from spider_cortex_sim.maps import MAP_TEMPLATE_NAMES, build_map_template
+from spider_cortex_sim.maps import CLUTTER, NARROW, OPEN, MAP_TEMPLATE_NAMES, build_map_template
 from spider_cortex_sim.noise import NoiseConfig
-from spider_cortex_sim.predator import LizardState
-from spider_cortex_sim.world import ACTION_TO_INDEX, REWARD_COMPONENT_NAMES, SpiderWorld
+from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
+from spider_cortex_sim.predator import (
+    OLFACTORY_HUNTER_PROFILE,
+    VISUAL_HUNTER_PROFILE,
+    LizardState,
+)
+from spider_cortex_sim.world_types import PerceptTrace
+from spider_cortex_sim.world import (
+    ACTION_TO_INDEX,
+    MOVE_DELTAS,
+    REWARD_COMPONENT_NAMES,
+    PerceptualBuffer,
+    SpiderWorld,
+    _copy_observation_payload,
+    _is_temporal_direction_field,
+    compute_execution_difficulty,
+)
+
+
+def _terrain_with_cleanup(
+    test_case: unittest.TestCase,
+    world: SpiderWorld,
+) -> tuple[dict[tuple[int, int], str], tuple[int, int]]:
+    """
+    Save terrain at the spider position and register cleanup to restore it.
+    Returns the terrain dict and saved position tuple.
+    """
+    pos = world.spider_pos()
+    terrain = world.map_template.terrain
+    original_present = pos in terrain
+    original_terrain = terrain.get(pos)
+
+    def restore_terrain() -> None:
+        if original_present:
+            terrain[pos] = original_terrain
+        else:
+            terrain.pop(pos, None)
+
+    test_case.addCleanup(restore_terrain)
+    return terrain, pos
+
+
+def _profile_with_perception(**perception_overrides: float) -> OperationalProfile:
+    """
+    Return the default OperationalProfile with validated perception overrides.
+    Raises ValueError for unknown perception keys.
+    """
+    summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+    perception = summary["perception"]
+    allowed_keys = set(perception.keys())
+    unknown_keys = sorted(set(perception_overrides) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"Unknown perception override keys: {unknown_keys}")
+    perception.update(perception_overrides)
+    return OperationalProfile.from_summary(summary)
+
+
+def _compute_slip_and_difficulty(
+    world: SpiderWorld,
+    terrain: dict[tuple[int, int], str],
+    pos: tuple[int, int],
+    terrain_type: str,
+    heading: tuple[float, float],
+    fatigue: float,
+) -> dict[str, object]:
+    """
+    Configure a MOVE_RIGHT motor-noise case and return its diagnostics.
+    Mutates terrain, heading, and fatigue on the provided world.
+    """
+    terrain[pos] = terrain_type
+    world.state.heading_dx = float(heading[0])
+    world.state.heading_dy = float(heading[1])
+    world.state.fatigue = float(fatigue)
+    return world._apply_motor_noise("MOVE_RIGHT")
 
 
 class SpiderWorldTest(unittest.TestCase):
@@ -38,13 +112,8 @@ class SpiderWorldTest(unittest.TestCase):
 
     def _outside_entrance_cell(self, world: SpiderWorld) -> tuple[int, int]:
         """
-        Selects a lizard-walkable cell adjacent to the shelter entrance, falling back to a spawn cell if none are suitable.
-        
-        Parameters:
-            world (SpiderWorld): World instance whose map, dimensions, and lizard walkability are consulted.
-        
-        Returns:
-            tuple[int, int]: An (x, y) coordinate that is adjacent to the shelter entrance and lizard-walkable, or the first entry from `world.map_template.lizard_spawn_cells` if no adjacent walkable cell is found.
+        Return a lizard-walkable cell next to the entrance.
+        Falls back to the first lizard spawn cell if none is adjacent.
         """
         entrance = self._entrance_cell(world)
         for dx, dy in ((1, 0), (-1, 0), (0, -1), (0, 1)):
@@ -57,10 +126,7 @@ class SpiderWorldTest(unittest.TestCase):
 
     def _move_lizard_to_safe_corner(self, world: SpiderWorld) -> None:
         """
-        Move the lizard to the spawn cell that is farthest from the spider.
-        
-        Parameters:
-            world (SpiderWorld): World instance whose `map_template.lizard_spawn_cells` and spider position are used to choose the destination.
+        Move the lizard to the spawn cell farthest from the spider.
         """
         candidates = sorted(
             world.map_template.lizard_spawn_cells,
@@ -75,35 +141,24 @@ class SpiderWorldTest(unittest.TestCase):
 
     def _reflex_brain(self, seed: int = 0) -> SpiderBrain:
         """
-        Create a SpiderBrain configured as a deterministic "reflex" brain with all action and motor network parameters zeroed.
-        
-        Parameters:
-            seed (int): Random seed used to initialize the brain.
-        
-        Returns:
-            SpiderBrain: A brain whose action_center and motor_cortex parameters are set to zero so outputs depend only on fixed biases (deterministic reflex behavior).
+        Return a deterministic reflex brain with learned weights neutralized.
+        Uses the supplied seed for reproducible initialization.
         """
         brain = SpiderBrain(seed=seed, module_dropout=0.0)
         brain.action_center.W1.fill(0.0)
         brain.action_center.b1.fill(0.0)
-        brain.action_center.W_mid.fill(0.0)
-        brain.action_center.b_mid.fill(0.0)
         brain.action_center.W2_policy.fill(0.0)
         brain.action_center.b2_policy.fill(0.0)
         brain.action_center.W2_value.fill(0.0)
         brain.action_center.b2_value.fill(0.0)
         brain.motor_cortex.W1.fill(0.0)
         brain.motor_cortex.b1.fill(0.0)
-        brain.motor_cortex.W_mid.fill(0.0)
-        brain.motor_cortex.b_mid.fill(0.0)
         brain.motor_cortex.W2.fill(0.0)
         brain.motor_cortex.b2.fill(0.0)
         if brain.module_bank is not None:
             for network in brain.module_bank.modules.values():
                 network.W1.fill(0.0)
                 network.b1.fill(0.0)
-                network.W_mid.fill(0.0)
-                network.b_mid.fill(0.0)
                 network.W2.fill(0.0)
                 network.b2.fill(0.0)
         return brain
@@ -116,13 +171,13 @@ class SpiderWorldTest(unittest.TestCase):
         """
         world = SpiderWorld(seed=3)
         obs = world.reset(seed=3)
-        self.assertEqual(obs["visual"].shape, (23,))
+        self.assertEqual(obs["visual"].shape, (25,))
         self.assertEqual(obs["sensory"].shape, (12,))
         self.assertEqual(obs["hunger"].shape, (16,))
-        self.assertEqual(obs["sleep"].shape, (19,))
-        self.assertEqual(obs["alert"].shape, (23,))
-        self.assertEqual(obs["action_context"].shape, (16,))
-        self.assertEqual(obs["motor_context"].shape, (10,))
+        self.assertEqual(obs["sleep"].shape, (16,))
+        self.assertEqual(obs["alert"].shape, (25,))
+        self.assertEqual(obs["action_context"].shape, (15,))
+        self.assertEqual(obs["motor_context"].shape, (13,))
         self.assertEqual(obs["meta"]["map_template"], "central_burrow")
         self.assertEqual(obs["meta"]["reward_profile"], "classic")
         self.assertIn("sleep_debt", obs["meta"])
@@ -150,6 +205,57 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertEqual(obs["meta"]["on_food"], bool(action_context.on_food))
         self.assertEqual(obs["meta"]["on_shelter"], bool(action_context.on_shelter))
         self.assertEqual(obs["meta"]["on_shelter"], bool(motor_context.on_shelter))
+
+    def test_reset_spawns_multiple_predators_and_preserves_lizard_alias(self) -> None:
+        world = SpiderWorld(seed=31, lizard_move_interval=999999)
+        world.reset(
+            seed=31,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+
+        self.assertEqual(world.predator_count, 2)
+        self.assertEqual(
+            [predator.profile for predator in world.predators],
+            [VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+        self.assertEqual(
+            world.predator_positions(),
+            [(predator.x, predator.y) for predator in world.predators],
+        )
+        self.assertEqual(len(set(world.predator_positions())), 2)
+        self.assertIs(world.lizard, world.get_predator(0))
+        self.assertEqual(world.lizard_pos(), world.predator_positions()[0])
+        self.assertIs(world.predator_controller, world.predator_controllers[0])
+        self.assertEqual(world.predator_controller.predator_index, 0)
+        self.assertIs(world.predator_controller._predator(world), world.lizard)
+        for index, controller in enumerate(world.predator_controllers):
+            self.assertEqual(controller.predator_index, index)
+            predator = world.get_predator(controller.predator_index)
+            self.assertIs(controller._predator(world), predator)
+            self.assertEqual((predator.x, predator.y), world.predator_positions()[index])
+
+    def test_random_spawn_cell_fallback_respects_min_spider_distance(self) -> None:
+        world = SpiderWorld(
+            seed=37,
+            map_template="exposed_feeding_ground",
+            lizard_move_interval=999999,
+        )
+        world.reset(seed=37)
+        world.state.x, world.state.y = 2, 2
+
+        class FixedIndexRng:
+            def integers(self, low: int, high: int | None = None) -> int:
+                del low, high
+                return 0
+
+        world.spawn_rng = FixedIndexRng()
+        cell = world._random_spawn_cell(
+            [world.spider_pos()],
+            min_spider_distance=5,
+            avoid_lizard=False,
+        )
+
+        self.assertGreaterEqual(world.manhattan(cell, world.spider_pos()), 5)
 
     def test_reset_initializes_heading_toward_nearest_entrance(self) -> None:
         world = SpiderWorld(seed=71, lizard_move_interval=999999)
@@ -468,6 +574,40 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertEqual(updated.age, 2)
         self.assertEqual(updated.target, (3, 3))
 
+    def test_advance_percept_trace_refreshes_peripheral_target(self) -> None:
+        from spider_cortex_sim.perception import PerceivedTarget, _compute_target_visibility_zone
+        from spider_cortex_sim.world_types import PerceptTrace
+
+        world = SpiderWorld(seed=89, vision_range=8, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+
+        peripheral_percept = PerceivedTarget(
+            visible=1.0,
+            certainty=0.7,
+            occluded=0.0,
+            dx=0.25,
+            dy=0.5,
+            dist=3,
+            position=(6, 7),
+        )
+        self.assertEqual(
+            _compute_target_visibility_zone(world, world.spider_pos(), (6, 7)),
+            "peripheral",
+        )
+
+        updated = world._advance_percept_trace(
+            PerceptTrace(target=None, age=0, certainty=0.0),
+            peripheral_percept,
+            [(6, 7)],
+        )
+
+        self.assertEqual(updated.target, (6, 7))
+        self.assertEqual(updated.age, 0)
+        self.assertAlmostEqual(updated.certainty, 0.7)
+
     def test_advance_percept_trace_positions_as_list_of_lists_is_handled(self) -> None:
         """candidate_positions conversion handles positions given as list-of-lists."""
         from spider_cortex_sim.perception import PerceivedTarget
@@ -549,7 +689,7 @@ class SpiderWorldTest(unittest.TestCase):
 
         self.assertEqual(info["intended_action"], "MOVE_UP")
         self.assertNotEqual(info["executed_action"], "MOVE_UP")
-        self.assertEqual(info["action"], info["executed_action"])
+        self.assertEqual(info["action"], info["intended_action"])
         self.assertTrue(info["motor_noise_applied"])
 
     def test_food_and_shelter_trigger_autonomic_behaviors(self) -> None:
@@ -691,6 +831,7 @@ class SpiderWorldTest(unittest.TestCase):
         entrance = self._entrance_cell(world)
         world.state.x, world.state.y = deep
         world.lizard.x, world.lizard.y = max(0, entrance[0] - 1), entrance[1]
+        world.lizard.profile = None
         for _ in range(5):
             world.step(ACTION_TO_INDEX["STAY"])
             self.assertNotIn(world.lizard_pos(), world.shelter_cells)
@@ -984,6 +1125,11 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertIn("intended_action", payload)
         self.assertIn("executed_action", payload)
         self.assertIn("motor_noise_applied", payload)
+        self.assertIn("slip_reason", payload)
+        self.assertIn("slip_probability", payload)
+        self.assertIn("execution_difficulty", payload)
+        self.assertIn("orientation_alignment", payload)
+        self.assertIn("terrain_difficulty", payload)
         self.assertEqual(payload["intended_action"], "STAY")
         self.assertEqual(payload["executed_action"], "STAY")
 
@@ -1126,9 +1272,14 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertEqual(world.state.predator_escapes, 1)
 
     def test_memory_persists_after_visibility_loss(self) -> None:
+        """
+        Verify food and predator memories persist and age after leaving view.
+        """
         world = SpiderWorld(seed=31, lizard_move_interval=999999)
         world.reset(seed=31)
         world.state.x, world.state.y = 2, 2
+        world.state.heading_dx = 1
+        world.state.heading_dy = 1
         world.food_positions = [(2, 3)]
         world.lizard.x, world.lizard.y = 4, 2
         world.step(ACTION_TO_INDEX["STAY"])
@@ -1146,9 +1297,12 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertIsNotNone(world.state.predator_memory.target)
 
     def test_memory_guides_retreat_after_predator_leaves_view(self) -> None:
-        world = SpiderWorld(seed=67, lizard_move_interval=999999)
+        profile = _profile_with_perception(perceptual_delay_ticks=0.0)
+        world = SpiderWorld(seed=67, lizard_move_interval=999999, operational_profile=profile)
         world.reset(seed=67)
         world.state.x, world.state.y = 3, 3
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
         world.food_positions = [(world.width - 1, world.height - 1)]
         world.lizard.x, world.lizard.y = 5, 3
         world.step(ACTION_TO_INDEX["STAY"])
@@ -1161,11 +1315,16 @@ class SpiderWorldTest(unittest.TestCase):
         self.assertEqual(decision.action_idx, ACTION_TO_INDEX["MOVE_LEFT"])
 
     def test_memory_guides_food_approach_after_food_leaves_view(self) -> None:
-        world = SpiderWorld(seed=71, lizard_move_interval=999999)
+        profile = _profile_with_perception(perceptual_delay_ticks=0.0)
+        world = SpiderWorld(seed=71, lizard_move_interval=999999, operational_profile=profile)
         world.reset(seed=71)
         world.state.x, world.state.y = 2, 2
         world.state.hunger = 0.92
         world.food_positions = [(4, 2)]
+        world.state.heading_dx, world.state.heading_dy = world._heading_toward(
+            world.food_positions[0],
+            origin=world.spider_pos(),
+        )
         self._move_lizard_to_safe_corner(world)
         world.step(ACTION_TO_INDEX["STAY"])
 
@@ -1329,10 +1488,17 @@ class NoiseChannelIsolationTest(unittest.TestCase):
         world.reset(seed=23)
         self.assertIs(world.rng, world.predator_rng)
 
-    def test_five_independent_rng_channels_exist(self) -> None:
+    def test_six_independent_rng_channels_exist(self) -> None:
         world = SpiderWorld(seed=29, lizard_move_interval=999999)
         world.reset(seed=29)
-        channels = [world.spawn_rng, world.predator_rng, world.visual_rng, world.olfactory_rng, world.motor_rng]
+        channels = [
+            world.spawn_rng,
+            world.predator_rng,
+            world.visual_rng,
+            world.olfactory_rng,
+            world.motor_rng,
+            world.delay_rng,
+        ]
         # Each channel should be a distinct object.
         ids = [id(ch) for ch in channels]
         self.assertEqual(len(ids), len(set(ids)))
@@ -1350,6 +1516,7 @@ class NoiseChannelIsolationTest(unittest.TestCase):
         self.assertAlmostEqual(float(world_a.visual_rng.random()), float(world_b.visual_rng.random()))
         self.assertAlmostEqual(float(world_a.olfactory_rng.random()), float(world_b.olfactory_rng.random()))
         self.assertAlmostEqual(float(world_a.motor_rng.random()), float(world_b.motor_rng.random()))
+        self.assertAlmostEqual(float(world_a.delay_rng.random()), float(world_b.delay_rng.random()))
 
     def test_reset_with_different_seed_changes_episode_seed(self) -> None:
         world = SpiderWorld(seed=37, lizard_move_interval=999999)
@@ -1383,8 +1550,340 @@ class NoiseChannelIsolationTest(unittest.TestCase):
         self.assertEqual(state_meta["episode_seed"], 777)
 
 
+class PerceptualBufferTest(unittest.TestCase):
+    def test_buffer_returns_requested_delayed_observation(self) -> None:
+        buffer = PerceptualBuffer(max_delay=2)
+        buffer.push(0, {"visual": np.array([1.0]), "meta": {"tick": 0}})
+        buffer.push(1, {"visual": np.array([2.0]), "meta": {"tick": 1}})
+        buffer.push(2, {"visual": np.array([3.0]), "meta": {"tick": 2}})
+
+        observation, effective_delay = buffer.get(2)
+
+        self.assertEqual(effective_delay, 2)
+        np.testing.assert_allclose(observation["visual"], np.array([1.0]))
+        self.assertEqual(observation["meta"]["tick"], 0)
+
+    def test_buffer_replaces_same_tick_entry(self) -> None:
+        buffer = PerceptualBuffer(max_delay=1)
+        buffer.push(0, {"visual": np.array([1.0]), "meta": {"tick": 0}})
+        buffer.push(0, {"visual": np.array([4.0]), "meta": {"tick": 0}})
+
+        observation, effective_delay = buffer.get(1)
+
+        self.assertEqual(effective_delay, 0)
+        np.testing.assert_allclose(observation["visual"], np.array([4.0]))
+
+    def test_buffer_stores_defensive_copies(self) -> None:
+        vector = np.array([1.0])
+        payload = {"visual": vector, "meta": {"tick": 0}}
+        buffer = PerceptualBuffer(max_delay=1)
+        buffer.push(0, payload)
+        vector[0] = 99.0
+        payload["meta"]["tick"] = 99
+
+        observation, _ = buffer.get(0)
+
+        np.testing.assert_allclose(observation["visual"], np.array([1.0]))
+        self.assertEqual(observation["meta"]["tick"], 0)
+
+
+class PerceptualDelayObservationTest(unittest.TestCase):
+    def _no_delay_noise_profile(self, *, decay: float = 0.0, jitter: float = 0.0) -> NoiseConfig:
+        """Return a delay_test NoiseConfig with only delayed-percept certainty_decay_per_tick and direction_jitter_per_tick enabled."""
+        return NoiseConfig(
+            name="delay_test",
+            visual={"certainty_jitter": 0.0, "direction_jitter": 0.0, "dropout_prob": 0.0},
+            olfactory={"strength_jitter": 0.0, "direction_jitter": 0.0},
+            motor={"action_flip_prob": 0.0},
+            spawn={"uniform_mix": 0.0},
+            predator={"random_choice_prob": 0.0},
+            delay={
+                "certainty_decay_per_tick": decay,
+                "direction_jitter_per_tick": jitter,
+            },
+        )
+
+    def _world(self, *, delay_ticks: float = 1.0, delay_noise: float = 0.0, noise: NoiseConfig | None = None) -> SpiderWorld:
+        """
+        Return a test world with configured perceptual delay.
+        Uses the supplied NoiseConfig or the no-delay profile helper.
+        """
+        profile = _profile_with_perception(
+            perceptual_delay_ticks=delay_ticks,
+            perceptual_delay_noise=delay_noise,
+        )
+        return SpiderWorld(
+            seed=101,
+            lizard_move_interval=999999,
+            operational_profile=profile,
+            noise_profile=noise if noise is not None else self._no_delay_noise_profile(),
+        )
+
+    def _place_visible_predator(self, world: SpiderWorld) -> None:
+        """
+        Place the spider and lizard so the predator is visible.
+        Mutates position and heading on the supplied world.
+        """
+        world.state.x = 5
+        world.state.y = 7
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        world.lizard.x = 7
+        world.lizard.y = 7
+        world.lizard.mode = "PATROL"
+
+    def test_step_returns_previous_tick_observation_when_delay_is_one(self) -> None:
+        world = self._world(delay_ticks=1.0, delay_noise=0.0)
+        world.reset(seed=101)
+        self._place_visible_predator(world)
+        current_obs = world.observe()
+        current_visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(current_obs["visual"])
+        self.assertGreater(current_visual["predator_visible"], 0.5)
+
+        world.lizard.x = 5
+        world.lizard.y = 0
+        delayed_obs, _, _, _ = world.step(ACTION_TO_INDEX["STAY"])
+
+        delayed_visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(delayed_obs["visual"])
+        raw_current = world._raw_observation()
+        raw_visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(raw_current["visual"])
+        self.assertGreater(delayed_visual["predator_visible"], 0.5)
+        self.assertEqual(tuple(delayed_obs["meta"]["vision"]["predator"]["position"]), (7, 7))
+        self.assertEqual(raw_visual["predator_visible"], 0.0)
+
+    def test_delay_zero_returns_current_observation(self) -> None:
+        world = self._world(delay_ticks=0.0, delay_noise=0.0)
+        world.reset(seed=103)
+        self._place_visible_predator(world)
+        world.observe()
+        world.lizard.x = 5
+        world.lizard.y = 0
+
+        observation, _, _, _ = world.step(ACTION_TO_INDEX["STAY"])
+
+        visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(observation["visual"])
+        self.assertEqual(visual["predator_visible"], 0.0)
+        self.assertNotIn("perceptual_delay", observation["meta"])
+
+    def test_delayed_certainty_decays_by_delay_noise_config(self) -> None:
+        noise = self._no_delay_noise_profile(decay=0.25, jitter=0.0)
+        world = self._world(delay_ticks=1.0, delay_noise=1.0, noise=noise)
+        world.reset(seed=107)
+        self._place_visible_predator(world)
+        current_obs = world.observe()
+        current_visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(current_obs["visual"])
+
+        world.lizard.x = 5
+        world.lizard.y = 0
+        delayed_obs, _, _, _ = world.step(ACTION_TO_INDEX["STAY"])
+
+        delayed_visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(delayed_obs["visual"])
+        self.assertAlmostEqual(
+            delayed_visual["predator_certainty"],
+            current_visual["predator_certainty"] * 0.75,
+        )
+        self.assertEqual(delayed_obs["meta"]["perceptual_delay"]["effective_ticks"], 1)
+
+    def test_delayed_certainty_decay_updates_visibility_flags(self) -> None:
+        noise = self._no_delay_noise_profile(decay=1.0, jitter=0.0)
+        world = self._world(delay_ticks=1.0, delay_noise=1.0, noise=noise)
+        world.reset(seed=108)
+        self._place_visible_predator(world)
+        current_obs = world.observe()
+        current_visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(current_obs["visual"])
+        self.assertGreater(current_visual["predator_visible"], 0.5)
+        self.assertTrue(current_obs["meta"]["predator_visible"])
+
+        world.lizard.x = 5
+        world.lizard.y = 0
+        delayed_obs, _, _, _ = world.step(ACTION_TO_INDEX["STAY"])
+
+        for key in ("visual", "alert", "action_context", "motor_context"):
+            with self.subTest(view=key):
+                values = OBSERVATION_INTERFACE_BY_KEY[key].bind_values(delayed_obs[key])
+                self.assertAlmostEqual(values["predator_certainty"], 0.0)
+                self.assertAlmostEqual(values["predator_visible"], 0.0)
+                if "predator_dx" in values:
+                    self.assertAlmostEqual(values["predator_dx"], 0.0)
+                if "predator_dy" in values:
+                    self.assertAlmostEqual(values["predator_dy"], 0.0)
+        predator_meta = delayed_obs["meta"]["vision"]["predator"]
+        self.assertAlmostEqual(predator_meta["certainty"], 0.0)
+        self.assertAlmostEqual(predator_meta["visible"], 0.0)
+        self.assertAlmostEqual(predator_meta["dx"], 0.0)
+        self.assertAlmostEqual(predator_meta["dy"], 0.0)
+        self.assertFalse(delayed_obs["meta"]["predator_visible"])
+
+    def test_delay_jitter_does_not_create_zero_strength_directions(self) -> None:
+        noise = self._no_delay_noise_profile(decay=0.0, jitter=1.0)
+        world = self._world(delay_ticks=1.0, delay_noise=1.0, noise=noise)
+        world.reset(seed=108)
+        hunger_iface = OBSERVATION_INTERFACE_BY_KEY["hunger"]
+        hunger_mapping = {name: 0.0 for name in hunger_iface.signal_names}
+        hunger_mapping.update(
+            {
+                "food_smell_dx": 1.0,
+                "food_smell_dy": -1.0,
+                "food_smell_strength": 0.0,
+                "food_trace_dx": 1.0,
+                "food_trace_dy": -1.0,
+                "food_trace_strength": 0.0,
+            }
+        )
+
+        delayed = world._apply_temporal_noise_to_vector(
+            "hunger",
+            hunger_iface.vector_from_mapping(hunger_mapping),
+            decay_factor=1.0,
+            direction_jitter=1.0,
+        )
+        values = hunger_iface.bind_values(delayed)
+
+        self.assertAlmostEqual(values["food_smell_dx"], 0.0)
+        self.assertAlmostEqual(values["food_smell_dy"], 0.0)
+        self.assertAlmostEqual(values["food_trace_dx"], 0.0)
+        self.assertAlmostEqual(values["food_trace_dy"], 0.0)
+
+    def test_delay_jitter_does_not_create_zero_strength_meta_directions(self) -> None:
+        noise = self._no_delay_noise_profile(decay=0.0, jitter=1.0)
+        world = self._world(delay_ticks=1.0, delay_noise=1.0, noise=noise)
+        world.reset(seed=108)
+        meta = {
+            "vision": {},
+            "percept_traces": {
+                "food": {
+                    "certainty": 1.0,
+                    "strength": 0.0,
+                    "dx": 1.0,
+                    "dy": -1.0,
+                }
+            },
+        }
+
+        world._apply_temporal_noise_to_meta(
+            meta,
+            configured_delay=1,
+            effective_delay=1,
+            decay_factor=1.0,
+            direction_jitter=1.0,
+        )
+
+        self.assertAlmostEqual(meta["percept_traces"]["food"]["dx"], 0.0)
+        self.assertAlmostEqual(meta["percept_traces"]["food"]["dy"], 0.0)
+
+    def test_trace_signals_are_read_from_delayed_percept_state(self) -> None:
+        """
+        Verify that when perceptual delay is enabled, the observation's hunger `food_trace_strength`
+        reflects the delayed perceptual state rather than the current raw state.
+        
+        This test sets a nonzero food trace in the world's state, captures the current observation,
+        then clears the immediate trace and advances one tick with a perceptual delay of 1.0.
+        It asserts that:
+        - the current observation shows the original trace strength,
+        - the delayed observation returned by `step` also shows that trace strength,
+        - the raw (undelayed) observation after the step shows the cleared trace strength.
+        """
+        world = self._world(delay_ticks=1.0, delay_noise=0.0)
+        world.reset(seed=109)
+        world.food_positions = []
+        world.state.x = 5
+        world.state.y = 7
+        world.state.food_trace = PerceptTrace(target=(8, 7), age=0, certainty=0.8)
+        current_obs = world.observe()
+        current_hunger = OBSERVATION_INTERFACE_BY_KEY["hunger"].bind_values(current_obs["hunger"])
+
+        world.state.food_trace = PerceptTrace(target=None, age=0, certainty=0.0)
+        delayed_obs, _, _, _ = world.step(ACTION_TO_INDEX["STAY"])
+
+        delayed_hunger = OBSERVATION_INTERFACE_BY_KEY["hunger"].bind_values(delayed_obs["hunger"])
+        raw_hunger = OBSERVATION_INTERFACE_BY_KEY["hunger"].bind_values(
+            world._raw_observation()["hunger"]
+        )
+        self.assertAlmostEqual(current_hunger["food_trace_strength"], 0.8)
+        self.assertAlmostEqual(delayed_hunger["food_trace_strength"], 0.8)
+        self.assertAlmostEqual(raw_hunger["food_trace_strength"], 0.0)
+
+    def test_predator_dist_absent_from_non_meta_observation_keys(self) -> None:
+        """
+        Asserts that predator distance signals are present only in the observation meta diagnostics and not in any non-meta observation keys.
+        
+        Creates a world with no perceptual delay or delay noise, calls observe(), and verifies:
+        - No top-level observation key other than "meta" contains "predator_dist" in its name.
+        - The corresponding observation interface signal names for each non-meta view do not include "predator_dist" or "diagnostic_predator_dist".
+        - The only occurrence of "diagnostic_predator_dist" in the nested observation dict is at ("meta", "diagnostic", "diagnostic_predator_dist").
+        """
+        world = self._world(delay_ticks=0.0, delay_noise=0.0)
+        world.reset(seed=111)
+
+        observation = world.observe()
+
+        for key in observation:
+            if key == "meta":
+                continue
+            self.assertNotIn("predator_dist", key)
+            view_key = "motor_context" if key == "motor_extra" else key
+            signal_names = OBSERVATION_INTERFACE_BY_KEY[view_key].signal_names
+            self.assertNotIn("predator_dist", signal_names)
+            self.assertNotIn("diagnostic_predator_dist", signal_names)
+
+        diagnostic_paths: list[tuple[str, ...]] = []
+
+        def collect_diagnostic_paths(value: object, path: tuple[str, ...]) -> None:
+            """Record all nested diagnostic_predator_dist key paths."""
+            if isinstance(value, Mapping):
+                for child_key, child_value in value.items():
+                    child_path = (*path, str(child_key))
+                    if child_key == "diagnostic_predator_dist":
+                        diagnostic_paths.append(child_path)
+                    collect_diagnostic_paths(child_value, child_path)
+            elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                for index, child_value in enumerate(value):
+                    collect_diagnostic_paths(child_value, (*path, str(index)))
+
+        collect_diagnostic_paths(observation, ())
+        self.assertEqual(
+            diagnostic_paths,
+            [("meta", "diagnostic", "diagnostic_predator_dist")],
+        )
+
+
+class ExecutionDifficultyTest(unittest.TestCase):
+    def test_open_aligned_movement_has_zero_difficulty(self) -> None:
+        difficulty, components = compute_execution_difficulty(
+            heading=(1.0, 0.0),
+            intended_direction=(1.0, 0.0),
+            terrain=OPEN,
+            fatigue=0.0,
+        )
+        self.assertAlmostEqual(difficulty, 0.0)
+        self.assertAlmostEqual(components["orientation_alignment"], 1.0)
+        self.assertAlmostEqual(components["terrain_difficulty"], 0.0)
+
+    def test_opposed_narrow_fatigued_movement_is_hard(self) -> None:
+        difficulty, components = compute_execution_difficulty(
+            heading=(1.0, 0.0),
+            intended_direction=(-1.0, 0.0),
+            terrain=NARROW,
+            fatigue=1.0,
+        )
+        self.assertAlmostEqual(components["orientation_alignment"], 0.0)
+        self.assertAlmostEqual(components["terrain_difficulty"], 0.7)
+        self.assertAlmostEqual(components["raw_difficulty"], 1.4)
+        self.assertAlmostEqual(difficulty, 1.0)
+
+    def test_stay_has_no_orientation_mismatch(self) -> None:
+        difficulty, components = compute_execution_difficulty(
+            heading=(1.0, 0.0),
+            intended_direction=(0.0, 0.0),
+            terrain=CLUTTER,
+            fatigue=1.0,
+        )
+        self.assertAlmostEqual(components["orientation_alignment"], 1.0)
+        self.assertAlmostEqual(difficulty, 0.0)
+
+
 class MotorNoiseTest(unittest.TestCase):
-    """Tests for SpiderWorld._apply_motor_noise added in this PR."""
+    """Tests for embodiment-aware motor slip."""
 
     def _flip_all_profile(self) -> NoiseConfig:
         return NoiseConfig(
@@ -1418,14 +1917,66 @@ class MotorNoiseTest(unittest.TestCase):
     def test_motor_noise_one_always_changes_action(self) -> None:
         world = SpiderWorld(seed=67, noise_profile=self._flip_all_profile(), lizard_move_interval=999999)
         world.reset(seed=67)
-        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
-        self.assertNotEqual(info["executed_action"], "STAY")
+        _, _, _, info = world.step(ACTION_TO_INDEX["MOVE_UP"])
+        self.assertNotEqual(info["executed_action"], "MOVE_UP")
         self.assertTrue(info["motor_noise_applied"])
 
-    def test_motor_noise_executed_is_never_same_as_intended_when_flip_prob_is_one(self) -> None:
+    def test_motor_noise_does_not_create_motion_from_stay(self) -> None:
         world = SpiderWorld(seed=71, noise_profile=self._flip_all_profile(), lizard_move_interval=999999)
         world.reset(seed=71)
-        for action_name in ["STAY", "MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT"]:
+        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
+        self.assertEqual(info["executed_action"], "STAY")
+        self.assertFalse(info["motor_noise_applied"])
+
+    def test_orient_action_updates_heading_without_moving(self) -> None:
+        world = SpiderWorld(seed=72, noise_profile=self._no_flip_profile(), lizard_move_interval=999999)
+        world.reset(seed=72)
+        start_pos = world.spider_pos()
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["ORIENT_LEFT"])
+
+        self.assertEqual(world.spider_pos(), start_pos)
+        self.assertEqual((world.state.heading_dx, world.state.heading_dy), (-1, 0))
+        self.assertEqual((world.state.last_move_dx, world.state.last_move_dy), (0, 0))
+        self.assertEqual(info["executed_action"], "ORIENT_LEFT")
+
+    def test_orient_action_does_not_trigger_motor_slip(self) -> None:
+        """
+        Verifies that an ORIENT action updates the spider's heading without changing position and does not apply motor slip.
+        
+        Asserts the spider's position remains unchanged, the executed action equals the orient action, `motor_noise_applied` is false, `motor_slip["occurred"]` is false, `motor_slip["slip_probability"]` is 0.0, and the world heading is updated to the expected orient vector.
+        """
+        world = SpiderWorld(seed=74, noise_profile=self._flip_all_profile(), lizard_move_interval=999999)
+        world.reset(seed=74)
+        start_pos = world.spider_pos()
+
+        _, _, _, info = world.step(ACTION_TO_INDEX["ORIENT_UP"])
+
+        self.assertEqual(world.spider_pos(), start_pos)
+        self.assertEqual(info["executed_action"], "ORIENT_UP")
+        self.assertFalse(info["motor_noise_applied"])
+        self.assertFalse(info["motor_slip"]["occurred"])
+        self.assertAlmostEqual(info["motor_slip"]["slip_probability"], 0.0)
+        self.assertEqual((world.state.heading_dx, world.state.heading_dy), (0, -1))
+
+    def test_orient_action_advances_idle_physiology(self) -> None:
+        world = SpiderWorld(seed=76, noise_profile=self._no_flip_profile(), lizard_move_interval=999999)
+        world.reset(seed=76)
+        hunger_before = world.state.hunger
+        fatigue_before = world.state.fatigue
+
+        world.step(ACTION_TO_INDEX["ORIENT_RIGHT"])
+
+        self.assertGreater(world.state.hunger, hunger_before)
+        self.assertGreater(world.state.fatigue, fatigue_before)
+        self.assertEqual((world.state.heading_dx, world.state.heading_dy), (1, 0))
+
+    def test_motor_noise_executed_is_never_same_as_intended_when_flip_prob_is_one_for_movement(self) -> None:
+        world = SpiderWorld(seed=71, noise_profile=self._flip_all_profile(), lizard_move_interval=999999)
+        world.reset(seed=71)
+        for action_name in ["MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT"]:
             world.reset(seed=71)
             _, _, _, info = world.step(ACTION_TO_INDEX[action_name])
             self.assertNotEqual(
@@ -1434,11 +1985,13 @@ class MotorNoiseTest(unittest.TestCase):
                 f"Expected noise to change {action_name!r}, but got same action",
             )
 
-    def test_motor_noise_info_action_equals_executed_action(self) -> None:
+    def test_motor_noise_info_action_remains_intended_action(self) -> None:
         world = SpiderWorld(seed=73, noise_profile=self._flip_all_profile(), lizard_move_interval=999999)
         world.reset(seed=73)
-        _, _, _, info = world.step(ACTION_TO_INDEX["STAY"])
-        self.assertEqual(info["action"], info["executed_action"])
+        _, _, _, info = world.step(ACTION_TO_INDEX["MOVE_UP"])
+        self.assertEqual(info["action"], info["intended_action"])
+        self.assertEqual(info["action"], "MOVE_UP")
+        self.assertNotEqual(info["executed_action"], info["action"])
 
     def test_motor_noise_none_profile_motor_noise_applied_false(self) -> None:
         world = SpiderWorld(seed=79, noise_profile="none", lizard_move_interval=999999)
@@ -1457,6 +2010,171 @@ class MotorNoiseTest(unittest.TestCase):
         _, _, _, info_b = world_b.step(ACTION_TO_INDEX["MOVE_UP"])
 
         self.assertEqual(info_a["executed_action"], info_b["executed_action"])
+
+    def test_motor_slip_info_contains_execution_diagnostics(self) -> None:
+        world = SpiderWorld(seed=87, noise_profile=self._flip_all_profile(), lizard_move_interval=999999)
+        world.reset(seed=87)
+        _, _, _, info = world.step(ACTION_TO_INDEX["MOVE_UP"])
+        slip = info["motor_slip"]
+        self.assertTrue(slip["occurred"])
+        self.assertEqual(slip["original_action"], "MOVE_UP")
+        self.assertEqual(slip["executed_action"], info["executed_action"])
+        self.assertIn(slip["reason"], {"base", "terrain", "orientation", "fatigue"})
+        self.assertIn("orientation_alignment", slip["components"])
+        self.assertIn("terrain_difficulty", slip["components"])
+        self.assertIn("fatigue_factor", slip["components"])
+        self.assertIn("motor_execution_difficulty", info)
+
+    def test_slip_uses_stay_or_adjacent_action_not_reverse(self) -> None:
+        world = SpiderWorld(seed=91, noise_profile=self._flip_all_profile(), lizard_move_interval=999999)
+        world.reset(seed=91)
+        _, _, _, info = world.step(ACTION_TO_INDEX["MOVE_UP"])
+        self.assertIn(info["executed_action"], {"STAY", "MOVE_LEFT", "MOVE_RIGHT"})
+        self.assertNotEqual(info["executed_action"], "MOVE_DOWN")
+
+    def test_slip_probability_increases_with_execution_difficulty(self) -> None:
+        profile = NoiseConfig(
+            name="difficulty_slip_test",
+            visual={"certainty_jitter": 0.0, "direction_jitter": 0.0, "dropout_prob": 0.0},
+            olfactory={"strength_jitter": 0.0, "direction_jitter": 0.0},
+            motor={
+                "action_flip_prob": 0.0,
+                "orientation_slip_factor": 0.2,
+                "terrain_slip_factor": 0.4,
+                "fatigue_slip_factor": 0.2,
+            },
+            spawn={"uniform_mix": 0.0},
+            predator={"random_choice_prob": 0.0},
+        )
+        world = SpiderWorld(seed=97, noise_profile=profile, lizard_move_interval=999999)
+        world.reset(seed=97)
+        terrain, pos = _terrain_with_cleanup(self, world)
+
+        easy = _compute_slip_and_difficulty(
+            world,
+            terrain,
+            pos,
+            OPEN,
+            heading=(1.0, 0.0),
+            fatigue=0.0,
+        )
+        hard = _compute_slip_and_difficulty(
+            world,
+            terrain,
+            pos,
+            NARROW,
+            heading=(-1.0, 0.0),
+            fatigue=1.0,
+        )
+
+        self.assertLess(easy["slip_probability"], hard["slip_probability"])
+        self.assertLess(easy["execution_difficulty"], hard["execution_difficulty"])
+
+
+class MotorExecutionSlipMechanismTest(unittest.TestCase):
+    def _slip_profile(self, *, base: float = 0.0) -> NoiseConfig:
+        return NoiseConfig(
+            name="action_center_slip_test",
+            visual={"certainty_jitter": 0.0, "direction_jitter": 0.0, "dropout_prob": 0.0},
+            olfactory={"strength_jitter": 0.0, "direction_jitter": 0.0},
+            motor={
+                "action_flip_prob": base,
+                "orientation_slip_factor": 0.2,
+                "terrain_slip_factor": 0.4,
+                "fatigue_slip_factor": 0.2,
+            },
+            spawn={"uniform_mix": 0.0},
+            predator={"random_choice_prob": 0.0},
+        )
+
+    def test_slip_probability_increases_with_execution_difficulty(self) -> None:
+        world = SpiderWorld(
+            seed=211,
+            noise_profile=self._slip_profile(),
+            lizard_move_interval=999999,
+        )
+        world.reset(seed=211)
+        terrain, pos = _terrain_with_cleanup(self, world)
+
+        easy = _compute_slip_and_difficulty(
+            world,
+            terrain,
+            pos,
+            OPEN,
+            heading=(1.0, 0.0),
+            fatigue=0.0,
+        )
+        hard = _compute_slip_and_difficulty(
+            world,
+            terrain,
+            pos,
+            NARROW,
+            heading=(-1.0, 0.0),
+            fatigue=1.0,
+        )
+
+        self.assertLess(easy["slip_probability"], hard["slip_probability"])
+        self.assertLess(easy["execution_difficulty"], hard["execution_difficulty"])
+
+    def test_slip_sampler_biases_toward_stay(self) -> None:
+        class FakeMotorRng:
+            def __init__(self) -> None:
+                self.weights: list[float] = []
+
+            def choice(self, count: int, p: Sequence[float]) -> int:
+                self.weights = [float(value) for value in p]
+                return 0
+
+        world = SpiderWorld(seed=223, lizard_move_interval=999999)
+        fake_rng = FakeMotorRng()
+        world.motor_rng = fake_rng
+
+        self.assertEqual(world._sample_slip_action("MOVE_UP"), "STAY")
+        self.assertGreater(fake_rng.weights[0], fake_rng.weights[1])
+        self.assertGreater(fake_rng.weights[0], fake_rng.weights[2])
+        self.assertAlmostEqual(sum(fake_rng.weights), 1.0)
+
+    def test_slip_sampler_deviates_to_adjacent_not_reverse(self) -> None:
+        class FakeMotorRng:
+            def __init__(self, index: int) -> None:
+                self.index = index
+
+            def choice(self, count: int, p: Sequence[float]) -> int:
+                return self.index
+
+        world = SpiderWorld(seed=227, lizard_move_interval=999999)
+        world.motor_rng = FakeMotorRng(1)
+        self.assertEqual(world._sample_slip_action("MOVE_RIGHT"), "MOVE_UP")
+        world.motor_rng = FakeMotorRng(2)
+        self.assertEqual(world._sample_slip_action("MOVE_RIGHT"), "MOVE_DOWN")
+        self.assertNotEqual(world._sample_slip_action("MOVE_RIGHT"), "MOVE_LEFT")
+
+    def test_end_to_end_motor_selection_slips_to_final_execution_action(self) -> None:
+        world = SpiderWorld(
+            seed=229,
+            noise_profile=self._slip_profile(base=1.0),
+            lizard_move_interval=999999,
+        )
+        brain = SpiderBrain(seed=229, module_dropout=0.0)
+        observation = world.reset(seed=229)
+
+        def force_move_up(_inputs: np.ndarray, *, store_cache: bool = False) -> np.ndarray:
+            logits = np.zeros(len(LOCOMOTION_ACTIONS), dtype=float)
+            logits[ACTION_TO_INDEX["MOVE_UP"]] = 100.0
+            return logits
+
+        with patch.object(brain.motor_cortex, "forward", side_effect=force_move_up):
+            decision = brain.act(observation, bus=None, sample=False)
+
+        self.assertEqual(decision.motor_action_idx, ACTION_TO_INDEX["MOVE_UP"])
+        self.assertEqual(decision.action_idx, ACTION_TO_INDEX["MOVE_UP"])
+
+        _, _, _, info = world.step(decision.action_idx)
+        self.assertEqual(info["intended_action"], "MOVE_UP")
+        self.assertEqual(info["motor_slip"]["original_action"], "MOVE_UP")
+        self.assertTrue(info["motor_noise_applied"])
+        self.assertNotEqual(info["executed_action"], info["intended_action"])
+        self.assertIn(info["executed_action"], {"STAY", "MOVE_LEFT", "MOVE_RIGHT"})
 
 
 class PredatorDeterministicTiebreakingTest(unittest.TestCase):
@@ -1497,6 +2215,326 @@ class PredatorDeterministicTiebreakingTest(unittest.TestCase):
 
         self.assertIsNotNone(target_a)
         self.assertEqual(target_a, target_b)
+
+
+class MoveDeltasTest(unittest.TestCase):
+    """Tests for the updated MOVE_DELTAS constant (excludes all zero-delta actions)."""
+
+    def test_move_deltas_does_not_contain_zero_delta(self) -> None:
+        for delta in MOVE_DELTAS:
+            self.assertNotEqual(delta, (0, 0), f"MOVE_DELTAS contains zero delta {delta!r}")
+
+    def test_move_deltas_contains_four_cardinal_directions(self) -> None:
+        self.assertEqual(len(MOVE_DELTAS), 4)
+
+    def test_move_deltas_contains_all_cardinal_deltas(self) -> None:
+        expected = {(0, -1), (0, 1), (-1, 0), (1, 0)}
+        self.assertEqual(set(MOVE_DELTAS), expected)
+
+    def test_stay_not_in_move_deltas(self) -> None:
+        from spider_cortex_sim.interfaces import ACTION_DELTAS
+        self.assertNotIn(ACTION_DELTAS["STAY"], MOVE_DELTAS)
+
+    def test_orient_deltas_not_in_move_deltas(self) -> None:
+        from spider_cortex_sim.interfaces import ACTION_DELTAS, ORIENT_HEADINGS
+        for action_name in ORIENT_HEADINGS:
+            self.assertNotIn(action_name, ACTION_DELTAS)
+        self.assertEqual(
+            tuple(delta for delta in ACTION_DELTAS.values() if delta != (0, 0)),
+            MOVE_DELTAS,
+        )
+
+
+class CopyObservationPayloadTest(unittest.TestCase):
+    def test_numpy_arrays_are_copied_not_aliased(self) -> None:
+        arr = np.array([1.0, 2.0, 3.0])
+        obs = {"visual": arr, "meta": {"tick": 0}}
+        copied = _copy_observation_payload(obs)
+        arr[0] = 99.0
+        np.testing.assert_allclose(copied["visual"], np.array([1.0, 2.0, 3.0]))
+
+    def test_dict_values_are_deep_copied(self) -> None:
+        meta = {"tick": 5, "info": {"nested": True}}
+        obs = {"meta": meta}
+        copied = _copy_observation_payload(obs)
+        meta["tick"] = 99
+        meta["info"]["nested"] = False
+        self.assertEqual(copied["meta"]["tick"], 5)
+        self.assertTrue(copied["meta"]["info"]["nested"])
+
+    def test_returns_new_dict_not_same_object(self) -> None:
+        obs = {"visual": np.array([0.0]), "meta": {}}
+        copied = _copy_observation_payload(obs)
+        self.assertIsNot(copied, obs)
+
+    def test_all_keys_preserved(self) -> None:
+        obs = {
+            "visual": np.array([1.0]),
+            "sensory": np.array([2.0]),
+            "meta": {"tick": 0},
+        }
+        copied = _copy_observation_payload(obs)
+        self.assertEqual(set(copied.keys()), set(obs.keys()))
+
+    def test_copied_numpy_array_is_independent(self) -> None:
+        arr = np.zeros(3)
+        obs = {"data": arr}
+        copied = _copy_observation_payload(obs)
+        arr[1] = 7.0
+        np.testing.assert_allclose(copied["data"], np.zeros(3))
+
+    def test_scalar_values_are_preserved(self) -> None:
+        obs = {"count": 42, "score": 0.5}
+        copied = _copy_observation_payload(obs)
+        self.assertEqual(copied["count"], 42)
+        self.assertAlmostEqual(copied["score"], 0.5)
+
+    def test_empty_observation_returns_empty_dict(self) -> None:
+        copied = _copy_observation_payload({})
+        self.assertEqual(copied, {})
+
+
+class IsTemporalDirectionFieldTest(unittest.TestCase):
+    def test_food_dx_is_temporal_direction(self) -> None:
+        self.assertTrue(_is_temporal_direction_field("food_dx"))
+
+    def test_food_dy_is_temporal_direction(self) -> None:
+        self.assertTrue(_is_temporal_direction_field("food_dy"))
+
+    def test_predator_dx_is_temporal_direction(self) -> None:
+        self.assertTrue(_is_temporal_direction_field("predator_dx"))
+
+    def test_shelter_dy_is_temporal_direction(self) -> None:
+        self.assertTrue(_is_temporal_direction_field("shelter_dy"))
+
+    def test_heading_dx_is_not_temporal_direction(self) -> None:
+        self.assertFalse(_is_temporal_direction_field("heading_dx"))
+
+    def test_heading_dy_is_not_temporal_direction(self) -> None:
+        self.assertFalse(_is_temporal_direction_field("heading_dy"))
+
+    def test_last_move_dx_is_not_temporal_direction(self) -> None:
+        self.assertFalse(_is_temporal_direction_field("last_move_dx"))
+
+    def test_last_move_dy_is_not_temporal_direction(self) -> None:
+        self.assertFalse(_is_temporal_direction_field("last_move_dy"))
+
+    def test_memory_dx_field_is_not_temporal_direction(self) -> None:
+        self.assertFalse(_is_temporal_direction_field("food_memory_dx"))
+
+    def test_memory_dy_field_is_not_temporal_direction(self) -> None:
+        self.assertFalse(_is_temporal_direction_field("shelter_memory_dy"))
+
+    def test_certainty_field_is_not_temporal_direction(self) -> None:
+        self.assertFalse(_is_temporal_direction_field("food_certainty"))
+
+    def test_strength_field_is_not_temporal_direction(self) -> None:
+        self.assertFalse(_is_temporal_direction_field("food_smell_strength"))
+
+    def test_plain_string_without_suffix_is_not_temporal_direction(self) -> None:
+        self.assertFalse(_is_temporal_direction_field("hunger"))
+
+    def test_trace_dx_field_is_temporal_direction(self) -> None:
+        self.assertTrue(_is_temporal_direction_field("food_trace_dx"))
+
+    def test_trace_dy_field_is_temporal_direction(self) -> None:
+        self.assertTrue(_is_temporal_direction_field("predator_trace_dy"))
+
+
+class PerceptualBufferEdgeCasesTest(unittest.TestCase):
+    def test_capacity_equals_max_delay_plus_one(self) -> None:
+        for max_delay in (0, 1, 2, 5):
+            with self.subTest(max_delay=max_delay):
+                buf = PerceptualBuffer(max_delay=max_delay)
+                self.assertEqual(buf.capacity, max_delay + 1)
+
+    def test_negative_max_delay_treated_as_zero(self) -> None:
+        buf = PerceptualBuffer(max_delay=-3)
+        self.assertEqual(buf.max_delay, 0)
+        self.assertEqual(buf.capacity, 1)
+
+    def test_clear_empties_buffer(self) -> None:
+        buf = PerceptualBuffer(max_delay=3)
+        buf.push(0, {"v": np.array([1.0])})
+        buf.push(1, {"v": np.array([2.0])})
+        buf.clear()
+        with self.assertRaises(ValueError):
+            buf.get(0)
+
+    def test_clear_then_push_works_normally(self) -> None:
+        buf = PerceptualBuffer(max_delay=2)
+        buf.push(0, {"v": np.array([1.0])})
+        buf.clear()
+        buf.push(5, {"v": np.array([5.0])})
+        obs, _ = buf.get(0)
+        np.testing.assert_allclose(obs["v"], np.array([5.0]))
+
+    def test_get_empty_buffer_raises_value_error(self) -> None:
+        buf = PerceptualBuffer(max_delay=2)
+        with self.assertRaises(ValueError):
+            buf.get(0)
+
+    def test_get_with_delay_larger_than_buffer_returns_oldest(self) -> None:
+        buf = PerceptualBuffer(max_delay=5)
+        buf.push(10, {"v": np.array([10.0])})
+        buf.push(11, {"v": np.array([11.0])})
+        # Request delay of 10 but only 2 entries → should return oldest
+        obs, effective_delay = buf.get(10)
+        np.testing.assert_allclose(obs["v"], np.array([10.0]))
+        self.assertEqual(effective_delay, 1)
+
+    def test_get_delay_zero_returns_newest(self) -> None:
+        buf = PerceptualBuffer(max_delay=3)
+        buf.push(0, {"v": np.array([1.0])})
+        buf.push(1, {"v": np.array([2.0])})
+        buf.push(2, {"v": np.array([3.0])})
+        obs, effective_delay = buf.get(0)
+        np.testing.assert_allclose(obs["v"], np.array([3.0]))
+        self.assertEqual(effective_delay, 0)
+
+    def test_get_negative_delay_treated_as_zero(self) -> None:
+        buf = PerceptualBuffer(max_delay=2)
+        buf.push(0, {"v": np.array([9.0])})
+        obs, effective_delay = buf.get(-5)
+        np.testing.assert_allclose(obs["v"], np.array([9.0]))
+        self.assertEqual(effective_delay, 0)
+
+    def test_buffer_prunes_old_entries_to_maintain_capacity(self) -> None:
+        buf = PerceptualBuffer(max_delay=2)
+        for tick in range(10):
+            buf.push(tick, {"tick": tick})
+        self.assertLessEqual(len(buf._entries), buf.capacity)
+
+    def test_get_returns_independent_copy(self) -> None:
+        """Mutations to returned observation should not affect buffer contents."""
+        buf = PerceptualBuffer(max_delay=1)
+        buf.push(0, {"visual": np.array([1.0, 2.0])})
+        obs1, _ = buf.get(0)
+        obs1["visual"][0] = 99.0
+        obs2, _ = buf.get(0)
+        np.testing.assert_allclose(obs2["visual"], np.array([1.0, 2.0]))
+
+
+class PerceptualDelayTicksTest(unittest.TestCase):
+    def test_default_perceptual_delay_ticks_rounds_to_one(self) -> None:
+        world = SpiderWorld(seed=33, lizard_move_interval=999999)
+        world.reset(seed=33)
+        self.assertEqual(world._perceptual_delay_ticks(), 1)
+
+    def test_perceptual_delay_ticks_respects_configured_value(self) -> None:
+        profile = _profile_with_perception(perceptual_delay_ticks=2.0)
+        world = SpiderWorld(seed=33, lizard_move_interval=999999, operational_profile=profile)
+        world.reset(seed=33)
+        self.assertEqual(world._perceptual_delay_ticks(), 2)
+
+    def test_perceptual_delay_ticks_rounds_correctly(self) -> None:
+        profile = _profile_with_perception(perceptual_delay_ticks=1.6)
+        world = SpiderWorld(seed=33, lizard_move_interval=999999, operational_profile=profile)
+        world.reset(seed=33)
+        self.assertEqual(world._perceptual_delay_ticks(), 2)
+
+    def test_perceptual_delay_ticks_clips_negative_to_zero(self) -> None:
+        profile = _profile_with_perception(perceptual_delay_ticks=-3.0)
+        world = SpiderWorld(seed=33, lizard_move_interval=999999, operational_profile=profile)
+        world.reset(seed=33)
+        self.assertEqual(world._perceptual_delay_ticks(), 0)
+
+    def test_perceptual_delay_noise_scale_default_is_positive(self) -> None:
+        world = SpiderWorld(seed=33, lizard_move_interval=999999)
+        world.reset(seed=33)
+        self.assertGreater(world._perceptual_delay_noise_scale(), 0.0)
+
+    def test_perceptual_delay_noise_scale_respects_configured_value(self) -> None:
+        profile = _profile_with_perception(perceptual_delay_noise=0.75)
+        world = SpiderWorld(seed=33, lizard_move_interval=999999, operational_profile=profile)
+        world.reset(seed=33)
+        self.assertAlmostEqual(world._perceptual_delay_noise_scale(), 0.75)
+
+    def test_perceptual_delay_noise_scale_clips_negative_to_zero(self) -> None:
+        profile = _profile_with_perception(perceptual_delay_noise=-1.0)
+        world = SpiderWorld(seed=33, lizard_move_interval=999999, operational_profile=profile)
+        world.reset(seed=33)
+        self.assertAlmostEqual(world._perceptual_delay_noise_scale(), 0.0)
+
+
+class DelayRngChannelTest(unittest.TestCase):
+    def test_delay_rng_exists_after_reset(self) -> None:
+        world = SpiderWorld(seed=55, lizard_move_interval=999999)
+        world.reset(seed=55)
+        self.assertTrue(hasattr(world, "delay_rng"))
+
+    def test_delay_rng_is_distinct_from_other_channels(self) -> None:
+        world = SpiderWorld(seed=55, lizard_move_interval=999999)
+        world.reset(seed=55)
+        channels = [world.spawn_rng, world.predator_rng, world.visual_rng, world.olfactory_rng, world.motor_rng, world.delay_rng]
+        ids = [id(ch) for ch in channels]
+        self.assertEqual(len(ids), len(set(ids)), "RNG channels are not all distinct objects")
+
+    def test_delay_rng_produces_reproducible_results(self) -> None:
+        world_a = SpiderWorld(seed=57, lizard_move_interval=999999)
+        world_b = SpiderWorld(seed=57, lizard_move_interval=999999)
+        world_a.reset(seed=57)
+        world_b.reset(seed=57)
+        self.assertAlmostEqual(float(world_a.delay_rng.random()), float(world_b.delay_rng.random()))
+
+    def test_delay_rng_differs_with_different_seeds(self) -> None:
+        world_a = SpiderWorld(seed=59, lizard_move_interval=999999)
+        world_b = SpiderWorld(seed=61, lizard_move_interval=999999)
+        world_a.reset(seed=59)
+        world_b.reset(seed=61)
+        val_a = float(world_a.delay_rng.random())
+        val_b = float(world_b.delay_rng.random())
+        self.assertNotAlmostEqual(val_a, val_b, places=6)
+
+
+class OrientActionHeadingTest(unittest.TestCase):
+    """Regression/boundary tests for ORIENT action heading updates."""
+
+    def _make_world(self) -> SpiderWorld:
+        profile = _profile_with_perception(perceptual_delay_ticks=0.0)
+        world = SpiderWorld(seed=81, lizard_move_interval=999999, operational_profile=profile)
+        world.reset(seed=81)
+        return world
+
+    def test_all_orient_actions_update_heading_correctly(self) -> None:
+        from spider_cortex_sim.interfaces import ORIENT_HEADINGS
+        expected = {
+            "ORIENT_UP": (0, -1),
+            "ORIENT_DOWN": (0, 1),
+            "ORIENT_LEFT": (-1, 0),
+            "ORIENT_RIGHT": (1, 0),
+        }
+        for action_name, (expected_dx, expected_dy) in expected.items():
+            with self.subTest(action=action_name):
+                world = self._make_world()
+                world.state.heading_dx = 0
+                world.state.heading_dy = 0
+                world.step(ACTION_TO_INDEX[action_name])
+                self.assertEqual(world.state.heading_dx, expected_dx)
+                self.assertEqual(world.state.heading_dy, expected_dy)
+
+    def test_orient_action_clears_last_move_deltas(self) -> None:
+        world = self._make_world()
+        world.state.last_move_dx = 1
+        world.state.last_move_dy = -1
+        world.step(ACTION_TO_INDEX["ORIENT_DOWN"])
+        self.assertEqual(world.state.last_move_dx, 0)
+        self.assertEqual(world.state.last_move_dy, 0)
+
+    def test_orient_action_motor_slip_result_has_zero_probability(self) -> None:
+        world = self._make_world()
+        for action_name in ("ORIENT_UP", "ORIENT_DOWN", "ORIENT_LEFT", "ORIENT_RIGHT"):
+            with self.subTest(action=action_name):
+                result = world._apply_motor_noise(action_name)
+                self.assertAlmostEqual(result["slip_probability"], 0.0)
+                self.assertFalse(result["occurred"])
+                self.assertEqual(result["original_action"], action_name)
+                self.assertEqual(result["executed_action"], action_name)
+
+    def test_orient_action_motor_noise_result_reason_is_none(self) -> None:
+        world = self._make_world()
+        result = world._apply_motor_noise("ORIENT_LEFT")
+        self.assertEqual(result["reason"], "none")
 
 
 if __name__ == "__main__":

@@ -8,21 +8,23 @@ the world and tick context in a fixed order.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 
 from . import stages as tick_stages
-from .interfaces import ACTION_DELTAS, ACTION_TO_INDEX, LOCOMOTION_ACTIONS
+from .interfaces import ACTION_DELTAS, ACTION_TO_INDEX, LOCOMOTION_ACTIONS, OBSERVATION_VIEW_BY_KEY, ORIENT_HEADINGS
 from .maps import BLOCKED, CLUTTER, MAP_TEMPLATE_NAMES, NARROW, build_map_template, terrain_at
 from .memory import MEMORY_TTLS, age_or_clear_memory, empty_memory_slot, escape_memory_target, memory_vector, refresh_memory, set_memory
 from .noise import NoiseConfig, resolve_noise_profile
 from .perception import (
     PerceivedTarget,
+    _compute_target_visibility_zone,
     has_line_of_sight,
-    lizard_detects_spider,
     observe_world,
+    predator_detects_spider,
     predator_motion_salience,
     predator_visible_to_spider,
     smell_gradient,
@@ -41,7 +43,12 @@ from .physiology import (
     sleep_phase_from_streak,
     sleep_phase_level,
 )
-from .predator import LizardState, PredatorController
+from .predator import (
+    DEFAULT_LIZARD_PROFILE,
+    LizardState,
+    PredatorController,
+    PredatorProfile,
+)
 from .operational_profiles import OperationalProfile, resolve_operational_profile
 from .reward import (
     REWARD_COMPONENT_NAMES,
@@ -54,20 +61,186 @@ from .world_types import MemorySlot, PerceptTrace, SpiderState, TickContext, Tic
 
 
 ACTIONS: Sequence[str] = tuple(LOCOMOTION_ACTIONS)
-MOVE_DELTAS = tuple(ACTION_DELTAS[action] for action in ACTIONS if action != "STAY")
+MOVE_DELTAS = tuple(delta for delta in ACTION_DELTAS.values() if delta != (0, 0))
 SHELTER_ROLE_LEVELS = {
     "outside": 0.0,
     "entrance": 1.0 / 3.0,
     "inside": 2.0 / 3.0,
     "deep": 1.0,
 }
+TERRAIN_DIFFICULTY = {
+    CLUTTER: 0.4,
+    NARROW: 0.7,
+    BLOCKED: 1.0,
+}
+SLIP_ADJACENT_ACTIONS = {
+    "MOVE_UP": ("MOVE_LEFT", "MOVE_RIGHT"),
+    "MOVE_DOWN": ("MOVE_LEFT", "MOVE_RIGHT"),
+    "MOVE_LEFT": ("MOVE_UP", "MOVE_DOWN"),
+    "MOVE_RIGHT": ("MOVE_UP", "MOVE_DOWN"),
+}
+
+
+def _terrain_difficulty(terrain: str) -> float:
+    return float(np.clip(TERRAIN_DIFFICULTY.get(str(terrain), 0.0), 0.0, 1.0))
+
+
+def compute_execution_difficulty(
+    heading: tuple[float, float],
+    intended_direction: tuple[float, float],
+    terrain: str,
+    fatigue: float,
+) -> tuple[float, dict[str, float]]:
+    """
+    Compute how difficult a movement is to execute from heading, direction, terrain, and fatigue.
+
+    Returns a float difficulty and a dict of diagnostics.
+    Diagnostics keys: heading_dx, heading_dy, move_dx, move_dy, orientation_alignment,
+    orientation_mismatch, terrain_difficulty, fatigue_factor, raw_difficulty.
+    """
+    heading_dx, heading_dy = float(heading[0]), float(heading[1])
+    move_dx, move_dy = float(intended_direction[0]), float(intended_direction[1])
+    heading_norm = float(np.hypot(heading_dx, heading_dy))
+    move_norm = float(np.hypot(move_dx, move_dy))
+    if heading_norm <= 0.0 or move_norm <= 0.0:
+        orientation_alignment = 1.0
+    else:
+        dot = heading_dx * move_dx + heading_dy * move_dy
+        cosine = float(np.clip(dot / (heading_norm * move_norm), -1.0, 1.0))
+        orientation_alignment = float(np.clip((cosine + 1.0) / 2.0, 0.0, 1.0))
+    terrain_factor = _terrain_difficulty(terrain)
+    fatigue_factor = float(np.clip(fatigue, 0.0, 1.0))
+    orientation_mismatch = float(np.clip(1.0 - orientation_alignment, 0.0, 1.0))
+    raw_difficulty = terrain_factor * orientation_mismatch * (1.0 + fatigue_factor)
+    difficulty = float(np.clip(raw_difficulty, 0.0, 1.0))
+    return difficulty, {
+        "heading_dx": heading_dx,
+        "heading_dy": heading_dy,
+        "move_dx": move_dx,
+        "move_dy": move_dy,
+        "orientation_alignment": orientation_alignment,
+        "orientation_mismatch": orientation_mismatch,
+        "terrain_difficulty": terrain_factor,
+        "fatigue_factor": fatigue_factor,
+        "raw_difficulty": float(raw_difficulty),
+    }
+
+
+def _copy_observation_payload(observation: dict[str, object]) -> dict[str, object]:
+    """
+    Create a deep copy of an observation payload, copying NumPy arrays as arrays and deep-copying all other values.
+    
+    Parameters:
+        observation (dict[str, object]): Observation mapping of field names to values (may include numpy.ndarray).
+    
+    Returns:
+        dict[str, object]: A new observation dict where each numpy.ndarray value is a shallow copy of the array and all other values are deep-copied.
+    """
+    copied: dict[str, object] = {}
+    for key, value in observation.items():
+        if isinstance(value, np.ndarray):
+            copied[key] = value.copy()
+        else:
+            copied[key] = deepcopy(value)
+    return copied
+
+
+class PerceptualBuffer:
+    """Ring buffer that stores raw observations by simulation tick."""
+
+    def __init__(self, max_delay: int) -> None:
+        """
+        Initialize the perceptual buffer with a configured maximum delay.
+        
+        Parameters:
+            max_delay (int): Maximum perceptual delay in ticks; negative values are treated as 0, and the buffer capacity will be `max_delay + 1`.
+        """
+        self.max_delay = max(0, int(max_delay))
+        self._entries: list[tuple[int, dict[str, object]]] = []
+
+    @property
+    def capacity(self) -> int:
+        """
+        Number of entries the perceptual buffer can hold.
+        
+        Returns:
+            capacity (int): The maximum number of stored payloads, equal to max_delay + 1.
+        """
+        return self.max_delay + 1
+
+    def clear(self) -> None:
+        """
+        Clear all stored perceptual entries from the buffer.
+        
+        After calling this, the buffer is empty and subsequent retrievals will behave as if no observations have been pushed.
+        """
+        self._entries.clear()
+
+    def push(self, tick: int, observation: dict[str, object]) -> None:
+        """
+        Store a timestamped observation payload in the ring buffer, replacing colliding ticks and pruning old entries to maintain capacity.
+        
+        The provided `observation` is copied before storage to prevent external mutation. If an entry for the same `tick` already exists as the newest entry, it is replaced; otherwise the entry is appended. If the buffer exceeds its capacity after insertion, the oldest entries are removed so the buffer length equals `capacity`.
+        
+        Parameters:
+            tick (int): Simulation tick associated with the observation.
+            observation (dict[str, object]): Observation payload to store; will be deep-copied internally.
+        """
+        entry = (int(tick), _copy_observation_payload(observation))
+        if self._entries and self._entries[-1][0] == int(tick):
+            self._entries[-1] = entry
+        else:
+            self._entries.append(entry)
+        if len(self._entries) > self.capacity:
+            del self._entries[: len(self._entries) - self.capacity]
+
+    def get(self, delay_ticks: int) -> tuple[dict[str, object], int]:
+        """
+        Retrieve a delayed observation payload from the perceptual buffer.
+        
+        Parameters:
+            delay_ticks (int): Desired delay in ticks (clipped to zero if negative).
+        
+        Returns:
+            payload (dict[str, object]): A deep-copied observation payload corresponding to the requested delay or the oldest available entry if the buffer is shorter than requested.
+            effective_delay (int): The actual delay (in ticks) applied, which may be smaller than `delay_ticks` when the buffer does not contain that many past entries.
+        
+        Raises:
+            ValueError: If the perceptual buffer is empty.
+        """
+        if not self._entries:
+            raise ValueError("PerceptualBuffer is empty.")
+        requested = max(0, int(delay_ticks))
+        index = max(0, len(self._entries) - 1 - requested)
+        effective_delay = len(self._entries) - 1 - index
+        return _copy_observation_payload(self._entries[index][1]), effective_delay
+
+
+def _is_temporal_direction_field(field_name: str) -> bool:
+    """
+    Determine whether an observation field name represents a temporal direction component.
+    
+    A field is considered temporal direction if it ends with `_dx` or `_dy` but is not one of `heading_dx`, `heading_dy`, `last_move_dx`, `last_move_dy`, and does not contain `_memory_`.
+    
+    Returns:
+        `true` if the name denotes a temporal direction component, `false` otherwise.
+    """
+    if not (field_name.endswith("_dx") or field_name.endswith("_dy")):
+        return False
+    if field_name in {"heading_dx", "heading_dy", "last_move_dx", "last_move_dy"}:
+        return False
+    if "_memory_" in field_name:
+        return False
+    return True
 
 
 class SpiderWorld:
-    """Grid world with explicit shelter geometry, memories, and a predator FSM.
+    """Grid world with shelter geometry, perception-grounded memory, and predator FSMs.
 
-    Explicit memory is maintained by the world and is observable in traces and the GUI.
-    The brain only consumes those signals; there is no second latent memory system outside this module.
+    Explicit memory data is sourced from local perception, contact events, and
+    movement history. The world pipeline maintains mechanical aging, TTL
+    expiration, traces, and GUI/export views; it does not grant the brain direct
+    access to hidden world state.
     """
 
     move_deltas = MOVE_DELTAS
@@ -92,7 +265,7 @@ class SpiderWorld:
     ) -> None:
         """
         Create and initialize a SpiderWorld simulation with map, agent state, predator, and RNG.
-        
+
         Parameters:
             width (int): Grid width in cells.
             height (int): Grid height in cells.
@@ -148,11 +321,15 @@ class SpiderWorld:
         self.configure_map_template(map_template)
         self.episode_seed = int(seed)
         self._reset_rngs(self.episode_seed)
+        self._perceptual_buffer = PerceptualBuffer(self._perceptual_delay_ticks())
         self.tick = 0
         self.food_positions: List[Tuple[int, int]] = []
-        self.predator_controller = PredatorController()
+        self.predators: List[LizardState] = []
+        self.predator_controllers: List[PredatorController] = []
+        self._predator_profiles: List[PredatorProfile] = [DEFAULT_LIZARD_PROFILE]
         self.state = self._initial_spider_state(*self.map_template.spider_start)
-        self.lizard = self._spawn_lizard()
+        self.predators = self._spawn_predators(list(self._predator_profiles))
+        self._sync_predator_controllers()
         self._last_on_shelter = False
         self._last_predator_visible = False
         self._predator_threat_episode_active = False
@@ -162,7 +339,7 @@ class SpiderWorld:
         """
         Reinitialize per-episode random number generators and record the episode seed.
         
-        Sets `self.episode_seed` from `resolved_seed` and derives five independent NumPy RNGs (spawn, predator, visual, olfactory, motor) from a single SeedSequence seeded by the instance seed and the episode seed. Also sets `self.rng` as a backward-compatible alias for `self.predator_rng`.
+        Sets `self.episode_seed` from `resolved_seed` and derives six independent NumPy RNGs (spawn, predator, visual, olfactory, motor, delay) from a single SeedSequence seeded by the instance seed and the episode seed. Also sets `self.rng` as a backward-compatible alias for `self.predator_rng`.
         
         Parameters:
             resolved_seed (int): Episode-specific seed used to derive the RNG channels.
@@ -170,13 +347,14 @@ class SpiderWorld:
         """
         self.episode_seed = int(resolved_seed)
         seed_sequence = np.random.SeedSequence([int(self.seed), self.episode_seed])
-        channel_sequences = seed_sequence.spawn(5)
+        channel_sequences = seed_sequence.spawn(6)
         self.spawn_rng = np.random.default_rng(channel_sequences[0])
         self.predator_rng = np.random.default_rng(channel_sequences[1])
         self.visual_rng = np.random.default_rng(channel_sequences[2])
         self.olfactory_rng = np.random.default_rng(channel_sequences[3])
         self.motor_rng = np.random.default_rng(channel_sequences[4])
-        # Backward-compatible alias for legacy world-owned random events.
+        self.delay_rng = np.random.default_rng(channel_sequences[5])
+        # Backward-compatible alias for legacy world-level random events.
         self.rng = self.predator_rng
 
     def configure_map_template(self, name: str) -> None:
@@ -297,14 +475,23 @@ class SpiderWorld:
         positions: Iterable[Tuple[int, int]],
     ) -> PerceptTrace:
         """
-        Refresh or decay a short-lived `PerceptTrace` based on the latest raw percept.
-
-        A trace is refreshed only when a visible percept provides an explicit
-        `percept.position` that matches the candidate set and remains consistent
-        with the reported distance, current heading, and line of sight. On
-        refresh the returned trace resets to `age=0` and stores certainty
-        clipped to the unit interval; otherwise the existing trace ages or clears
-        through the normal decay path.
+        Refresh or age a short-lived percept trace using the latest raw percept.
+        
+        If the provided percept is visible, not occluded, supplies a concrete position that matches one of
+        the candidate positions, reports a Manhattan distance equal to the spider's distance to that
+        position, is not classified as `"outside"` by visibility zone, and there is line of sight, the
+        trace is refreshed: returned with `age = 0` and `certainty` clipped to the interval [0.0, 1.0].
+        Otherwise the existing trace is aged by 1 (and its certainty clipped); if the aged trace has
+        non-positive strength the function returns an empty percept trace.
+        
+        Parameters:
+            trace (PerceptTrace): Current short-lived trace to refresh or age.
+            percept (PerceivedTarget): Latest raw percept used to attempt a refresh.
+            positions (Iterable[Tuple[int, int]]): Candidate positions that a valid percept position must match.
+        
+        Returns:
+            PerceptTrace: The refreshed trace when refresh conditions are met, the aged trace when still
+            active, or an empty percept trace when no active trace remains.
         """
         if percept.visible > 0.0 and percept.occluded <= 0.0 and percept.position is not None:
             source = self.spider_pos()
@@ -312,16 +499,10 @@ class SpiderWorld:
             percept_dist = int(percept.dist)
             target = tuple(percept.position)
             if target in candidate_set:
-                rel_x = int(target[0] - source[0])
-                rel_y = int(target[1] - source[1])
-                heading = (int(self.state.heading_dx), int(self.state.heading_dy))
-                heading_allows_target = heading == (0, 0) or (
-                    rel_x == 0
-                    and rel_y == 0
-                ) or (heading[0] * rel_x + heading[1] * rel_y) >= 0
+                visibility_zone = _compute_target_visibility_zone(self, source, target)
                 if (
                     self.manhattan(source, target) == percept_dist
-                    and heading_allows_target
+                    and visibility_zone != "outside"
                     and has_line_of_sight(self, source, target)
                 ):
                     return PerceptTrace(
@@ -343,7 +524,9 @@ class SpiderWorld:
 
     def _refresh_perceptual_state(self) -> None:
         """
-        Update world-owned perceptual traces after reset and each completed tick.
+        Update the world's perceptual traces for food, shelter, and predators based on the current immediate perceptions.
+        
+        Compute the current visible radius and obtain immediate visibility views for food, shelter, and predators (without sensory noise), then advance each stored percept trace to reflect newly observed information or to age existing traces. For predator trace candidates, use all current predator positions; if none exist, fall back to the single lizard position.
         """
         radius = visible_range(self)
         food_view = visible_object(self, self.food_positions, radius=radius, apply_noise=False)
@@ -363,21 +546,21 @@ class SpiderWorld:
         self.state.predator_trace = self._advance_percept_trace(
             self.state.predator_trace,
             predator_view,
-            [self.lizard_pos()],
+            self.predator_positions() or [self.lizard_pos()],
         )
 
     def _initial_spider_state(self, start_x: int, start_y: int) -> SpiderState:
         """
-        Create a new SpiderState for a spider spawned or reset at the given coordinates.
+        Create a SpiderState positioned at the given coordinates with randomized initial physiology and defaulted memories, traces, and bookkeeping fields.
         
-        The state has position (start_x, start_y); physiology fields (`hunger`, `fatigue`, `sleep_debt`) initialized by sampling from the configured initial ranges; `health`, recent-event trackers, counters, reward accumulators, and action bookkeeping set to their default baselines; and all memory slots initialized to empty entries.
+        Physiology fields (hunger, fatigue, sleep_debt) are sampled from the spawn RNG; heading is initialized toward the nearest shelter entrance from the spawn location. Memory slots and percept traces are set to empty defaults and counters/event trackers are initialized to baseline values.
         
         Parameters:
             start_x (int): Starting x-coordinate for the spider.
             start_y (int): Starting y-coordinate for the spider.
         
         Returns:
-            SpiderState: Initialized spider state with randomized initial physiology and defaulted counters, memory, and bookkeeping fields.
+            SpiderState: Initialized spider state with sampled physiology, heading, empty memory/trace slots, and default counters.
         """
         initial_heading_dx, initial_heading_dy = self._heading_toward(
             self.nearest_shelter_entrance(origin=(start_x, start_y)),
@@ -418,20 +601,29 @@ class SpiderWorld:
             predator_trace=self._empty_percept_trace(),
         )
 
-    def reset(self, seed: int | None = None) -> Dict[str, np.ndarray]:
+    def reset(
+        self,
+        seed: int | None = None,
+        predator_profiles: Sequence[PredatorProfile] | None = None,
+    ) -> Dict[str, object]:
         """
-        Reset the world to its initial state.
+        Reset the environment for a new episode and produce the initial observation.
         
-        Reinitializes RNGs, simulation tick, spider state, food spawns, lizard predator, and observable memory, then returns the initial observation.
+        Reinitializes episode RNG channels and the perceptual buffer, resets the simulation tick and spider state, repopulates food, spawns predator entities according to the provided profiles (at least one profile is required), refreshes memory/traces, and returns the observation for tick 0.
         
         Parameters:
-            seed (int | None): Optional seed to initialize the world's RNG channels; if None the instance's configured seed is used.
+        	seed (int | None): Optional episode seed; if None the instance's configured seed is used.
+        	predator_profiles (Sequence[PredatorProfile] | None): Sequence of predator profiles to spawn for the episode. If None, the previously selected roster is reused; new worlds start with a default single lizard profile. The sequence must contain at least one profile.
         
         Returns:
-            Dict[str, np.ndarray]: The initial observation dictionary as produced by observe().
+        	initial_observation (Dict[str, object]): Observation dictionary representing the world's state at tick 0.
+        
+        Raises:
+        	ValueError: If `predator_profiles` is provided but is empty.
         """
         resolved_seed = int(seed) if seed is not None else int(self.seed)
         self._reset_rngs(resolved_seed)
+        self._perceptual_buffer = PerceptualBuffer(self._perceptual_delay_ticks())
         self.tick = 0
         self.state = self._initial_spider_state(*self.map_template.spider_start)
         self._last_on_shelter = True
@@ -441,9 +633,116 @@ class SpiderWorld:
         self.food_positions = []
         for _ in range(self.food_count):
             self.food_positions.append(self._random_food_cell())
-        self.lizard = self._spawn_lizard()
+        if predator_profiles is None:
+            profiles = list(self._predator_profiles)
+        else:
+            profiles = list(predator_profiles)
+            if not profiles:
+                raise ValueError("predator_profiles must contain at least one predator profile.")
+            self._predator_profiles = list(profiles)
+        if not profiles:
+            raise ValueError("predator_profiles must contain at least one predator profile.")
+        self.predators = self._spawn_predators(profiles)
+        self._sync_predator_controllers()
         self.refresh_memory(initial=True)
         return self.observe()
+
+    def _sync_predator_controllers(self) -> None:
+        """
+        Initialize the predator_controllers list so there is one PredatorController for each predator.
+        
+        Replaces any existing controllers with a new list of PredatorController instances whose predator_index values match the current indices of self.predators.
+        """
+        self.predator_controllers = [
+            PredatorController(predator_index=index)
+            for index in range(len(self.predators))
+        ]
+
+    @property
+    def predator_count(self) -> int:
+        """
+        Number of predator entities currently present in the world.
+        
+        Returns:
+            int: The count of predator entities managed by this SpiderWorld.
+        """
+        return len(self.predators)
+
+    def get_predator(self, index: int) -> LizardState:
+        """
+        Retrieve the predator state for the given zero-based index.
+        
+        Parameters:
+            index (int): Zero-based index of the predator to retrieve.
+        
+        Returns:
+            LizardState: The predator state at the specified index.
+        """
+        return self.predators[int(index)]
+
+    def predator_positions(self) -> List[Tuple[int, int]]:
+        """
+        Get integer grid positions of all predators in the world.
+        
+        Returns:
+            list[tuple[int, int]]: A list of (x, y) tuples representing each predator's grid cell coordinates as integers; returns an empty list if there are no predators.
+        """
+        return [
+            (int(predator.x), int(predator.y))
+            for predator in getattr(self, "predators", [])
+        ]
+
+    @property
+    def lizard(self) -> LizardState:
+        """
+        Access the first predator's state (legacy "lizard" accessor).
+        
+        Returns:
+            LizardState: The predator state at index 0.
+        """
+        return self.get_predator(0)
+
+    @lizard.setter
+    def lizard(self, value: LizardState) -> None:
+        """
+        Set the primary predator (predator at index 0) to the provided LizardState.
+        
+        If the world has existing predators, replace the predator at index 0 with `value`.
+        If no predators exist, create a new predator list containing `value`. After assignment,
+        synchronize predator controllers to reflect the updated predator list.
+        
+        Parameters:
+            value (LizardState): The predator state to assign as the primary predator.
+        """
+        if self.predators:
+            self.predators[0] = value
+        else:
+            self.predators = [value]
+        self._sync_predator_controllers()
+
+    @property
+    def predator_controller(self) -> PredatorController:
+        """
+        Access the controller for the primary predator (predator index 0).
+        
+        Returns:
+            PredatorController: The controller instance assigned to predator index 0.
+        """
+        return self.predator_controllers[0]
+
+    @predator_controller.setter
+    def predator_controller(self, value: PredatorController) -> None:
+        """
+        Set the primary predator controller and ensure it is assigned to predator index 0.
+        
+        Parameters:
+            value (PredatorController): Controller to assign as the primary predator controller (stored at index 0). The controller's `predator_index` will be set to 0.
+        """
+        if self.predator_controllers:
+            self.predator_controllers[0] = value
+        else:
+            self.predator_controllers = [value]
+        self.predator_controllers[0].predator_index = 0
 
     def spider_pos(self) -> Tuple[int, int]:
         """
@@ -599,6 +898,7 @@ class SpiderWorld:
         dist: int,
         radius: int,
         motion_bonus: float = 0.0,
+        visibility_zone: str = "foveal",
     ) -> float:
         """
         Compute the visibility confidence that a target cell is visible from a source cell.
@@ -609,6 +909,7 @@ class SpiderWorld:
             dist (int): Manhattan distance between source and target.
             radius (int): Maximum visibility radius to consider.
             motion_bonus (float): Extra confidence added for observed motion; defaults to 0.0.
+            visibility_zone (str): Foveal/peripheral/outside visual zone for the target.
         
         Returns:
             float: Confidence score between 0.0 and 1.0 indicating the likelihood the target is visible from the source.
@@ -620,6 +921,7 @@ class SpiderWorld:
             dist=dist,
             radius=radius,
             motion_bonus=motion_bonus,
+            visibility_zone=visibility_zone,
         )
 
     @staticmethod
@@ -785,19 +1087,19 @@ class SpiderWorld:
 
     def lizard_detects_spider(self) -> bool:
         """
-        Determines whether the lizard currently detects the spider.
+        Indicates whether the primary predator (lizard) currently detects the spider.
         
         Returns:
             True if the lizard detects the spider, False otherwise.
         """
-        return lizard_detects_spider(self)
+        return predator_detects_spider(self, self.lizard)
 
     def _predator_visible_to_spider(self) -> PerceivedTarget:
         """
-        Determine whether the predator is visible from the spider's perspective and produce a perception record.
+        Build a PerceivedTarget describing predator visibility from the spider's current position.
         
         Returns:
-            PerceivedTarget: A perception record describing the predator's visibility and associated observation metrics as seen by the spider.
+            PerceivedTarget: Perception of predator(s) from the spider's viewpoint, including visibility flag, observed position, distance, certainty, and related observation metrics.
         """
         return predator_visible_to_spider(self)
 
@@ -845,38 +1147,341 @@ class SpiderWorld:
 
     def refresh_memory(self, *, predator_escape: bool = False, initial: bool = False) -> None:
         """
-        Refresh the spider's episodic memories by aging, clearing expired entries, and updating memory traces.
+        Enter the pipeline for perception-grounded memory maintenance.
         
-        This updates the spider's memory slots (food, predator, shelter, escape) in place according to their time-to-live rules and current perceptions. If predator_escape is True, memory processing will record or strengthen an escape-related memory; if initial is True, perform an initial refresh that may bypass normal decay to establish baseline memory state.
+        This ages and clears explicit memory slots by TTL, writes only targets
+        derived from allowed perception/contact/movement sources, and advances
+        short percept traces. After updating memories it refreshes the
+        perceptual trace state and, when called with `initial=True`, clears the
+        perceptual buffer to establish a baseline.
+        
         Parameters:
-            predator_escape (bool): If True, treat this refresh as occurring after a predator escape event, causing escape-related memory updates.
-            initial (bool): If True, perform an initial/baseline refresh (used on reset) that establishes memory state without normal decay.
+            predator_escape (bool): If True, treat this refresh as occurring after a predator escape and update escape-related memory accordingly.
+            initial (bool): If True, perform an initial/baseline refresh (used on reset) that avoids normal decay effects and clears the perceptual buffer.
         """
         refresh_memory(self, predator_escape=predator_escape, initial=initial)
         self._refresh_perceptual_state()
+        if initial and hasattr(self, "_perceptual_buffer"):
+            self._perceptual_buffer.clear()
 
-    def observe(self) -> Dict[str, np.ndarray]:
+    def _perceptual_delay_ticks(self) -> int:
         """
-        Compose the spider agent's current observation tensors from the world state.
+        Compute the configured perceptual delay as an integer tick count.
+        
+        Reads the `perceptual_delay_ticks` value from `self.operational_profile.perception`, rounds it to the nearest integer, and clamps the result to be at least 0.
         
         Returns:
-            observations (Dict[str, np.ndarray]): Mapping from observation keys (e.g., visual map, smell fields, scalar features) to NumPy arrays representing the agent's current perception and state-derived inputs.
+            int: The perceptual delay in ticks (>= 0).
+        """
+        value = self.operational_profile.perception.get("perceptual_delay_ticks", 1.0)
+        return max(0, round(float(value)))
+
+    def _perceptual_delay_noise_scale(self) -> float:
+        """
+        Get the configured perceptual delay noise scale, coerced to a float and clipped to a minimum of 0.0.
+        
+        Returns:
+            float: Perceptual delay noise scale (>= 0.0).
+        """
+        value = self.operational_profile.perception.get("perceptual_delay_noise", 0.5)
+        return max(0.0, float(value))
+
+    def _ensure_perceptual_buffer(self, delay_ticks: int) -> None:
+        """
+        Ensure a PerceptualBuffer exists and matches the requested delay capacity.
+        
+        If no buffer exists, creates one sized for `delay_ticks`. If an existing
+        buffer has a different `max_delay`, it is replaced with a new buffer
+        sized to `delay_ticks`. The provided `delay_ticks` is converted to an int.
+        """
+        if not hasattr(self, "_perceptual_buffer"):
+            self._perceptual_buffer = PerceptualBuffer(delay_ticks)
+            return
+        if self._perceptual_buffer.max_delay != int(delay_ticks):
+            self._perceptual_buffer = PerceptualBuffer(delay_ticks)
+
+    def _raw_observation(self) -> dict[str, object]:
+        """
+        Get the raw instantaneous observation of the world state without perceptual delay or temporal noise.
+        
+        The returned payload contains sensor readings, grid-state arrays, and a `meta` diagnostics section representing the current world snapshot before any buffering, delay, or temporal perturbation is applied.
+        
+        Returns:
+            dict[str, object]: Mapping of observation field names to values (arrays or scalars), including a `meta` entry with diagnostic information.
         """
         return observe_world(self)
 
-    def visibility_overlay(self, *, origin: Tuple[int, int] | None = None) -> Dict[str, object]:
+    def _jitter_delayed_direction(self, value: object, amplitude: float) -> float:
         """
-        Compute which grid cells are visible from a given origin within the current visible range.
+        Apply uniform temporal jitter to a single directional component and clip the result to [-1, 1].
+        
+        If `amplitude` is greater than 0, a uniform offset in [-amplitude, amplitude] is sampled (using the instance's delay RNG) and added to `value`; otherwise `value` is returned clipped. The final result is always constrained to the range [-1.0, 1.0].
         
         Parameters:
-            origin (Tuple[int, int] | None): Grid cell (x, y) to use as the visibility source. If None, uses the spider's current position.
+            value (object): Numeric input representing a directional component (typically in [-1, 1]).
+            amplitude (float): Maximum magnitude of the uniform jitter to apply. If <= 0, no jitter is applied.
         
         Returns:
-            Dict[str, object]: A dictionary with keys:
-                - "origin": the source cell used (Tuple[int, int])
-                - "radius": the visibility radius (int)
-                - "visible": list of cells (List[Tuple[int, int]]) within radius that have line of sight from the origin
-                - "occluded": list of cells (List[Tuple[int, int]]) within radius that are not in line of sight
+            float: The jittered directional component, clipped to [-1.0, 1.0].
+        """
+        base = float(value)
+        if amplitude <= 0.0:
+            return float(np.clip(base, -1.0, 1.0))
+        jitter = float(self.delay_rng.uniform(-amplitude, amplitude))
+        return float(np.clip(base + jitter, -1.0, 1.0))
+
+    def _apply_temporal_noise_to_vector(
+        self,
+        key: str,
+        vector: np.ndarray,
+        *,
+        decay_factor: float,
+        direction_jitter: float,
+    ) -> np.ndarray:
+        """
+        Apply temporal decay and directional jitter to an observation vector according to its view definition.
+        
+        Given a view identified by `key` (or `motor_extra` mapped to `motor_context`), this multiplies any fields whose names end with `_certainty` by `decay_factor` (clipped to the range [0.0, 1.0]) and applies `direction_jitter` via `_jitter_delayed_direction` to fields classified as temporal direction components (e.g., suffix `_dx`/`_dy`). If `key` does not correspond to a known observation view, the input `vector` is returned unchanged.
+        
+        Parameters:
+            key (str): Observation view key used to look up field names.
+            vector (np.ndarray): 1-D observation vector whose elements correspond to the view's fields.
+            decay_factor (float): Multiplicative factor applied to `_certainty` fields (values clipped to [0.0, 1.0]).
+            direction_jitter (float): Jitter amplitude passed to `_jitter_delayed_direction` for temporal direction fields.
+        
+        Returns:
+            np.ndarray: A (possibly) modified copy of `vector` with decayed certainties and jittered temporal directions.
+        """
+        view_key = "motor_context" if key == "motor_extra" else key
+        view_cls = OBSERVATION_VIEW_BY_KEY.get(view_key)
+        if view_cls is None:
+            return vector
+        delayed = vector.copy()
+        field_names = view_cls.field_names()
+        field_index = {name: idx for idx, name in enumerate(field_names)}
+        visibility_threshold = float(
+            self.operational_profile.perception["visibility_binary_threshold"]
+        )
+        for idx, field_name in enumerate(field_names):
+            if idx >= delayed.shape[0]:
+                continue
+            if field_name.endswith("_certainty"):
+                delayed[idx] = float(np.clip(float(delayed[idx]) * decay_factor, 0.0, 1.0))
+        for idx, field_name in enumerate(field_names):
+            if idx >= delayed.shape[0] or not field_name.endswith("_certainty"):
+                continue
+            entity = field_name[: -len("_certainty")]
+            visible_idx = field_index.get(f"{entity}_visible")
+            if visible_idx is None or visible_idx >= delayed.shape[0]:
+                continue
+            was_visible = float(delayed[visible_idx]) > 0.0
+            is_visible = was_visible and float(delayed[idx]) >= visibility_threshold
+            delayed[visible_idx] = 1.0 if is_visible else 0.0
+            if is_visible:
+                continue
+            for direction_name in (f"{entity}_dx", f"{entity}_dy"):
+                direction_idx = field_index.get(direction_name)
+                if (
+                    direction_idx is not None
+                    and direction_idx < delayed.shape[0]
+                    and _is_temporal_direction_field(direction_name)
+                ):
+                    delayed[direction_idx] = 0.0
+        for idx, field_name in enumerate(field_names):
+            if idx >= delayed.shape[0] or not _is_temporal_direction_field(field_name):
+                continue
+            entity = field_name.rsplit("_", 1)[0]
+            sibling_idx = field_index.get(f"{entity}_visible")
+            if sibling_idx is None:
+                sibling_idx = field_index.get(f"{entity}_strength")
+            sibling_active = (
+                sibling_idx is not None
+                and sibling_idx < delayed.shape[0]
+                and float(delayed[sibling_idx]) > 0.0
+            )
+            if not sibling_active:
+                delayed[idx] = 0.0
+                continue
+            delayed[idx] = self._jitter_delayed_direction(delayed[idx], direction_jitter)
+        return delayed
+
+    def _apply_temporal_noise_to_meta(
+        self,
+        meta: dict[str, object],
+        *,
+        configured_delay: int,
+        effective_delay: int,
+        decay_factor: float,
+        direction_jitter: float,
+    ) -> None:
+        """
+        Apply temporal decay and directional jitter to the observation meta sections and record delay diagnostics.
+        
+        This mutates the provided `meta` dictionary in-place by:
+        - scaling any `certainty` entries inside `meta["vision"]` and `meta["percept_traces"]` by `decay_factor` (clipped to the range [0.0, 1.0]),
+        - applying directional jitter to any `dx`/`dy` fields within those sections using `direction_jitter` and the instance's jitter routine,
+        - and writing a `meta["perceptual_delay"]` dictionary containing `configured_ticks`, `effective_ticks`, `certainty_decay_factor`, and `direction_jitter`.
+        
+        Parameters:
+            meta (dict[str, object]): Observation meta dictionary to modify.
+            configured_delay (int): Configured perceptual delay in ticks.
+            effective_delay (int): Actual delay applied (may be less than configured due to buffer length).
+            decay_factor (float): Multiplicative factor applied to certainty values (expected in [0.0, 1.0]).
+            direction_jitter (float): Amplitude used to jitter temporal direction components (`dx`/`dy`).
+        
+        """
+        visibility_threshold = float(
+            self.operational_profile.perception["visibility_binary_threshold"]
+        )
+        for section_name in ("vision", "percept_traces"):
+            section = meta.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            for target_name, target in section.items():
+                if not isinstance(target, dict):
+                    continue
+                visible_key = None
+                if "certainty" in target:
+                    target["certainty"] = float(
+                        np.clip(float(target["certainty"]) * decay_factor, 0.0, 1.0)
+                    )
+                    if "visible" in target:
+                        visible_key = "visible"
+                    elif f"{target_name}_visible" in target:
+                        visible_key = f"{target_name}_visible"
+                    if visible_key is not None:
+                        was_visible = float(target[visible_key]) > 0.0
+                        is_visible = was_visible and float(target["certainty"]) >= visibility_threshold
+                        target[visible_key] = 1.0 if is_visible else 0.0
+                        if not is_visible:
+                            for axis in ("dx", "dy"):
+                                if axis in target:
+                                    target[axis] = 0.0
+                for axis in ("dx", "dy"):
+                    if axis in target:
+                        if visible_key is not None:
+                            sibling_active = float(target[visible_key]) > 0.0
+                        elif "strength" in target:
+                            sibling_active = float(target["strength"]) > 0.0
+                        elif f"{target_name}_strength" in target:
+                            sibling_active = float(target[f"{target_name}_strength"]) > 0.0
+                        else:
+                            sibling_active = False
+                        if not sibling_active:
+                            target[axis] = 0.0
+                            continue
+                        target[axis] = self._jitter_delayed_direction(
+                            target[axis],
+                            direction_jitter,
+                        )
+        vision = meta.get("vision")
+        if isinstance(vision, dict):
+            predator = vision.get("predator")
+            if isinstance(predator, dict):
+                meta["predator_visible"] = bool(float(predator.get("visible", 0.0)) > 0.5)
+
+        meta["perceptual_delay"] = {
+            "configured_ticks": int(configured_delay),
+            "effective_ticks": int(effective_delay),
+            "certainty_decay_factor": float(decay_factor),
+            "direction_jitter": float(direction_jitter),
+        }
+
+    def _apply_perceptual_delay_noise(
+        self,
+        observation: dict[str, object],
+        *,
+        configured_delay: int,
+        effective_delay: int,
+    ) -> dict[str, object]:
+        """
+        Apply configured temporal noise to a delayed observation payload, updating temporal certainty and direction fields.
+        
+        If `effective_delay` is 0 or less, the observation is returned unchanged except that `meta["perceptual_delay"]` is set to reflect the configured delay and zero effective delay. Otherwise, certainty values are multiplied by a decay factor (clipped to [0.0, 1.0]) and temporal direction components receive bounded jitter; these mutations are applied to any numpy-array fields in the observation and to the structures inside `meta`.
+        
+        Parameters:
+            observation (dict[str, object]): Observation payload to mutate; expected to contain numpy array fields and an optional `meta` dict.
+            configured_delay (int): The configured perceptual delay in ticks from the operational profile.
+            effective_delay (int): The delay in ticks actually applied (may be smaller than configured due to buffer length).
+        
+        Returns:
+            dict[str, object]: The (possibly mutated) observation payload. When present, `meta["perceptual_delay"]` is updated with keys `configured_ticks`, `effective_ticks`, `certainty_decay_factor`, and `direction_jitter`.
+        """
+        if effective_delay <= 0:
+            meta = observation.get("meta")
+            if isinstance(meta, dict):
+                meta["perceptual_delay"] = {
+                    "configured_ticks": int(configured_delay),
+                    "effective_ticks": 0,
+                    "certainty_decay_factor": 1.0,
+                    "direction_jitter": 0.0,
+                }
+            return observation
+
+        noise_scale = self._perceptual_delay_noise_scale()
+        delay_cfg = self.noise_profile.delay
+        decay_per_tick = max(0.0, float(delay_cfg["certainty_decay_per_tick"])) * noise_scale
+        direction_jitter = (
+            max(0.0, float(delay_cfg["direction_jitter_per_tick"]))
+            * noise_scale
+            * float(effective_delay)
+        )
+        decay_factor = float(np.clip(1.0 - decay_per_tick * float(effective_delay), 0.0, 1.0))
+
+        for key, value in list(observation.items()):
+            if isinstance(value, np.ndarray):
+                observation[key] = self._apply_temporal_noise_to_vector(
+                    key,
+                    value,
+                    decay_factor=decay_factor,
+                    direction_jitter=direction_jitter,
+                )
+        meta = observation.get("meta")
+        if isinstance(meta, dict):
+            self._apply_temporal_noise_to_meta(
+                meta,
+                configured_delay=configured_delay,
+                effective_delay=effective_delay,
+                decay_factor=decay_factor,
+                direction_jitter=direction_jitter,
+            )
+        return observation
+
+    def observe(self) -> Dict[str, object]:
+        """
+        Constructs the spider's current observation and, if configured, returns a delayed, temporally noised view.
+        
+        When a perceptual delay is configured, the function stores the immediate (raw) observation in the internal perceptual buffer and returns a payload reflecting the effective delayed observation with temporal decay/jitter applied and diagnostic metadata about the perceptual delay. When no delay is configured, the raw observation is returned unchanged.
+        
+        Returns:
+            Dict[str, object]: Mapping of observation keys (e.g., visual maps, smell fields, scalar features, and diagnostics) to arrays/objects representing the agent's perception and related metadata. If delay is active, the payload includes noise-modified values and a `meta["perceptual_delay"]` entry describing configured and effective delay.
+        """
+        delay_ticks = self._perceptual_delay_ticks()
+        raw_observation = self._raw_observation()
+        self._ensure_perceptual_buffer(delay_ticks)
+        self._perceptual_buffer.push(int(self.tick), raw_observation)
+        if delay_ticks <= 0:
+            return raw_observation
+        delayed_observation, effective_delay = self._perceptual_buffer.get(delay_ticks)
+        return self._apply_perceptual_delay_noise(
+            delayed_observation,
+            configured_delay=delay_ticks,
+            effective_delay=effective_delay,
+        )
+
+    def visibility_overlay(self, *, origin: Tuple[int, int] | None = None) -> Dict[str, object]:
+        """
+        Return which grid cells within the current visible range are visible or occluded from a given origin.
+        
+        Parameters:
+            origin (Tuple[int, int] | None): Source cell for visibility checks; when None uses the spider's current position.
+        
+        Returns:
+            info (dict): Mapping with:
+                - "origin": source cell used (Tuple[int, int])
+                - "radius": visibility radius (int)
+                - "visible": list of cells (List[Tuple[int, int]]) within radius that have line of sight
+                - "occluded": list of cells (List[Tuple[int, int]]) within radius that do not have line of sight
         """
         source = origin if origin is not None else self.spider_pos()
         radius = self._visible_range()
@@ -900,11 +1505,24 @@ class SpiderWorld:
         }
 
     def smell_field(self, kind: str) -> List[List[float]]:
+        """
+        Compute a 2D grid of smell strengths for the specified scent source.
+        
+        Parameters:
+            kind (str): Scent type to compute; must be either "food" or "predator".
+        
+        Returns:
+            List[List[float]]: A height-by-width nested list where each element is the smell strength
+            at that grid cell (row-major: outer list indexed by y, inner by x).
+        
+        Raises:
+            ValueError: If `kind` is not "food" or "predator".
+        """
         if kind == "food":
             positions = list(self.food_positions)
             radius = self.food_smell_range
         elif kind == "predator":
-            positions = [self.lizard_pos()]
+            positions = self.predator_positions()
             radius = self.predator_smell_range
         else:
             raise ValueError(f"Unknown scent field: {kind}")
@@ -928,29 +1546,40 @@ class SpiderWorld:
         *,
         min_spider_distance: int = 0,
         avoid_lizard: bool = True,
+        excluded_positions: Sequence[Tuple[int, int]] | None = None,
+        min_predator_distance: int = 0,
     ) -> Tuple[int, int]:
         """
-        Selects a spawn cell from the given candidate cells, applying filters and fallbacks.
+        Choose a spawn cell from candidate positions, applying distance and occupancy constraints and falling back to walkable non-shelter cells.
         
-        Filters out the current spider cell, existing food positions, (optionally) the lizard cell, and any cell closer than `min_spider_distance` by Manhattan distance. If no candidates remain after filtering, selects uniformly from all walkable, non-shelter cells excluding the spider cell. Selection is sampled uniformly using the spawn RNG.
+        Filters out the spider's current cell, existing food, any explicitly provided excluded positions, and (if requested) all current predator positions. Enforces minimum Manhattan distance from the spider (`min_spider_distance`) and from any occupied/excluded positions (`min_predator_distance`). If no candidate remains, falls back to uniform sampling from all walkable, non-shelter cells that satisfy the same exclusion and spacing constraints. Raises ValueError if no valid cell can be found after fallback.
         
         Parameters:
-            candidates (Sequence[Tuple[int, int]]): Candidate cells to consider for spawning.
-            min_spider_distance (int, optional): Minimum required Manhattan distance from the spider. Defaults to 0.
-            avoid_lizard (bool, optional): If True, exclude the current lizard position from candidates. Defaults to True.
+            candidates (Sequence[Tuple[int, int]]): Candidate (x, y) cells to consider.
+            min_spider_distance (int): Minimum required Manhattan distance from the spider. Defaults to 0.
+            avoid_lizard (bool): If True, exclude all current predator positions from candidates. Defaults to True.
+            excluded_positions (Sequence[Tuple[int, int]] | None): Additional positions to exclude. Defaults to None.
+            min_predator_distance (int): Minimum required Manhattan distance from any excluded/occupied position. Defaults to 0.
         
         Returns:
             Tuple[int, int]: The chosen spawn cell coordinates (x, y).
         """
         spider_pos = self.spider_pos()
-        lizard_pos = self.lizard_pos() if avoid_lizard else None
+        occupied_positions = list(excluded_positions or [])
+        if avoid_lizard:
+            occupied_positions.extend(self.predator_positions())
+        occupied_positions = list(dict.fromkeys(occupied_positions))
         filtered = [
             cell
             for cell in candidates
             if cell != spider_pos
             and cell not in self.food_positions
-            and (lizard_pos is None or cell != lizard_pos)
+            and cell not in occupied_positions
             and self.manhattan(cell, spider_pos) >= min_spider_distance
+            and all(
+                self.manhattan(cell, other) >= min_predator_distance
+                for other in occupied_positions
+            )
         ]
         if not filtered:
             filtered = [
@@ -960,18 +1589,26 @@ class SpiderWorld:
                 if self.is_walkable((x, y))
                 and (x, y) not in self.shelter_cells
                 and (x, y) != spider_pos
+                and (x, y) not in occupied_positions
+                and self.manhattan((x, y), spider_pos) >= min_spider_distance
+                and all(
+                    self.manhattan((x, y), other) >= min_predator_distance
+                    for other in occupied_positions
+                )
             ]
+        if not filtered:
+            raise ValueError("Could not find a spawn cell satisfying predator spacing constraints.")
         idx = int(self.spawn_rng.integers(0, len(filtered)))
         return filtered[idx]
 
     def _random_food_cell(self) -> Tuple[int, int]:
         """
-        Selects a cell to spawn a new food item, preferring candidate cells near a shelter entrance while avoiding the spider and existing food.
+        Choose a grid cell for spawning a new food item.
         
-        If the configured map template provides food spawn candidates, returns one of those candidates; otherwise falls back to a general random spawn selection. Candidate selection weights favor proximity to the nearest shelter entrance but are mixed with a uniform distribution according to self.noise_profile.spawn["uniform_mix"] (clipped to [0,1]) to introduce randomness.
+        Prefers unused candidate cells from the map template, weighting them by proximity to the nearest shelter entrance and mixing with a uniform distribution according to self.noise_profile.spawn["uniform_mix"]. If no template candidates are available (or none remain after excluding the spider and existing food), falls back to _random_spawn_cell with the map template's food spawn set.
         
         Returns:
-            tuple[int, int]: Coordinates (x, y) of the chosen food spawn cell.
+            tuple[int, int]: Coordinates (x, y) of the selected food spawn cell.
         """
         candidates = [
             cell
@@ -1000,24 +1637,53 @@ class SpiderWorld:
         idx = int(self.spawn_rng.choice(len(candidates), p=weights))
         return candidates[idx]
 
-    def _spawn_lizard(self) -> LizardState:
+    def _spawn_predators(self, profiles: List[PredatorProfile]) -> List[LizardState]:
         """
-        Select a spawn cell for the lizard (ensuring a minimum distance from the spider) and return its initial state.
+        Select spawn cells for each predator profile and return their initialized states.
         
-        The spawn distance is at least 3 cells or one third of the smaller map dimension, whichever is larger. The selection is drawn from the map template's lizard spawn cells and may place the lizard anywhere those candidates allow.
+        Each predator is placed in a distinct lizard spawn cell while maintaining a minimum
+        Manhattan distance from the spider and previously placed predators; spawn order
+        corresponds to the order of the provided profiles.
+        
+        Raises:
+            ValueError: If `profiles` is empty.
         
         Returns:
-            LizardState: A newly initialized lizard state with `x`, `y` set to the chosen cell and `mode` set to `"PATROL"`.
+            list[LizardState]: Predator states initialized at their spawn positions, in the same order as `profiles`.
         """
+        if not profiles:
+            raise ValueError("At least one predator profile is required.")
         min_dist = max(3, min(self.width, self.height) // 3)
-        pos = self._random_spawn_cell(
-            self.map_template.lizard_spawn_cells,
-            min_spider_distance=min_dist,
-            avoid_lizard=False,
-        )
-        return LizardState(x=pos[0], y=pos[1], mode="PATROL")
+        predators: List[LizardState] = []
+        occupied_positions: List[Tuple[int, int]] = []
+        for profile in profiles:
+            pos = self._random_spawn_cell(
+                self.map_template.lizard_spawn_cells,
+                min_spider_distance=min_dist,
+                avoid_lizard=False,
+                excluded_positions=occupied_positions,
+                min_predator_distance=min_dist,
+            )
+            predators.append(
+                LizardState(
+                    x=pos[0],
+                    y=pos[1],
+                    mode="PATROL",
+                    profile=profile,
+                )
+            )
+            occupied_positions.append(pos)
+        return predators
 
     def respawn_food(self, eaten_position: Tuple[int, int]) -> None:
+        """
+        Replace a consumed food item with a newly spawned food cell.
+        
+        Removes the food at the given grid cell from the world's food positions (if present) and appends a new food location sampled by the world's spawn policy.
+        
+        Parameters:
+            eaten_position (Tuple[int, int]): Grid coordinates (x, y) of the consumed food item.
+        """
         self.food_positions = [p for p in self.food_positions if p != eaten_position]
         self.food_positions.append(self._random_food_cell())
 
@@ -1040,35 +1706,135 @@ class SpiderWorld:
 
     def _move_spider_action(self, action_name: str) -> bool:
         """
-        Move the spider according to the given action name.
+        Set the spider's heading or execute a locomotion action.
+        
+        For orientation actions (members of ORIENT_HEADINGS) this updates the spider's heading and clears the last-move deltas without changing position. For locomotion actions this attempts to move the spider by the corresponding ACTION_DELTAS.
         
         Parameters:
-            action_name (str): Action identifier (one of the entries in `ACTIONS`) indicating the direction or `"STAY"`.
+            action_name (str): Action identifier indicating a locomotion action, "STAY", or an orientation change.
         
         Returns:
-            `true` if the spider moved to a different cell, `false` otherwise.
+            bool: True if the spider moved to a different cell, False otherwise.
         """
+        if action_name in ORIENT_HEADINGS:
+            heading_dx, heading_dy = ORIENT_HEADINGS[action_name]
+            self.state.heading_dx = int(heading_dx)
+            self.state.heading_dy = int(heading_dy)
+            self.state.last_move_dx = 0
+            self.state.last_move_dy = 0
+            return False
         dx, dy = ACTION_DELTAS[action_name]
         return self._move(dx, dy)
 
-    def _apply_motor_noise(self, action_name: str) -> tuple[str, bool]:
+    def _motor_slip_reason(self, components: Dict[str, float], *, base_slip_rate: float) -> str:
+        if base_slip_rate > 0.0 and components["raw_difficulty"] <= 0.0:
+            return "base"
+        scores = {
+            "terrain": components["terrain_difficulty"],
+            "orientation": components["orientation_mismatch"],
+            "fatigue": components["fatigue_factor"],
+        }
+        return max(scores, key=scores.get)
+
+    def _sample_slip_action(self, action_name: str) -> str:
+        adjacent = SLIP_ADJACENT_ACTIONS.get(action_name, ())
+        if not adjacent:
+            return action_name
+        candidates = ("STAY", *adjacent)
+        weights = np.array([0.6, *([0.4 / len(adjacent)] * len(adjacent))], dtype=float)
+        weights = weights / weights.sum()
+        index = int(self.motor_rng.choice(len(candidates), p=weights))
+        return candidates[index]
+
+    def _apply_motor_noise(self, action_name: str) -> Dict[str, object]:
         """
-        Selects the action to execute, optionally replacing the intended action with a randomly chosen alternative according to the configured motor-noise probability.
-        
-        Parameters:
-            action_name (str): The intended action name.
+        Determine whether a locomotion action slips under current motor noise and which action is executed, returning diagnostics.
         
         Returns:
-            tuple[str, bool]: (executed_action, motor_noise_applied) where `executed_action` is the action to perform and `motor_noise_applied` is `True` if the action was replaced due to motor noise, `False` otherwise.
+            result (dict): A dictionary with keys:
+                - "occurred" (bool): `true` if a slip occurred, `false` otherwise.
+                - "reason" (str): Primary contributor to slip ("base", "terrain", "orientation", "fatigue", or "none").
+                - "original_action" (str): The requested action name.
+                - "executed_action" (str): The action ultimately executed (may differ if slip occurred).
+                - "slip_probability" (float): Probability in [0,1] that the action slips.
+                - "execution_difficulty" (float): Composite difficulty value in [0,1] used to scale slip pressure.
+                - "terrain" (hashable): Terrain value at the spider's current position.
+                - "components" (dict): Breakdown of intermediate difficulty components (includes keys such as "orientation_mismatch" and "fatigue_factor").
+                - "base_slip_rate" (float): Configured base flip probability clipped to [0,1].
+                - "orientation_slip_factor" (float): Configured multiplier for orientation contribution.
+                - "terrain_slip_factor" (float): Configured multiplier for terrain contribution.
+                - "fatigue_slip_factor" (float): Configured multiplier for fatigue contribution.
         """
-        flip_prob = float(np.clip(self.noise_profile.motor["action_flip_prob"], 0.0, 1.0))
-        if flip_prob <= 0.0 or len(ACTIONS) <= 1:
-            return action_name, False
-        if float(self.motor_rng.random()) >= flip_prob:
-            return action_name, False
-        alternatives = [candidate for candidate in ACTIONS if candidate != action_name]
-        index = int(self.motor_rng.integers(0, len(alternatives)))
-        return alternatives[index], True
+        if action_name not in ACTIONS:
+            raise ValueError(f"Unknown locomotion action {action_name!r}.")
+
+        cfg = self.noise_profile.motor
+        base_slip_rate = float(np.clip(cfg["action_flip_prob"], 0.0, 1.0))
+        orientation_factor = max(0.0, float(cfg["orientation_slip_factor"]))
+        terrain_factor = max(0.0, float(cfg["terrain_slip_factor"]))
+        fatigue_factor = max(0.0, float(cfg["fatigue_slip_factor"]))
+        if action_name in ORIENT_HEADINGS:
+            return {
+                "occurred": False,
+                "reason": "none",
+                "original_action": action_name,
+                "executed_action": action_name,
+                "slip_probability": 0.0,
+                "execution_difficulty": 0.0,
+                "terrain": "orientation_only",
+                "components": {
+                    "heading_dx": 0.0,
+                    "heading_dy": 0.0,
+                    "move_dx": 0.0,
+                    "move_dy": 0.0,
+                    "orientation_alignment": 1.0,
+                    "orientation_mismatch": 0.0,
+                    "terrain_difficulty": 0.0,
+                    "fatigue_factor": 0.0,
+                    "raw_difficulty": 0.0,
+                },
+                "base_slip_rate": base_slip_rate,
+                "orientation_slip_factor": orientation_factor,
+                "terrain_slip_factor": terrain_factor,
+                "fatigue_slip_factor": fatigue_factor,
+            }
+
+        heading = (float(self.state.heading_dx), float(self.state.heading_dy))
+        move_direction = ACTION_DELTAS.get(action_name, (0, 0))
+        terrain = self.terrain_at(self.spider_pos())
+        difficulty, components = compute_execution_difficulty(
+            heading,
+            move_direction,
+            terrain,
+            float(self.state.fatigue),
+        )
+        result: Dict[str, object] = {
+            "occurred": False,
+            "reason": "none",
+            "original_action": action_name,
+            "executed_action": action_name,
+            "slip_probability": 0.0,
+            "execution_difficulty": difficulty,
+            "terrain": terrain,
+            "components": dict(components),
+            "base_slip_rate": base_slip_rate,
+            "orientation_slip_factor": orientation_factor,
+            "terrain_slip_factor": terrain_factor,
+            "fatigue_slip_factor": fatigue_factor,
+        }
+        slip_pressure = difficulty * (
+            terrain_factor
+            + orientation_factor * components["orientation_mismatch"]
+            + fatigue_factor * components["fatigue_factor"]
+        )
+        slip_probability = float(np.clip(base_slip_rate + slip_pressure, 0.0, 1.0))
+        result["slip_probability"] = slip_probability
+        if action_name != "STAY" and slip_probability > 0.0:
+            if bool(float(self.motor_rng.random()) < slip_probability):
+                result["occurred"] = True
+                result["executed_action"] = self._sample_slip_action(action_name)
+                result["reason"] = self._motor_slip_reason(components, base_slip_rate=base_slip_rate)
+        return result
 
     def _apply_predator_contact(
         self,
@@ -1132,7 +1898,10 @@ class SpiderWorld:
         """
         _, prev_food_dist = self.nearest(self.food_positions)
         _, prev_shelter_dist = self.nearest(self.shelter_deep_cells or self.shelter_cells)
-        prev_predator_dist = self.manhattan(self.spider_pos(), self.lizard_pos())
+        _, prev_predator_dist = self.nearest(
+            self.predator_positions() or [self.lizard_pos()],
+            origin=self.spider_pos(),
+        )
         visibility_threshold = self.operational_profile.reward["predator_visibility_threshold"]
         prev_predator_visible = self._predator_visible_to_spider().visible > visibility_threshold
         return TickSnapshot(
@@ -1149,26 +1918,20 @@ class SpiderWorld:
             rest_streak=int(self.state.rest_streak),
         )
 
-    def step(self, action_idx: int) -> tuple[Dict[str, np.ndarray], float, bool, Dict[str, object]]:
+    def step(self, action_idx: int) -> tuple[Dict[str, object], float, bool, Dict[str, object]]:
         """
-        Advance the environment one tick by executing the action indexed by `action_idx` and updating world, spider, and predator state.
+        Advance the environment by one tick using the action at the given index.
         
         Parameters:
             action_idx (int): Index into ACTIONS selecting the spider's action for this step.
         
         Returns:
-            next_obs (Dict[str, numpy.ndarray]): Observation arrays for the new timestep.
-            reward (float): Total scalar reward accumulated this step.
-            done (bool): `True` if the episode terminated because the spider's health reached zero, `False` otherwise.
-            info (Dict[str, object]): Diagnostic information. Includes at minimum:
-                - "action": selected action name
-                - "ate", "slept", "pain", "predator_contact": booleans for immediate events this step
-                - "predator_transition": predator mode change or `None`
-                - "predator_moved": whether the predator moved
-                - "distance_deltas": distance change diagnostics
-                - "predator_escape": whether an escape event was recorded
-                - "reward_components": per-component reward breakdown used to compute `reward`
-                - "state": serialized snapshot of the current spider/world state
+            next_obs (Dict[str, object]): Observation payload for the new timestep (arrays and metadata).
+            reward (float): Scalar reward accumulated during this tick.
+            done (bool): `True` if the episode has terminated (e.g., spider death), `False` otherwise.
+            info (Dict[str, object]): Diagnostic information including, at minimum, the selected action name and flags/fields such as
+                "ate", "slept", "pain", "predator_contact", "predator_transition", "predator_moved", "distance_deltas",
+                "predator_escape", "reward_components", and a serialized "state" snapshot.
         """
         context = tick_stages.build_tick_context(self, action_idx)
         for descriptor in tick_stages.TICK_STAGES:
@@ -1184,12 +1947,12 @@ class SpiderWorld:
 
     def state_dict(self) -> Dict[str, object]:
         """
-        Serialize the full spider and environment state to a flat dictionary.
+        Serialize the world and agent state into a flat dictionary.
         
-        The returned mapping contains the dataclass fields from the agent state plus additional runtime diagnostics and lizard/internal world context. Each memory slot entry ("food_memory", "predator_memory", "shelter_memory", "escape_memory") is augmented with a "ttl" key reflecting its time-to-live. The dictionary also includes detailed lizard debug fields (position, mode, timers, targets, and counters), the current tick and day/night flag, sleep/shelter encodings, terrain under the spider, and the active map template and reward profile.
+        The returned mapping contains the spider dataclass fields plus runtime diagnostics and derived views. Memory slot entries ("food_memory", "predator_memory", "shelter_memory", "escape_memory") are augmented with a "ttl" key. Percept trace fields ("food_trace", "shelter_trace", "predator_trace") are converted to their serialized trace views. Predator information includes a list of serialized predator dataclasses with an "index" for each entry and a separate "predator_positions" list of [x, y] coordinates. The mapping also provides tick-level diagnostics (tick, is_night, sleep_phase_level), shelter role and level at the spider, terrain under the spider, active map/reward/noise profile names, episode_seed, and a computed predator_motion_salience entry.
         
         Returns:
-            dict: A mapping of state and environment keys to their current values, suitable for logging, debugging, or serialization.
+            dict: A flat dictionary of state and environment keys to their current values suitable for logging, debugging, or serialization. Memory slots contain a "ttl" entry and trace fields are serialized views; predators is a list of predator dicts with indices and predator_positions is a list of [x, y].
         """
         state = asdict(self.state)
         for key in ("food_memory", "predator_memory", "shelter_memory", "escape_memory"):
@@ -1200,6 +1963,15 @@ class SpiderWorld:
         predator_view = predator_visible_to_spider(self, apply_noise=False)
         state.update(
             {
+                "predator_count": self.predator_count,
+                "predator_positions": [list(pos) for pos in self.predator_positions()],
+                "predators": [
+                    {
+                        "index": idx,
+                        **asdict(predator),
+                    }
+                    for idx, predator in enumerate(self.predators)
+                ],
                 "lizard_x": self.lizard.x,
                 "lizard_y": self.lizard.y,
                 "lizard_mode": self.lizard.mode,
@@ -1229,6 +2001,14 @@ class SpiderWorld:
         return state
 
     def render(self) -> str:
+        """
+        Render a compact textual snapshot of the current world state.
+        
+        The returned string begins with a single-line header containing tick, day/night phase, map and reward profile names, key physiology (hunger, fatigue, sleep debt, health), recent pain and last reward, shelter role and sleep encoding, last action, and the primary predator's position and mode. The header is followed by a grid where each character represents a cell: '#' blocked, ':' clutter, '=' narrow, 'E' shelter entrance, 'I' shelter interior, 'D' shelter deep, 'F' food, 'L' the primary predator, 'P' other predators, and 'A' the spider (or 'X' if the spider shares a cell with any predator).
+        
+        Returns:
+            A multi-line string with the header on the first line and the ASCII grid on subsequent lines.
+        """
         chars = [["." for _ in range(self.width)] for _ in range(self.height)]
         for x, y in self.blocked_cells:
             chars[y][x] = "#"
@@ -1248,10 +2028,10 @@ class SpiderWorld:
             chars[y][x] = "D"
         for x, y in self.food_positions:
             chars[y][x] = "F"
-        lx, ly = self.lizard_pos()
-        chars[ly][lx] = "L"
+        for index, (px, py) in enumerate(self.predator_positions()):
+            chars[py][px] = "L" if index == 0 else "P"
         sx, sy = self.spider_pos()
-        chars[sy][sx] = "X" if (sx, sy) == (lx, ly) else "A"
+        chars[sy][sx] = "X" if (sx, sy) in set(self.predator_positions()) else "A"
         rows = ["".join(row) for row in chars]
         phase = "NIGHT" if self.is_night() else "DAY"
         header = (

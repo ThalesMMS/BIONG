@@ -1,4 +1,7 @@
 import unittest
+from types import SimpleNamespace
+from typing import Tuple
+from unittest.mock import patch
 
 import numpy as np
 
@@ -14,15 +17,22 @@ from spider_cortex_sim.interfaces import (
     SleepObservation,
     VisualObservation,
 )
-from spider_cortex_sim.maps import CLUTTER
+from spider_cortex_sim.maps import CLUTTER, NARROW
 from spider_cortex_sim.noise import NoiseConfig
 from spider_cortex_sim.perception import (
+    DOMINANT_PREDATOR_TYPE_OLFACTORY,
+    DOMINANT_PREDATOR_TYPE_VISUAL,
     OBSERVATION_LEAKAGE_AUDIT,
+    TERRAIN_DIFFICULTY,
     PerceivedTarget,
+    _apply_visibility_zone_certainty,
+    _compute_target_visibility_zone,
+    _fov_thresholds,
     build_action_context_observation,
     build_alert_observation,
     build_hunger_observation,
     build_motor_context_observation,
+    compute_per_type_threats,
     observation_leakage_audit,
     build_sensory_observation,
     build_sleep_observation,
@@ -30,7 +40,9 @@ from spider_cortex_sim.perception import (
     has_line_of_sight,
     line_cells,
     lizard_detects_spider,
+    predator_detects_spider,
     predator_visible_to_spider,
+    predators_visible_to_spider,
     serialize_observation_view,
     smell_gradient,
     visible_object,
@@ -38,10 +50,21 @@ from spider_cortex_sim.perception import (
     visible_range,
 )
 from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
+from spider_cortex_sim.predator import (
+    DEFAULT_LIZARD_PROFILE,
+    OLFACTORY_HUNTER_PROFILE,
+    VISUAL_HUNTER_PROFILE,
+)
 from spider_cortex_sim.world import SpiderWorld
 
 
 class PerceptionBuildersTest(unittest.TestCase):
+    memory_vector_audit_keys: Tuple[str, ...] = (
+        "predator_memory_vector",
+        "shelter_memory_vector",
+        "escape_memory_vector",
+    )
+
     def setUp(self) -> None:
         """
         Initialize test fixtures for PerceptionBuildersTest.
@@ -80,7 +103,36 @@ class PerceptionBuildersTest(unittest.TestCase):
             position=(3, 7),
         )
 
+    def assert_memory_vector_audit_entries(
+        self,
+        audit: dict[str, dict[str, object]],
+        *,
+        expected_classification: str | None = None,
+        expected_risk: str | None = None,
+        expected_source_fragment: str | None = None,
+        expected_modules: dict[str, str] | None = None,
+    ) -> None:
+        for key in self.memory_vector_audit_keys:
+            with self.subTest(memory_vector=key):
+                self.assertIn(key, audit)
+                metadata = audit[key]
+                if expected_classification is not None:
+                    self.assertEqual(metadata["classification"], expected_classification)
+                if expected_risk is not None:
+                    self.assertEqual(metadata["risk"], expected_risk)
+                if expected_source_fragment is not None:
+                    self.assertIn(expected_source_fragment, metadata["source"])
+                if expected_modules is not None:
+                    self.assertIn(key, expected_modules)
+                    expected_module = expected_modules[key]
+                    self.assertIn(expected_module, metadata["modules"])
+
     def test_serialize_visual_observation_produces_correct_shape(self) -> None:
+        """
+        Verify that serializing a VisualObservation produces the expected flattened vector length.
+        
+        Asserts that a VisualObservation containing visual, trace, heading, day/night and predator-threat fields serializes to a numpy array of shape (25,).
+        """
         view = VisualObservation(
             food_visible=1.0,
             food_certainty=0.9,
@@ -103,11 +155,13 @@ class PerceptionBuildersTest(unittest.TestCase):
             shelter_trace_strength=0.0,
             predator_trace_strength=0.0,
             predator_motion_salience=0.0,
+            visual_predator_threat=0.0,
+            olfactory_predator_threat=0.0,
             day=1.0,
             night=0.0,
         )
         vector = serialize_observation_view("visual", view)
-        self.assertEqual(vector.shape, (23,))
+        self.assertEqual(vector.shape, (25,))
 
     def test_serialize_observation_view_values_match_as_mapping(self) -> None:
         view = VisualObservation(
@@ -132,6 +186,8 @@ class PerceptionBuildersTest(unittest.TestCase):
             shelter_trace_strength=0.3,
             predator_trace_strength=0.0,
             predator_motion_salience=0.0,
+            visual_predator_threat=0.1,
+            olfactory_predator_threat=0.2,
             day=0.0,
             night=1.0,
         )
@@ -159,6 +215,8 @@ class PerceptionBuildersTest(unittest.TestCase):
             shelter_trace_strength=0.0,
             predator_trace_strength=0.5,
             predator_motion_salience_value=0.1,
+            visual_predator_threat=0.3,
+            olfactory_predator_threat=0.2,
             day=1.0,
             night=0.0,
         )
@@ -170,6 +228,8 @@ class PerceptionBuildersTest(unittest.TestCase):
         self.assertAlmostEqual(visual.predator_dx, self.predator_percept.dx)
         self.assertAlmostEqual(visual.heading_dx, 1.0)
         self.assertAlmostEqual(visual.predator_trace_strength, 0.5)
+        self.assertAlmostEqual(visual.visual_predator_threat, 0.3)
+        self.assertAlmostEqual(visual.olfactory_predator_threat, 0.2)
 
     def test_build_visual_observation_null_percept(self) -> None:
         visual = build_visual_observation(
@@ -182,12 +242,16 @@ class PerceptionBuildersTest(unittest.TestCase):
             shelter_trace_strength=0.0,
             predator_trace_strength=0.0,
             predator_motion_salience_value=0.0,
+            visual_predator_threat=0.0,
+            olfactory_predator_threat=0.0,
             day=0.5,
             night=0.5,
         )
         self.assertAlmostEqual(visual.food_visible, 0.0)
         self.assertAlmostEqual(visual.shelter_visible, 0.0)
         self.assertAlmostEqual(visual.predator_visible, 0.0)
+        self.assertAlmostEqual(visual.visual_predator_threat, 0.0)
+        self.assertAlmostEqual(visual.olfactory_predator_threat, 0.0)
 
     def test_build_sensory_observation_maps_state_fields(self) -> None:
         self.world.state.recent_pain = 0.3
@@ -255,35 +319,34 @@ class PerceptionBuildersTest(unittest.TestCase):
         )
         self.assertAlmostEqual(hunger.food_memory_age, 1.0)
 
-    def test_observation_leakage_audit_marks_predator_dist_as_high_risk(self) -> None:
+    def test_observation_leakage_audit_marks_predator_dist_as_resolved(self) -> None:
         audit = observation_leakage_audit()
-        self.assertEqual(audit["predator_dist"]["risk"], "high")
+        self.assertEqual(audit["predator_dist"]["risk"], "resolved")
+        self.assertEqual(audit["predator_dist"]["status"], "removed_from_observations")
+        self.assertIn("diagnostic_predator_dist", audit["predator_dist"]["evidence"])
         self.assertEqual(set(audit.keys()), set(OBSERVATION_LEAKAGE_AUDIT.keys()))
 
     def test_observation_leakage_audit_returns_deep_copy_not_reference(self) -> None:
         audit1 = observation_leakage_audit()
         audit2 = observation_leakage_audit()
         audit1["predator_dist"]["risk"] = "mutated"
-        self.assertEqual(audit2["predator_dist"]["risk"], "high")
+        self.assertEqual(audit2["predator_dist"]["risk"], "resolved")
 
-    def test_observation_leakage_audit_home_vector_is_high_risk_world_derived(self) -> None:
+    def test_observation_leakage_audit_home_vector_is_resolved_world_derived(self) -> None:
         audit = observation_leakage_audit()
-        self.assertEqual(audit["home_vector"]["risk"], "high")
+        self.assertEqual(audit["home_vector"]["risk"], "resolved")
+        self.assertEqual(audit["home_vector"]["status"], "removed_from_observations")
         self.assertEqual(audit["home_vector"]["classification"], "world_derived_navigation_hint")
+        self.assertIn("diagnostic_home", audit["home_vector"]["evidence"])
 
-    def test_observation_leakage_audit_shelter_memory_vector_is_high_risk(self) -> None:
-        audit = observation_leakage_audit()
-        self.assertEqual(audit["shelter_memory_vector"]["risk"], "high")
-        self.assertEqual(audit["shelter_memory_vector"]["classification"], "world_owned_memory")
-
-    def test_observation_leakage_audit_low_risk_entries_use_direct_perception(self) -> None:
+    def test_observation_leakage_audit_low_risk_entries_are_agent_grounded(self) -> None:
         audit = observation_leakage_audit()
         low_risk = [name for name, data in audit.items() if data["risk"] == "low"]
         for name in low_risk:
-            self.assertEqual(
+            self.assertIn(
                 audit[name]["classification"],
-                "direct_perception",
-                f"Low-risk entry {name!r} expected classification 'direct_perception'",
+                {"direct_perception", "plausible_memory"},
+                f"Low-risk entry {name!r} should be direct perception or plausible memory",
             )
 
     def test_observation_leakage_audit_all_entries_have_required_fields(self) -> None:
@@ -313,7 +376,7 @@ class PerceptionBuildersTest(unittest.TestCase):
 
     def test_observation_leakage_audit_risk_values_are_valid(self) -> None:
         audit = observation_leakage_audit()
-        valid_risk_levels = {"low", "medium", "high"}
+        valid_risk_levels = {"low", "medium", "high", "resolved"}
         for key, metadata in audit.items():
             self.assertIn(
                 metadata["risk"],
@@ -321,9 +384,82 @@ class PerceptionBuildersTest(unittest.TestCase):
                 f"Entry {key!r} has unexpected risk level {metadata['risk']!r}",
             )
 
-    def test_observation_leakage_audit_predator_memory_vector_is_medium_risk(self) -> None:
+    def test_observation_leakage_audit_memory_vectors_are_plausible_low_risk(self) -> None:
         audit = observation_leakage_audit()
-        self.assertEqual(audit["predator_memory_vector"]["risk"], "medium")
+        self.assert_memory_vector_audit_entries(
+            audit,
+            expected_classification="plausible_memory",
+            expected_risk="low",
+        )
+
+    def test_observation_leakage_audit_no_world_owned_memory_classification(self) -> None:
+        """Reclassified memory-vector entries should not be world-owned memory."""
+        audit = observation_leakage_audit()
+        for key in self.memory_vector_audit_keys:
+            with self.subTest(memory_vector=key):
+                self.assertIn(key, audit)
+                metadata = audit[key]
+                self.assertNotEqual(
+                    metadata["classification"],
+                    "world_owned_memory",
+                    f"Entry {key!r} still classified as 'world_owned_memory'",
+                )
+
+    def test_observation_leakage_audit_no_medium_or_high_risk(self) -> None:
+        """Reclassified memory-vector entries must not be medium or high risk."""
+        audit = observation_leakage_audit()
+        for key in self.memory_vector_audit_keys:
+            with self.subTest(memory_vector=key):
+                self.assertIn(key, audit)
+                metadata = audit[key]
+                if metadata["risk"] == "resolved":
+                    continue
+                self.assertNotIn(
+                    metadata["risk"],
+                    {"medium", "high"},
+                    f"Entry {key!r} has unexpected risk level {metadata['risk']!r}",
+                )
+
+    def test_observation_leakage_audit_shelter_memory_vector_notes_mention_perceived(self) -> None:
+        """shelter_memory_vector notes must reference perceived shelter rather than world-selected target."""
+        audit = observation_leakage_audit()
+        notes = audit["shelter_memory_vector"]["notes"].casefold()
+        self.assertIn("perceived", notes)
+
+    def test_observation_leakage_audit_predator_memory_vector_notes_mention_visual_or_contact(self) -> None:
+        """predator_memory_vector notes must mention visual perception and contact events."""
+        audit = observation_leakage_audit()
+        notes = audit["predator_memory_vector"]["notes"].casefold()
+        self.assertIn("visual", notes)
+        self.assertIn("contact", notes)
+
+    def test_observation_leakage_audit_escape_memory_vector_notes_mention_movement(self) -> None:
+        """escape_memory_vector notes must reference movement history, not walkability."""
+        audit = observation_leakage_audit()
+        notes = audit["escape_memory_vector"]["notes"].casefold()
+        self.assertIn("movement", notes)
+
+    def test_observation_leakage_audit_memory_vector_sources_reference_refresh_memory(self) -> None:
+        """All three memory-vector entries should cite refresh_memory as part of their source."""
+        audit = observation_leakage_audit()
+        self.assert_memory_vector_audit_entries(audit, expected_source_fragment="refresh_memory")
+
+    def test_observation_leakage_audit_memory_vectors_have_expected_modules(self) -> None:
+        """Memory-vector entries should be associated with their consumer modules."""
+        audit = observation_leakage_audit()
+        self.assert_memory_vector_audit_entries(
+            audit,
+            expected_modules={
+                "predator_memory_vector": "alert",
+                "shelter_memory_vector": "sleep",
+                "escape_memory_vector": "alert",
+            },
+        )
+
+    def test_observation_leakage_audit_all_three_memory_vectors_present(self) -> None:
+        """predator_memory_vector, shelter_memory_vector, escape_memory_vector are all in the audit."""
+        audit = observation_leakage_audit()
+        self.assert_memory_vector_audit_entries(audit)
 
     def test_build_sleep_observation_maps_state_and_args(self) -> None:
         self.world.state.fatigue = 0.65
@@ -335,9 +471,6 @@ class PerceptionBuildersTest(unittest.TestCase):
             self.world,
             on_shelter=1.0,
             night=1.0,
-            home_dx=-0.3,
-            home_dy=0.1,
-            home_dist=0.4,
             sleep_phase_level=0.7,
             rest_streak_norm=0.5,
             shelter_role_level=0.8,
@@ -348,22 +481,37 @@ class PerceptionBuildersTest(unittest.TestCase):
         self.assertAlmostEqual(sleep.sleep_debt, 0.5)
         self.assertAlmostEqual(sleep.shelter_trace_strength, 0.55)
         self.assertAlmostEqual(sleep.shelter_memory_dx, 0.2)
+        self.assertFalse(hasattr(sleep, "home_dx"))
+        self.assertFalse(hasattr(sleep, "home_dy"))
+        self.assertFalse(hasattr(sleep, "home_dist"))
 
     def test_build_sleep_observation_serializes_to_correct_shape(self) -> None:
         sleep = build_sleep_observation(
             self.world,
             on_shelter=0.0,
             night=0.0,
-            home_dx=0.0,
-            home_dy=0.0,
-            home_dist=1.0,
             sleep_phase_level=0.0,
             rest_streak_norm=0.0,
             shelter_role_level=0.0,
             shelter_trace=(0.0, 0.0, 0.0),
             shelter_memory=(0.0, 0.0, 1.0),
         )
-        self.assertEqual(serialize_observation_view("sleep", sleep).shape, (19,))
+        self.assertEqual(serialize_observation_view("sleep", sleep).shape, (16,))
+
+    def test_sleep_observation_excludes_removed_home_fields(self) -> None:
+        sleep = build_sleep_observation(
+            self.world,
+            on_shelter=0.0,
+            night=0.0,
+            sleep_phase_level=0.0,
+            rest_streak_norm=0.0,
+            shelter_role_level=0.0,
+            shelter_trace=(0.0, 0.0, 0.0),
+            shelter_memory=(0.0, 0.0, 1.0),
+        )
+        self.assertNotIn("home_dx", sleep.as_mapping())
+        self.assertNotIn("home_dy", sleep.as_mapping())
+        self.assertNotIn("home_dist", sleep.as_mapping())
 
     def test_build_alert_observation_maps_percept_and_state(self) -> None:
         self.world.state.recent_pain = 0.2
@@ -371,11 +519,11 @@ class PerceptionBuildersTest(unittest.TestCase):
         alert = build_alert_observation(
             self.world,
             predator_view=self.predator_percept,
-            predator_dist_norm=0.35,
             predator_smell_strength=0.1,
             predator_motion_salience_value=0.1,
-            home_dx=0.4,
-            home_dy=-0.3,
+            visual_predator_threat=0.4,
+            olfactory_predator_threat=0.2,
+            dominant_predator_type=DOMINANT_PREDATOR_TYPE_VISUAL,
             on_shelter=0.0,
             night=0.0,
             predator_trace=(0.2, -0.4, 0.7),
@@ -383,26 +531,51 @@ class PerceptionBuildersTest(unittest.TestCase):
             escape_memory=(0.0, 0.0, 1.0),
         )
         self.assertIsInstance(alert, AlertObservation)
-        self.assertAlmostEqual(alert.predator_dist, 0.35)
         self.assertAlmostEqual(alert.predator_trace_strength, 0.7)
         self.assertAlmostEqual(alert.predator_memory_dx, 0.7)
+        self.assertAlmostEqual(alert.dominant_predator_none, 0.0)
+        self.assertAlmostEqual(alert.dominant_predator_visual, 1.0)
+        self.assertAlmostEqual(alert.dominant_predator_olfactory, 0.0)
+        self.assertFalse(hasattr(alert, "predator_dist"))
+        self.assertFalse(hasattr(alert, "home_dx"))
+        self.assertFalse(hasattr(alert, "home_dy"))
 
-    def test_build_alert_observation_serializes_to_correct_shape(self) -> None:
+    def test_alert_observation_excludes_removed_privileged_fields(self) -> None:
         alert = build_alert_observation(
             self.world,
             predator_view=self.null_percept,
-            predator_dist_norm=1.0,
             predator_smell_strength=0.0,
             predator_motion_salience_value=0.0,
-            home_dx=0.0,
-            home_dy=0.0,
+            visual_predator_threat=0.0,
+            olfactory_predator_threat=0.0,
+            dominant_predator_type=0.0,
             on_shelter=0.0,
             night=0.0,
             predator_trace=(0.0, 0.0, 0.0),
             predator_memory=(0.0, 0.0, 1.0),
             escape_memory=(0.0, 0.0, 1.0),
         )
-        self.assertEqual(serialize_observation_view("alert", alert).shape, (23,))
+        self.assertNotIn("predator_dist", alert.as_mapping())
+        self.assertNotIn("home_dx", alert.as_mapping())
+        self.assertNotIn("home_dy", alert.as_mapping())
+        self.assertNotIn("dominant_predator_type", alert.as_mapping())
+
+    def test_build_alert_observation_serializes_to_correct_shape(self) -> None:
+        alert = build_alert_observation(
+            self.world,
+            predator_view=self.null_percept,
+            predator_smell_strength=0.0,
+            predator_motion_salience_value=0.0,
+            visual_predator_threat=0.0,
+            olfactory_predator_threat=0.0,
+            dominant_predator_type=0.0,
+            on_shelter=0.0,
+            night=0.0,
+            predator_trace=(0.0, 0.0, 0.0),
+            predator_memory=(0.0, 0.0, 1.0),
+            escape_memory=(0.0, 0.0, 1.0),
+        )
+        self.assertEqual(serialize_observation_view("alert", alert).shape, (25,))
 
     def test_build_action_context_observation_maps_state_fields(self) -> None:
         self.world.state.hunger = 0.4
@@ -415,7 +588,6 @@ class PerceptionBuildersTest(unittest.TestCase):
             on_food=0.0,
             on_shelter=1.0,
             predator_view=self.null_percept,
-            predator_dist_norm=0.9,
             day=1.0,
             night=0.0,
             shelter_role_level=0.6,
@@ -423,6 +595,35 @@ class PerceptionBuildersTest(unittest.TestCase):
         self.assertIsInstance(ac, ActionContextObservation)
         self.assertAlmostEqual(ac.last_move_dx, 1.0)
         self.assertAlmostEqual(ac.sleep_debt, 0.25)
+        self.assertFalse(hasattr(ac, "predator_dist"))
+
+    def test_context_observations_exclude_predator_dist(self) -> None:
+        ac = build_action_context_observation(
+            self.world,
+            on_food=0.0,
+            on_shelter=0.0,
+            predator_view=self.null_percept,
+            day=1.0,
+            night=0.0,
+            shelter_role_level=0.0,
+        )
+        mc = build_motor_context_observation(
+            self.world,
+            on_food=0.0,
+            on_shelter=0.0,
+            predator_view=self.null_percept,
+            day=1.0,
+            night=0.0,
+            shelter_role_level=0.0,
+        )
+        action_mapping = ac.as_mapping()
+        motor_mapping = mc.as_mapping()
+        self.assertNotIn("predator_dist", action_mapping)
+        self.assertNotIn("home_dx", action_mapping)
+        self.assertNotIn("home_dy", action_mapping)
+        self.assertNotIn("predator_dist", motor_mapping)
+        self.assertNotIn("home_dx", motor_mapping)
+        self.assertNotIn("home_dy", motor_mapping)
 
     def test_build_action_context_observation_serializes_to_correct_shape(self) -> None:
         ac = build_action_context_observation(
@@ -430,7 +631,6 @@ class PerceptionBuildersTest(unittest.TestCase):
             on_food=0.0,
             on_shelter=0.0,
             predator_view=self.null_percept,
-            predator_dist_norm=1.0,
             day=1.0,
             night=0.0,
             shelter_role_level=0.0,
@@ -443,18 +643,46 @@ class PerceptionBuildersTest(unittest.TestCase):
             on_food=0.0,
             on_shelter=0.0,
             predator_view=self.null_percept,
-            predator_dist_norm=1.0,
             day=1.0,
             night=0.0,
             shelter_role_level=0.0,
         )
         self.assertEqual(serialize_observation_view("motor_context", mc).shape, (MOTOR_CONTEXT_INTERFACE.input_dim,))
 
+    def test_build_motor_context_observation_adds_embodiment_signals(self) -> None:
+        self.world.state.heading_dx = 0
+        self.world.state.heading_dy = -1
+        self.world.state.fatigue = 0.37
+        self.world.map_template.terrain[self.world.spider_pos()] = NARROW
+
+        mc = build_motor_context_observation(
+            self.world,
+            on_food=0.0,
+            on_shelter=0.0,
+            predator_view=self.null_percept,
+            day=1.0,
+            night=0.0,
+            shelter_role_level=0.0,
+        )
+
+        self.assertAlmostEqual(mc.heading_dx, 0.0)
+        self.assertAlmostEqual(mc.heading_dy, -1.0)
+        self.assertAlmostEqual(mc.terrain_difficulty, TERRAIN_DIFFICULTY[NARROW])
+        self.assertAlmostEqual(mc.fatigue, 0.37)
+
     def test_observe_all_modalities_match_interface_dims(self) -> None:
         obs = self.world.observe()
         for key in ("visual", "sensory", "hunger", "sleep", "alert", "action_context", "motor_context"):
             iface = OBSERVATION_INTERFACE_BY_KEY[key]
             self.assertEqual(obs[key].shape, (iface.input_dim,))
+
+    def test_observe_world_uses_reduced_observation_dims(self) -> None:
+        obs = self.world.observe()
+        self.assertEqual(obs["visual"].shape, (25,))
+        self.assertEqual(obs["sleep"].shape, (16,))
+        self.assertEqual(obs["alert"].shape, (25,))
+        self.assertEqual(obs["action_context"].shape, (15,))
+        self.assertEqual(obs["motor_context"].shape, (13,))
 
     def test_observe_motor_extra_equals_motor_context(self) -> None:
         obs = self.world.observe()
@@ -502,6 +730,8 @@ class PerceptionBuildersTest(unittest.TestCase):
             shelter_trace_strength=0.0,
             predator_trace_strength=0.0,
             predator_motion_salience_value=0.0,
+            visual_predator_threat=0.2,
+            olfactory_predator_threat=0.1,
             day=1.0,
             night=0.0,
         )
@@ -528,14 +758,148 @@ class PerceptionBuildersTest(unittest.TestCase):
             )
         self.assertIn("predator_motion_salience", obs["meta"])
 
+    def test_observe_world_meta_contains_diagnostic_home_vector(self) -> None:
+        """Privileged home-vector diagnostics live under meta['diagnostic'] only."""
+        obs = self.world.observe()
+        diagnostic = obs["meta"]["diagnostic"]
+        self.assertIn("diagnostic_home_dx", diagnostic)
+        self.assertIn("diagnostic_home_dy", diagnostic)
+        self.assertIn("diagnostic_home_dist", diagnostic)
+        self.assertNotIn("home_dx", obs["meta"])
+        self.assertNotIn("home_dy", obs["meta"])
+        self.assertNotIn("home_dist", obs["meta"])
+
+    def test_observe_world_meta_home_dx_is_float(self) -> None:
+        obs = self.world.observe()
+        self.assertIsInstance(obs["meta"]["diagnostic"]["diagnostic_home_dx"], float)
+
+    def test_observe_world_meta_home_dy_is_float(self) -> None:
+        obs = self.world.observe()
+        self.assertIsInstance(obs["meta"]["diagnostic"]["diagnostic_home_dy"], float)
+
+    def test_observe_world_meta_home_dist_is_float(self) -> None:
+        obs = self.world.observe()
+        self.assertIsInstance(obs["meta"]["diagnostic"]["diagnostic_home_dist"], float)
+
+    def test_observe_world_meta_home_dist_is_non_negative(self) -> None:
+        obs = self.world.observe()
+        self.assertGreaterEqual(obs["meta"]["diagnostic"]["diagnostic_home_dist"], 0.0)
+
+    def test_observe_world_meta_home_dx_dy_are_unit_range(self) -> None:
+        """home_dx and home_dy from _relative() should be in [-1, 1]."""
+        obs = self.world.observe()
+        diagnostic = obs["meta"]["diagnostic"]
+        self.assertGreaterEqual(diagnostic["diagnostic_home_dx"], -1.0)
+        self.assertLessEqual(diagnostic["diagnostic_home_dx"], 1.0)
+        self.assertGreaterEqual(diagnostic["diagnostic_home_dy"], -1.0)
+        self.assertLessEqual(diagnostic["diagnostic_home_dy"], 1.0)
+
+    def test_observe_world_meta_home_vector_not_in_sleep_observation(self) -> None:
+        """The diagnostic home vector must not appear in the sleep observation vector."""
+        obs = self.world.observe()
+        sleep_mapping = OBSERVATION_INTERFACE_BY_KEY["sleep"].bind_values(obs["sleep"])
+        self.assertNotIn("home_dx", sleep_mapping)
+        self.assertNotIn("home_dy", sleep_mapping)
+        self.assertNotIn("home_dist", sleep_mapping)
+
+    def test_observe_world_meta_home_vector_not_in_alert_observation(self) -> None:
+        """The diagnostic home vector must not appear in the alert observation vector."""
+        obs = self.world.observe()
+        alert_mapping = OBSERVATION_INTERFACE_BY_KEY["alert"].bind_values(obs["alert"])
+        self.assertNotIn("home_dx", alert_mapping)
+        self.assertNotIn("home_dy", alert_mapping)
+
+    def test_observe_world_meta_predator_dist_present(self) -> None:
+        """Predator distance remains available only as diagnostic metadata."""
+        obs = self.world.observe()
+        self.assertIn("diagnostic_predator_dist", obs["meta"]["diagnostic"])
+        self.assertNotIn("predator_dist", obs["meta"])
+
+    def test_observe_world_meta_predator_dist_is_non_negative(self) -> None:
+        obs = self.world.observe()
+        self.assertGreaterEqual(obs["meta"]["diagnostic"]["diagnostic_predator_dist"], 0)
+
 
 class HeadingAwarePerceptionTest(unittest.TestCase):
-    def test_visible_object_respects_forward_fov(self) -> None:
+    def _heading_east_world(self) -> SpiderWorld:
+        """
+        Create a deterministic SpiderWorld positioned at (3, 3) with the agent's heading set to face east.
+        
+        Returns:
+            SpiderWorld: A world seeded for reproducible tests with vision range 6, lizard movement effectively disabled, and the spider's heading set to (1, 0).
+        """
         world = SpiderWorld(seed=101, vision_range=6, lizard_move_interval=999999)
         world.reset(seed=101)
         world.state.x, world.state.y = 3, 3
         world.state.heading_dx = 1
         world.state.heading_dy = 0
+        return world
+
+    def test_compute_target_visibility_zone_uses_two_zone_fov(self) -> None:
+        world = self._heading_east_world()
+
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (5, 3)), "foveal")
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (4, 5)), "peripheral")
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (2, 5)), "outside")
+
+    def test_default_visibility_zones_at_representative_angles(self) -> None:
+        """
+        Verify representative target angles relative to an east-facing heading are classified into the expected visibility zones.
+        
+        Asserts that targets in front and slightly off-center are `foveal`, targets at a lateral angle are `peripheral`, and targets behind or far to the side are `outside` for the world configured by `_heading_east_world()`.
+        """
+        world = self._heading_east_world()
+
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (5, 3)), "foveal")
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (5, 5)), "foveal")
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (3, 5)), "peripheral")
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (1, 5)), "outside")
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (1, 3)), "outside")
+
+    def test_visibility_confidence_penalizes_peripheral_zone(self) -> None:
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        summary["name"] = "peripheral_penalty_test"
+        summary["version"] = 101
+        summary["perception"]["peripheral_certainty_penalty"] = 0.25
+        world = SpiderWorld(
+            seed=101,
+            vision_range=6,
+            lizard_move_interval=999999,
+            operational_profile=OperationalProfile.from_summary(summary),
+        )
+        world.reset(seed=101)
+        world.state.x, world.state.y = 3, 3
+
+        foveal_conf = visibility_confidence(
+            world,
+            source=(3, 3),
+            target=(6, 3),
+            dist=3,
+            radius=6,
+            visibility_zone="foveal",
+        )
+        peripheral_conf = visibility_confidence(
+            world,
+            source=(3, 3),
+            target=(6, 3),
+            dist=3,
+            radius=6,
+            visibility_zone="peripheral",
+        )
+        outside_conf = visibility_confidence(
+            world,
+            source=(3, 3),
+            target=(6, 3),
+            dist=3,
+            radius=6,
+            visibility_zone="outside",
+        )
+
+        self.assertAlmostEqual(foveal_conf - peripheral_conf, 0.25)
+        self.assertEqual(outside_conf, 0.0)
+
+    def test_visible_object_respects_forward_fov(self) -> None:
+        world = self._heading_east_world()
 
         front = visible_object(world, [(5, 3)], radius=visible_range(world), apply_noise=False)
         back = visible_object(world, [(1, 3)], radius=visible_range(world), apply_noise=False)
@@ -545,6 +909,45 @@ class HeadingAwarePerceptionTest(unittest.TestCase):
         self.assertGreater(front.certainty, 0.0)
         self.assertEqual(back.certainty, 0.0)
         self.assertEqual(back.visible, 0.0)
+
+    def test_visible_object_penalizes_peripheral_and_blocks_outside_targets(self) -> None:
+        world = self._heading_east_world()
+
+        foveal = visible_object(world, [(6, 3)], radius=visible_range(world), apply_noise=False)
+        peripheral = visible_object(world, [(4, 5)], radius=visible_range(world), apply_noise=False)
+        outside = visible_object(world, [(2, 5)], radius=visible_range(world), apply_noise=False)
+
+        self.assertGreater(foveal.certainty, peripheral.certainty)
+        self.assertGreater(peripheral.certainty, 0.0)
+        self.assertEqual(outside.visible, 0.0)
+        self.assertEqual(outside.certainty, 0.0)
+        self.assertIsNone(outside.position)
+
+    def test_smell_gradient_is_not_heading_gated(self) -> None:
+        world = SpiderWorld(seed=101, vision_range=6, lizard_move_interval=999999)
+        world.reset(seed=101)
+        world.state.x, world.state.y = 3, 3
+        food_position = [(1, 3)]
+
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        facing_away = smell_gradient(
+            world,
+            food_position,
+            radius=visible_range(world),
+            apply_noise=False,
+        )
+
+        world.state.heading_dx = -1
+        world.state.heading_dy = 0
+        facing_toward = smell_gradient(
+            world,
+            food_position,
+            radius=visible_range(world),
+            apply_noise=False,
+        )
+
+        self.assertEqual(facing_away, facing_toward)
 
     def test_predator_motion_salience_is_explicit(self) -> None:
         world = SpiderWorld(seed=103, lizard_move_interval=999999)
@@ -851,13 +1254,13 @@ class NoiseAwarePerceptionTest(unittest.TestCase):
         world = SpiderWorld(seed=9, noise_profile="high", lizard_move_interval=999999)
         obs = world.reset(seed=9)
 
-        self.assertEqual(obs["visual"].shape, (23,))
+        self.assertEqual(obs["visual"].shape, (25,))
         self.assertEqual(obs["sensory"].shape, (12,))
         self.assertEqual(obs["hunger"].shape, (16,))
-        self.assertEqual(obs["sleep"].shape, (19,))
-        self.assertEqual(obs["alert"].shape, (23,))
-        self.assertEqual(obs["action_context"].shape, (16,))
-        self.assertEqual(obs["motor_context"].shape, (10,))
+        self.assertEqual(obs["sleep"].shape, (16,))
+        self.assertEqual(obs["alert"].shape, (25,))
+        self.assertEqual(obs["action_context"].shape, (15,))
+        self.assertEqual(obs["motor_context"].shape, (13,))
 
 
 class VisibilityConfidenceTest(unittest.TestCase):
@@ -1002,6 +1405,7 @@ class LizardDetectsSpiderTest(unittest.TestCase):
         world.lizard.y = entrance[1]
         world.lizard_vision_range = 5
         self.assertTrue(lizard_detects_spider(world))
+        self.assertTrue(predator_detects_spider(world, world.lizard))
 
     def test_predator_visible_to_spider_far_away(self) -> None:
         world = SpiderWorld(seed=5, vision_range=4, lizard_move_interval=999999)
@@ -1022,22 +1426,254 @@ class LizardDetectsSpiderTest(unittest.TestCase):
         self.assertGreater(percept.certainty, 0.0)
 
 
+class MultiPredatorPerceptionTest(unittest.TestCase):
+    def test_predators_visible_to_spider_returns_per_type_views(self) -> None:
+        world = SpiderWorld(seed=41, vision_range=6, lizard_move_interval=999999)
+        world.reset(
+            seed=41,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+        world.state.x, world.state.y = 3, 3
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        world.get_predator(0).x, world.get_predator(0).y = 4, 3
+        world.get_predator(1).x, world.get_predator(1).y = 5, 3
+
+        views = predators_visible_to_spider(world, apply_noise=False)
+
+        self.assertEqual(set(views.keys()), {"visual", "olfactory"})
+        self.assertEqual(views["visual"].position, (4, 3))
+        self.assertEqual(views["olfactory"].position, (5, 3))
+
+    def test_compute_per_type_threats_tracks_dominant_predator_type(self) -> None:
+        world = SpiderWorld(seed=43, vision_range=6, lizard_move_interval=999999)
+        world.reset(
+            seed=43,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+        world.state.x, world.state.y = 3, 3
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        world.get_predator(0).x, world.get_predator(0).y = 7, 3
+        world.get_predator(1).x, world.get_predator(1).y = 4, 3
+
+        threats = compute_per_type_threats(world)
+
+        self.assertIn("visual_predator_threat", threats)
+        self.assertIn("olfactory_predator_threat", threats)
+        self.assertGreater(threats["olfactory_predator_threat"], threats["visual_predator_threat"])
+        self.assertEqual(
+            threats["dominant_predator_type"],
+            DOMINANT_PREDATOR_TYPE_OLFACTORY,
+        )
+
+    def test_predator_visible_to_spider_picks_most_threatening_visible_predator(self) -> None:
+        world = SpiderWorld(seed=47, vision_range=6, lizard_move_interval=999999)
+        world.reset(
+            seed=47,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+        world.state.x, world.state.y = 3, 3
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        world.get_predator(0).x, world.get_predator(0).y = 6, 3
+        world.get_predator(1).x, world.get_predator(1).y = 4, 3
+
+        percept = predator_visible_to_spider(world, apply_noise=False)
+
+        self.assertEqual(percept.position, (4, 3))
+
+    def test_predator_visible_to_spider_scores_candidates_with_noisy_view_when_requested(self) -> None:
+        world = SpiderWorld(seed=48, vision_range=6, lizard_move_interval=999999)
+        world.reset(seed=48)
+        predator_a = SimpleNamespace(x=1, y=1)
+        predator_b = SimpleNamespace(x=2, y=2)
+
+        def fake_visual_view(_: SpiderWorld, predator: object, *, apply_noise: bool) -> PerceivedTarget:
+            if predator is predator_a:
+                if apply_noise:
+                    return PerceivedTarget(
+                        visible=1.0,
+                        certainty=0.1,
+                        occluded=0.0,
+                        dx=1.0,
+                        dy=0.0,
+                        dist=4,
+                        position=(1, 1),
+                    )
+                return PerceivedTarget(
+                    visible=1.0,
+                    certainty=0.95,
+                    occluded=0.0,
+                    dx=1.0,
+                    dy=0.0,
+                    dist=1,
+                    position=(1, 1),
+                )
+            if apply_noise:
+                return PerceivedTarget(
+                    visible=1.0,
+                    certainty=0.9,
+                    occluded=0.0,
+                    dx=1.0,
+                    dy=0.0,
+                    dist=1,
+                    position=(2, 2),
+                )
+            return PerceivedTarget(
+                visible=1.0,
+                certainty=0.4,
+                occluded=0.0,
+                dx=1.0,
+                dy=0.0,
+                dist=2,
+                position=(2, 2),
+            )
+
+        with patch("spider_cortex_sim.perception._predator_visual_view", side_effect=fake_visual_view):
+            percept = predator_visible_to_spider(
+                world,
+                predators=[predator_a, predator_b],
+                apply_noise=True,
+            )
+
+        self.assertEqual(percept.position, (2, 2))
+
+    def test_explicit_default_profile_remains_authoritative_for_detection_ranges(self) -> None:
+        world = SpiderWorld(
+            seed=49,
+            map_template="exposed_feeding_ground",
+            lizard_vision_range=1,
+            predator_smell_range=1,
+            lizard_move_interval=999999,
+        )
+        world.reset(seed=49, predator_profiles=[DEFAULT_LIZARD_PROFILE])
+        world.state.x, world.state.y = 6, 6
+        world.state.heading_dx = -1
+        world.state.heading_dy = 0
+        world.get_predator(0).x, world.get_predator(0).y = 8, 6
+
+        distance = world.manhattan(
+            world.spider_pos(),
+            (world.get_predator(0).x, world.get_predator(0).y),
+        )
+        self.assertGreater(distance, world.lizard_vision_range)
+        self.assertGreater(distance, world.predator_smell_range)
+        self.assertTrue(predator_detects_spider(world, world.get_predator(0)))
+
+    def test_visual_hunter_detection_uses_profile_vision_range(self) -> None:
+        world = SpiderWorld(
+            seed=50,
+            map_template="exposed_feeding_ground",
+            lizard_vision_range=1,
+            lizard_move_interval=999999,
+        )
+        world.reset(seed=50, predator_profiles=[VISUAL_HUNTER_PROFILE])
+        world.state.x, world.state.y = 6, 6
+        world.state.last_move_dx = 0
+        world.state.last_move_dy = 0
+        predator = world.lizard
+        predator.x, predator.y = 8, 6
+
+        self.assertGreater(world.manhattan(world.spider_pos(), world.lizard_pos()), world.lizard_vision_range)
+        self.assertTrue(has_line_of_sight(world, world.lizard_pos(), world.spider_pos()))
+        self.assertTrue(predator_detects_spider(world, predator))
+
+    def test_olfactory_hunter_detection_uses_profile_smell_range(self) -> None:
+        world = SpiderWorld(
+            seed=54,
+            map_template="central_burrow",
+            predator_smell_range=1,
+            lizard_move_interval=999999,
+        )
+        world.reset(seed=54, predator_profiles=[OLFACTORY_HUNTER_PROFILE])
+        world.state.x, world.state.y = 6, 6
+        world.state.last_move_dx = 0
+        world.state.last_move_dy = 0
+        predator = world.lizard
+        predator.x, predator.y = 8, 6
+
+        self.assertGreater(world.manhattan(world.spider_pos(), world.lizard_pos()), world.predator_smell_range)
+        self.assertFalse(has_line_of_sight(world, world.lizard_pos(), world.spider_pos()))
+        self.assertTrue(predator_detects_spider(world, predator))
+
+
 class ObserveWorldMetaTest(unittest.TestCase):
     def test_observe_world_meta_has_required_fields(self) -> None:
+        """
+        Verify that world.observe() returns a meta mapping containing all required top-level observation fields.
+        
+        Asserts presence of the following keys in obs["meta"]: "food_dist", "shelter_dist", "diagnostic", "night", "day", "on_shelter", "on_food", "predator_visible", "lizard_x", "lizard_y", "lizard_mode", "sleep_phase", "sleep_debt", "shelter_role", "terrain", "map_template", "reward_profile", "vision", "memory_vectors", "predators", "visual_predator_threat", "olfactory_predator_threat", "dominant_predator_type", and "dominant_predator_type_label".
+        """
         world = SpiderWorld(seed=7, lizard_move_interval=999999)
         world.reset(seed=7)
         obs = world.observe()
         meta = obs["meta"]
         required = [
-            "food_dist", "shelter_dist", "predator_dist",
+            "food_dist", "shelter_dist", "diagnostic",
             "night", "day", "on_shelter", "on_food",
             "predator_visible", "lizard_x", "lizard_y", "lizard_mode",
             "sleep_phase", "sleep_debt", "shelter_role",
             "terrain", "map_template", "reward_profile",
-            "vision", "memory_vectors",
+            "vision", "memory_vectors", "predators",
+            "visual_predator_threat", "olfactory_predator_threat",
+            "dominant_predator_type", "dominant_predator_type_label",
         ]
         for field in required:
             self.assertIn(field, meta, f"Missing meta field: {field}")
+
+    def test_observe_world_reuses_sampled_predator_views(self) -> None:
+        world = SpiderWorld(seed=22)
+        world.reset(
+            seed=22,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, VISUAL_HUNTER_PROFILE],
+        )
+        sampled_positions: list[tuple[int, int]] = []
+
+        def fake_visual_view(
+            _: SpiderWorld,
+            predator: object,
+            *,
+            apply_noise: bool,
+        ) -> PerceivedTarget:
+            self.assertTrue(apply_noise)
+            position = (int(predator.x), int(predator.y))
+            sampled_positions.append(position)
+            dist = world.manhattan(world.spider_pos(), position)
+            return PerceivedTarget(
+                visible=1.0,
+                certainty=0.8,
+                occluded=0.0,
+                dx=1.0,
+                dy=0.0,
+                dist=dist,
+                position=position,
+            )
+
+        with patch(
+            "spider_cortex_sim.perception._predator_visual_view",
+            side_effect=fake_visual_view,
+        ) as sampled_view:
+            obs = world.observe()
+
+        self.assertEqual(sampled_view.call_count, world.predator_count)
+        self.assertCountEqual(sampled_positions, world.predator_positions())
+        self.assertGreater(obs["meta"]["visual_predator_threat"], 0.0)
+
+    def test_observe_world_meta_retains_diagnostic_privileged_values(self) -> None:
+        world = SpiderWorld(seed=7, lizard_move_interval=999999)
+        world.reset(seed=7)
+        obs = world.observe()
+        meta = obs["meta"]
+        diagnostic = meta["diagnostic"]
+        self.assertIsInstance(diagnostic["diagnostic_predator_dist"], int)
+        self.assertIsInstance(diagnostic["diagnostic_home_dx"], float)
+        self.assertIsInstance(diagnostic["diagnostic_home_dy"], float)
+        self.assertIsInstance(diagnostic["diagnostic_home_dist"], float)
+        self.assertNotIn("predator_dist", meta)
+        self.assertNotIn("home_dx", meta)
+        self.assertNotIn("home_dy", meta)
+        self.assertNotIn("home_dist", meta)
 
     def test_observe_world_memory_vectors_all_four_keys(self) -> None:
         world = SpiderWorld(seed=7, lizard_move_interval=999999)
@@ -1057,6 +1693,21 @@ class ObserveWorldMetaTest(unittest.TestCase):
         self.assertIn("food", vision)
         self.assertIn("shelter", vision)
         self.assertIn("predator", vision)
+        self.assertIn("predators_by_type", vision)
+
+    def test_observe_world_meta_predator_dump_includes_profiles(self) -> None:
+        world = SpiderWorld(seed=53, lizard_move_interval=999999)
+        world.reset(
+            seed=53,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+
+        meta = world.observe()["meta"]
+
+        self.assertEqual(len(meta["predators"]), 2)
+        self.assertIn("profile", meta["predators"][0])
+        self.assertEqual(meta["predators"][0]["profile"]["detection_style"], "visual")
+        self.assertEqual(meta["predators"][1]["profile"]["detection_style"], "olfactory")
 
 
 class OperationalProfilePerceptionIntegrationTest(unittest.TestCase):
@@ -1161,6 +1812,7 @@ class OperationalProfilePerceptionIntegrationTest(unittest.TestCase):
         world.lizard.x = max(0, entrance[0] - 1)
         world.lizard.y = entrance[1]
         world.lizard_vision_range = 5
+        world.lizard.profile = None
         self.assertFalse(lizard_detects_spider(world))
 
     def test_predator_motion_bonus_from_profile_increases_exported_salience(self) -> None:
@@ -1257,3 +1909,203 @@ class OperationalProfilePerceptionIntegrationTest(unittest.TestCase):
         self.assertGreater(high_percept.occluded, 0.0)
         self.assertGreater(low_percept.occluded, 0.0)
         self.assertGreater(high_percept.certainty, low_percept.certainty)
+
+
+class FovThresholdsTest(unittest.TestCase):
+    def _make_world(self, **perception_overrides: float) -> SpiderWorld:
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        summary["perception"].update(perception_overrides)
+        profile = OperationalProfile.from_summary(summary)
+        world = SpiderWorld(seed=77, vision_range=6, lizard_move_interval=999999, operational_profile=profile)
+        world.reset(seed=77)
+        return world
+
+    def test_default_thresholds_are_sixty_and_ninety(self) -> None:
+        world = self._make_world()
+        foveal, peripheral = _fov_thresholds(world)
+        self.assertAlmostEqual(foveal, 60.0)
+        self.assertAlmostEqual(peripheral, 90.0)
+
+    def test_custom_fov_half_angle_is_returned(self) -> None:
+        world = self._make_world(fov_half_angle=45.0)
+        foveal, _ = _fov_thresholds(world)
+        self.assertAlmostEqual(foveal, 45.0)
+
+    def test_custom_peripheral_half_angle_is_returned(self) -> None:
+        world = self._make_world(peripheral_half_angle=120.0)
+        _, peripheral = _fov_thresholds(world)
+        self.assertAlmostEqual(peripheral, 120.0)
+
+    def test_foveal_cannot_exceed_peripheral(self) -> None:
+        world = self._make_world(fov_half_angle=100.0, peripheral_half_angle=60.0)
+        foveal, peripheral = _fov_thresholds(world)
+        self.assertLessEqual(foveal, peripheral)
+
+    def test_fov_half_angle_clipped_to_180(self) -> None:
+        world = self._make_world(fov_half_angle=200.0)
+        foveal, _ = _fov_thresholds(world)
+        self.assertAlmostEqual(foveal, 180.0)
+
+    def test_fov_half_angle_clipped_to_zero(self) -> None:
+        world = self._make_world(fov_half_angle=-10.0)
+        foveal, _ = _fov_thresholds(world)
+        self.assertAlmostEqual(foveal, 0.0)
+
+    def test_peripheral_angle_clipped_to_zero(self) -> None:
+        world = self._make_world(fov_half_angle=0.0, peripheral_half_angle=-5.0)
+        _, peripheral = _fov_thresholds(world)
+        self.assertGreaterEqual(peripheral, 0.0)
+
+    def test_returns_tuple_of_two_floats(self) -> None:
+        world = self._make_world()
+        result = _fov_thresholds(world)
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        for val in result:
+            self.assertIsInstance(val, float)
+
+
+class ApplyVisibilityZoneCertaintyTest(unittest.TestCase):
+    def _make_world(self, penalty: float = 0.35) -> SpiderWorld:
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        summary["perception"]["peripheral_certainty_penalty"] = penalty
+        profile = OperationalProfile.from_summary(summary)
+        world = SpiderWorld(seed=55, vision_range=6, lizard_move_interval=999999, operational_profile=profile)
+        world.reset(seed=55)
+        return world
+
+    def test_foveal_zone_returns_certainty_unchanged(self) -> None:
+        world = self._make_world()
+        result = _apply_visibility_zone_certainty(world, 0.8, "foveal")
+        self.assertAlmostEqual(result, 0.8)
+
+    def test_outside_zone_returns_zero(self) -> None:
+        world = self._make_world()
+        result = _apply_visibility_zone_certainty(world, 0.9, "outside")
+        self.assertAlmostEqual(result, 0.0)
+
+    def test_outside_zone_always_returns_zero_regardless_of_certainty(self) -> None:
+        world = self._make_world()
+        for certainty in (0.0, 0.5, 1.0):
+            with self.subTest(certainty=certainty):
+                result = _apply_visibility_zone_certainty(world, certainty, "outside")
+                self.assertAlmostEqual(result, 0.0)
+
+    def test_peripheral_zone_applies_configured_penalty(self) -> None:
+        world = self._make_world(penalty=0.25)
+        result = _apply_visibility_zone_certainty(world, 0.8, "peripheral")
+        self.assertAlmostEqual(result, 0.55)
+
+    def test_peripheral_zone_default_penalty_is_0_35(self) -> None:
+        world = self._make_world(penalty=0.35)
+        result = _apply_visibility_zone_certainty(world, 0.7, "peripheral")
+        self.assertAlmostEqual(result, 0.35)
+
+    def test_peripheral_certainty_clipped_to_zero_when_penalty_exceeds_certainty(self) -> None:
+        world = self._make_world(penalty=0.5)
+        result = _apply_visibility_zone_certainty(world, 0.3, "peripheral")
+        self.assertAlmostEqual(result, 0.0)
+
+    def test_foveal_certainty_clipped_to_unit_interval(self) -> None:
+        world = self._make_world()
+        result = _apply_visibility_zone_certainty(world, 1.5, "foveal")
+        self.assertAlmostEqual(result, 1.0)
+
+    def test_result_always_in_unit_interval(self) -> None:
+        world = self._make_world()
+        for zone in ("foveal", "peripheral", "outside"):
+            for certainty in (-0.5, 0.0, 0.5, 1.0, 1.5):
+                result = _apply_visibility_zone_certainty(world, certainty, zone)  # type: ignore[arg-type]
+                self.assertGreaterEqual(result, 0.0)
+                self.assertLessEqual(result, 1.0)
+
+
+class VisibilityConfidenceZoneAliasTest(unittest.TestCase):
+    """Test the backward-compatible `zone` alias parameter for visibility_confidence."""
+
+    def setUp(self) -> None:
+        self.world = SpiderWorld(seed=1, vision_range=4, lizard_move_interval=999999)
+        self.world.reset(seed=1)
+        self.world.state.x, self.world.state.y = 3, 3
+
+    def test_zone_alias_produces_same_result_as_visibility_zone_for_foveal(self) -> None:
+        conf_visibility_zone = visibility_confidence(
+            self.world,
+            source=(3, 3),
+            target=(5, 3),
+            dist=2,
+            radius=4,
+            visibility_zone="foveal",
+        )
+        conf_zone = visibility_confidence(
+            self.world,
+            source=(3, 3),
+            target=(5, 3),
+            dist=2,
+            radius=4,
+            zone="foveal",
+        )
+        self.assertAlmostEqual(conf_visibility_zone, conf_zone)
+
+    def test_zone_alias_produces_same_result_as_visibility_zone_for_peripheral(self) -> None:
+        conf_visibility_zone = visibility_confidence(
+            self.world,
+            source=(3, 3),
+            target=(5, 3),
+            dist=2,
+            radius=4,
+            visibility_zone="peripheral",
+        )
+        conf_zone = visibility_confidence(
+            self.world,
+            source=(3, 3),
+            target=(5, 3),
+            dist=2,
+            radius=4,
+            zone="peripheral",
+        )
+        self.assertAlmostEqual(conf_visibility_zone, conf_zone)
+
+    def test_zone_alias_produces_zero_for_outside(self) -> None:
+        conf = visibility_confidence(
+            self.world,
+            source=(3, 3),
+            target=(5, 3),
+            dist=2,
+            radius=4,
+            zone="outside",
+        )
+        self.assertAlmostEqual(conf, 0.0)
+
+    def test_zone_alias_overrides_visibility_zone_when_both_provided(self) -> None:
+        """When both zone and visibility_zone are provided, zone alias takes precedence."""
+        conf_via_zone_foveal = visibility_confidence(
+            self.world,
+            source=(3, 3),
+            target=(5, 3),
+            dist=2,
+            radius=4,
+            visibility_zone="outside",
+            zone="foveal",
+        )
+        # zone="foveal" overrides visibility_zone="outside" — result should be positive
+        self.assertGreater(conf_via_zone_foveal, 0.0)
+
+    def test_default_visibility_zone_is_foveal(self) -> None:
+        """Default visibility_zone is foveal, so certainty should not be penalized."""
+        conf_explicit_foveal = visibility_confidence(
+            self.world,
+            source=(3, 3),
+            target=(5, 3),
+            dist=2,
+            radius=4,
+            visibility_zone="foveal",
+        )
+        conf_default = visibility_confidence(
+            self.world,
+            source=(3, 3),
+            target=(5, 3),
+            dist=2,
+            radius=4,
+        )
+        self.assertAlmostEqual(conf_explicit_foveal, conf_default)

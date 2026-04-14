@@ -1,15 +1,22 @@
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
+from spider_cortex_sim.agent import SpiderBrain
 from spider_cortex_sim.interfaces import (
     ALL_INTERFACES,
+    ACTION_DELTAS,
+    ACTION_TO_INDEX,
     ACTION_CONTEXT_INTERFACE,
+    LOCOMOTION_ACTIONS,
     MODULE_INTERFACES,
     MOTOR_CONTEXT_INTERFACE,
     OBSERVATION_INTERFACE_BY_KEY,
     OBSERVATION_VIEW_BY_KEY,
+    ORIENT_HEADINGS,
     AlertObservation,
     ActionContextObservation,
     HungerObservation,
@@ -25,7 +32,62 @@ from spider_cortex_sim.interfaces import (
     interface_registry,
     interface_registry_fingerprint,
     render_interfaces_markdown,
+    MODULE_INTERFACE_BY_NAME,
 )
+
+
+class LocomotionActionsTest(unittest.TestCase):
+    EXPECTED_ACTIONS = (
+        "MOVE_UP",
+        "MOVE_DOWN",
+        "MOVE_LEFT",
+        "MOVE_RIGHT",
+        "STAY",
+        "ORIENT_UP",
+        "ORIENT_DOWN",
+        "ORIENT_LEFT",
+        "ORIENT_RIGHT",
+    )
+
+    def test_locomotion_actions_match_expected_contract(self) -> None:
+        self.assertEqual(tuple(LOCOMOTION_ACTIONS), self.EXPECTED_ACTIONS)
+        self.assertEqual(len(LOCOMOTION_ACTIONS), len(self.EXPECTED_ACTIONS))
+        self.assertEqual(
+            ACTION_TO_INDEX,
+            {action_name: index for index, action_name in enumerate(self.EXPECTED_ACTIONS)},
+        )
+
+    def test_existing_action_indices_are_preserved(self) -> None:
+        self.assertEqual(
+            tuple(LOCOMOTION_ACTIONS[:5]),
+            ("MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT", "STAY"),
+        )
+        self.assertEqual(ACTION_TO_INDEX["MOVE_UP"], 0)
+        self.assertEqual(ACTION_TO_INDEX["MOVE_DOWN"], 1)
+        self.assertEqual(ACTION_TO_INDEX["MOVE_LEFT"], 2)
+        self.assertEqual(ACTION_TO_INDEX["MOVE_RIGHT"], 3)
+        self.assertEqual(ACTION_TO_INDEX["STAY"], 4)
+
+    def test_orient_actions_have_indices_five_through_eight(self) -> None:
+        self.assertEqual(ACTION_TO_INDEX["ORIENT_UP"], 5)
+        self.assertEqual(ACTION_TO_INDEX["ORIENT_DOWN"], 6)
+        self.assertEqual(ACTION_TO_INDEX["ORIENT_LEFT"], 7)
+        self.assertEqual(ACTION_TO_INDEX["ORIENT_RIGHT"], 8)
+
+    def test_orient_actions_do_not_displace(self) -> None:
+        for action_name in ORIENT_HEADINGS:
+            self.assertNotIn(action_name, ACTION_DELTAS)
+
+    def test_orient_headings_match_contract(self) -> None:
+        self.assertEqual(
+            ORIENT_HEADINGS,
+            {
+                "ORIENT_UP": (0, -1),
+                "ORIENT_DOWN": (0, 1),
+                "ORIENT_LEFT": (-1, 0),
+                "ORIENT_RIGHT": (1, 0),
+            },
+        )
 
 
 class ValidateExactKeysTest(unittest.TestCase):
@@ -91,18 +153,50 @@ class ObservationViewTest(unittest.TestCase):
             shelter_trace_strength=0.0,
             predator_trace_strength=0.0,
             predator_motion_salience=0.0,
+            visual_predator_threat=0.1,
+            olfactory_predator_threat=0.2,
             day=1.0,
             night=0.0,
         )
 
     def test_field_names_returns_ordered_tuple(self) -> None:
-        names = VisualObservation.field_names()
-        self.assertIsInstance(names, tuple)
-        self.assertEqual(names[0], "food_visible")
-        self.assertEqual(names[-1], "night")
-        self.assertEqual(len(names), 23)
+        self.assertEqual(
+            VisualObservation.field_names(),
+            (
+                "food_visible",
+                "food_certainty",
+                "food_occluded",
+                "food_dx",
+                "food_dy",
+                "shelter_visible",
+                "shelter_certainty",
+                "shelter_occluded",
+                "shelter_dx",
+                "shelter_dy",
+                "predator_visible",
+                "predator_certainty",
+                "predator_occluded",
+                "predator_dx",
+                "predator_dy",
+                "heading_dx",
+                "heading_dy",
+                "food_trace_strength",
+                "shelter_trace_strength",
+                "predator_trace_strength",
+                "predator_motion_salience",
+                "visual_predator_threat",
+                "olfactory_predator_threat",
+                "day",
+                "night",
+            ),
+        )
 
     def test_as_mapping_returns_float_values(self) -> None:
+        """
+        Verifies VisualObservation.as_mapping() produces a complete mapping of floats and preserves specific sample values.
+        
+        Asserts the result is a dict whose keys equal VisualObservation.field_names(), every value is a float, and selected fields match the expected float values for the deterministic test fixture (`food_visible == 1.0`, `food_dx == 0.5`, `day == 1.0`).
+        """
         view = self._make_visual()
         mapping = view.as_mapping()
         self.assertIsInstance(mapping, dict)
@@ -143,17 +237,82 @@ class ObservationViewTest(unittest.TestCase):
     def test_hunger_observation_field_count(self) -> None:
         self.assertEqual(len(HungerObservation.field_names()), 16)
 
-    def test_sleep_observation_field_count(self) -> None:
-        self.assertEqual(len(SleepObservation.field_names()), 19)
+    def test_sleep_observation_field_names_match_contract(self) -> None:
+        self.assertEqual(
+            SleepObservation.field_names(),
+            (
+                "fatigue",
+                "hunger",
+                "on_shelter",
+                "night",
+                "health",
+                "recent_pain",
+                "sleep_phase_level",
+                "rest_streak_norm",
+                "sleep_debt",
+                "shelter_role_level",
+                "shelter_trace_dx",
+                "shelter_trace_dy",
+                "shelter_trace_strength",
+                "shelter_memory_dx",
+                "shelter_memory_dy",
+                "shelter_memory_age",
+            ),
+        )
 
-    def test_alert_observation_field_count(self) -> None:
-        self.assertEqual(len(AlertObservation.field_names()), 23)
+    def test_alert_observation_field_names_match_contract(self) -> None:
+        self.assertEqual(
+            AlertObservation.field_names(),
+            (
+                "predator_visible",
+                "predator_certainty",
+                "predator_occluded",
+                "predator_dx",
+                "predator_dy",
+                "predator_smell_strength",
+                "predator_motion_salience",
+                "visual_predator_threat",
+                "olfactory_predator_threat",
+                "dominant_predator_none",
+                "dominant_predator_visual",
+                "dominant_predator_olfactory",
+                "recent_pain",
+                "recent_contact",
+                "on_shelter",
+                "night",
+                "predator_trace_dx",
+                "predator_trace_dy",
+                "predator_trace_strength",
+                "predator_memory_dx",
+                "predator_memory_dy",
+                "predator_memory_age",
+                "escape_memory_dx",
+                "escape_memory_dy",
+                "escape_memory_age",
+            ),
+        )
 
-    def test_action_context_observation_field_count(self) -> None:
-        """
-        Verify that ActionContextObservation declares exactly 16 field names.
-        """
-        self.assertEqual(len(ActionContextObservation.field_names()), 16)
+    def test_action_context_observation_field_names_match_contract(self) -> None:
+        self.assertEqual(
+            ActionContextObservation.field_names(),
+            (
+                "hunger",
+                "fatigue",
+                "health",
+                "recent_pain",
+                "recent_contact",
+                "on_food",
+                "on_shelter",
+                "predator_visible",
+                "predator_certainty",
+                "day",
+                "night",
+                "last_move_dx",
+                "last_move_dy",
+                "sleep_debt",
+                "shelter_role_level",
+            ),
+        )
 
     def test_action_context_observation_round_trip(self) -> None:
         """
@@ -171,7 +330,6 @@ class ObservationViewTest(unittest.TestCase):
             on_shelter=1.0,
             predator_visible=0.0,
             predator_certainty=0.0,
-            predator_dist=0.8,
             day=0.0,
             night=1.0,
             last_move_dx=0.0,
@@ -182,8 +340,25 @@ class ObservationViewTest(unittest.TestCase):
         recovered = ActionContextObservation.from_mapping(view.as_mapping())
         self.assertEqual(view, recovered)
 
-    def test_motor_context_observation_field_count(self) -> None:
-        self.assertEqual(len(MotorContextObservation.field_names()), 10)
+    def test_motor_context_observation_field_names_match_contract(self) -> None:
+        self.assertEqual(
+            MotorContextObservation.field_names(),
+            (
+                "on_food",
+                "on_shelter",
+                "predator_visible",
+                "predator_certainty",
+                "day",
+                "night",
+                "last_move_dx",
+                "last_move_dy",
+                "shelter_role_level",
+                "heading_dx",
+                "heading_dy",
+                "terrain_difficulty",
+                "fatigue",
+            ),
+        )
 
     def test_motor_context_observation_round_trip(self) -> None:
         """
@@ -197,12 +372,15 @@ class ObservationViewTest(unittest.TestCase):
             on_shelter=1.0,
             predator_visible=0.0,
             predator_certainty=0.0,
-            predator_dist=0.8,
             day=0.0,
             night=1.0,
             last_move_dx=0.0,
             last_move_dy=-1.0,
             shelter_role_level=0.75,
+            heading_dx=1.0,
+            heading_dy=0.0,
+            terrain_difficulty=0.4,
+            fatigue=0.2,
         )
         recovered = MotorContextObservation.from_mapping(view.as_mapping())
         self.assertEqual(view, recovered)
@@ -283,10 +461,9 @@ class ModuleInterfaceMethodsTest(unittest.TestCase):
 
     def test_motor_context_interface_round_trip(self) -> None:
         """
-        Verifies that converting a mapping to a vector and back preserves values for the MOTOR_CONTEXT_INTERFACE.
+        Ensure mapping → vector → mapping round-trip preserves signal values for MOTOR_CONTEXT_INTERFACE.
         
-        Asserts that for each signal name defined by MOTOR_CONTEXT_INTERFACE, binding the vector produced by
-        vector_from_mapping returns values approximately equal to the original mapping.
+        Asserts that for every signal in MOTOR_CONTEXT_INTERFACE, converting a full mapping to a vector and binding it back yields values approximately equal to the originals.
         """
         iface = MOTOR_CONTEXT_INTERFACE
         mapping = self._full_mapping(iface)
@@ -294,6 +471,57 @@ class ModuleInterfaceMethodsTest(unittest.TestCase):
         recovered = iface.bind_values(vector)
         for name in iface.signal_names:
             self.assertAlmostEqual(recovered[name], mapping[name])
+
+
+class InterfaceVersionRegressionTest(unittest.TestCase):
+    def test_action_space_output_interfaces_bump_versions(self) -> None:
+        """
+        Assert the interface registry reports the expected version numbers for core interfaces.
+        
+        Asserts that the current versions equal:
+        - visual_cortex: 5
+        - sensory_cortex: 2
+        - hunger_center: 3
+        - sleep_center: 4
+        - alert_center: 7
+        - action_center_context: 3
+        - motor_cortex_context: 4
+        """
+        versions = {interface.name: interface.version for interface in ALL_INTERFACES}
+        self.assertEqual(versions["visual_cortex"], 5)
+        self.assertEqual(versions["sensory_cortex"], 2)
+        self.assertEqual(versions["hunger_center"], 3)
+        self.assertEqual(versions["sleep_center"], 4)
+        self.assertEqual(versions["alert_center"], 7)
+        self.assertEqual(versions["action_center_context"], 3)
+        self.assertEqual(versions["motor_cortex_context"], 4)
+
+    def test_older_registry_version_checkpoint_is_rejected_on_load(self) -> None:
+        brain = SpiderBrain(seed=11)
+        older_versions = {
+            interface.name: interface.version - 1
+            for interface in ALL_INTERFACES
+            if interface.version > 1
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "brain"
+            brain.save(save_path)
+
+            baseline_reloaded = SpiderBrain(seed=999)
+            baseline_reloaded.load(save_path)
+
+            metadata_path = save_path / SpiderBrain._METADATA_FILE
+            baseline_metadata = metadata_path.read_text(encoding="utf-8")
+            for interface_name, older_version in older_versions.items():
+                with self.subTest(interface_name=interface_name):
+                    metadata = json.loads(baseline_metadata)
+                    metadata["interface_registry"]["interfaces"][interface_name]["version"] = older_version
+                    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+                    reloaded = SpiderBrain(seed=999)
+                    with self.assertRaisesRegex(ValueError, "interface registry incompatible"):
+                        reloaded.load(save_path)
 
 
 class ObservationRegistryTest(unittest.TestCase):
@@ -565,6 +793,378 @@ class SignalDescriptionRegressionTest(unittest.TestCase):
             content,
             "docs/interfaces.md fingerprint does not match the current registry fingerprint",
         )
+
+
+class LocomotionActionCountTest(unittest.TestCase):
+    def test_locomotion_actions_has_nine_entries(self) -> None:
+        """LOCOMOTION_ACTIONS must include 5 original + 4 ORIENT actions = 9 total."""
+        self.assertEqual(len(LOCOMOTION_ACTIONS), 9)
+
+    def test_orient_actions_are_last_four(self) -> None:
+        self.assertEqual(
+            tuple(LOCOMOTION_ACTIONS[5:]),
+            ("ORIENT_UP", "ORIENT_DOWN", "ORIENT_LEFT", "ORIENT_RIGHT"),
+        )
+
+    def test_action_to_index_has_nine_entries(self) -> None:
+        self.assertEqual(len(ACTION_TO_INDEX), 9)
+
+    def test_action_deltas_contains_movement_and_stay_only(self) -> None:
+        self.assertEqual(
+            tuple(ACTION_DELTAS),
+            ("MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT", "STAY"),
+        )
+
+    def test_orient_headings_has_four_entries(self) -> None:
+        self.assertEqual(len(ORIENT_HEADINGS), 4)
+
+    def test_all_orient_actions_in_locomotion_actions(self) -> None:
+        for action in ORIENT_HEADINGS:
+            self.assertIn(action, LOCOMOTION_ACTIONS)
+
+    def test_move_actions_have_nonzero_deltas(self) -> None:
+        for action_name in ("MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT"):
+            dx, dy = ACTION_DELTAS[action_name]
+            self.assertNotEqual((dx, dy), (0, 0), f"{action_name} should have nonzero delta")
+
+    def test_stay_action_has_zero_delta(self) -> None:
+        self.assertEqual(ACTION_DELTAS["STAY"], (0, 0))
+
+    def test_orient_headings_are_cardinal_unit_vectors(self) -> None:
+        for action_name, (hdx, hdy) in ORIENT_HEADINGS.items():
+            magnitude = abs(hdx) + abs(hdy)
+            self.assertEqual(magnitude, 1, f"{action_name} heading {(hdx, hdy)} is not a cardinal unit vector")
+
+
+class RenderInterfacesMarkdownTest(unittest.TestCase):
+    def test_markdown_contains_perception_and_active_sensing_section(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("## Perception And Active Sensing", md)
+
+    def test_markdown_contains_foveal_and_peripheral_vision_section(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("### Foveal And Peripheral Vision", md)
+
+    def test_markdown_contains_orient_actions_section(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("### ORIENT Actions", md)
+
+    def test_markdown_contains_perceptual_delay_section(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("### Perceptual Delay", md)
+
+    def test_markdown_contains_explicit_memory_signals_section(self) -> None:
+        """
+        Interface docs name memory signals and point ownership semantics to the audit.
+        """
+        md = render_interfaces_markdown()
+        self.assertIn("### Explicit Memory Signals", md)
+        self.assertIn("perception-grounded memory slots", md)
+        self.assertIn("MEMORY_LEAKAGE_AUDIT", md)
+
+    def test_markdown_contains_breaking_change_action_space(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("### Breaking Change: Action Space", md)
+        self.assertIn("expanded from 5 to 9 actions", md)
+
+    def test_markdown_contains_orient_action_indices(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("`ORIENT_UP`=5", md)
+        self.assertIn("`ORIENT_DOWN`=6", md)
+        self.assertIn("`ORIENT_LEFT`=7", md)
+        self.assertIn("`ORIENT_RIGHT`=8", md)
+
+    def test_markdown_all_interfaces_output_nine_actions(self) -> None:
+        md = render_interfaces_markdown()
+        expected_outputs = "MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY, ORIENT_UP, ORIENT_DOWN, ORIENT_LEFT, ORIENT_RIGHT"
+        # Check each interface entry references 9 actions
+        self.assertIn(expected_outputs, md)
+
+    def test_markdown_contains_fov_half_angle_default(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("`fov_half_angle` defaults to `60.0`", md)
+
+    def test_markdown_contains_peripheral_half_angle_default(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("`peripheral_half_angle` defaults to `90.0`", md)
+
+    def test_markdown_contains_peripheral_certainty_penalty_default(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("default `peripheral_certainty_penalty` of `0.35`", md)
+
+    def test_markdown_contains_perceptual_delay_ticks_default(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("`perceptual_delay_ticks` defaults to `1.0`", md)
+
+    def test_markdown_contains_perceptual_delay_noise_default(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("`perceptual_delay_noise` defaults to `0.5`", md)
+
+    def test_markdown_orient_actions_do_not_trigger_motor_slip(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("do not trigger motor slip", md)
+
+    def test_markdown_ends_with_single_newline(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertTrue(md.endswith("\n"))
+        self.assertFalse(md.endswith("\n\n"))
+
+    def test_markdown_schema_version_present(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("Schema version:", md)
+
+
+class AlertObservationNewFieldsTest(unittest.TestCase):
+    """Tests for new fields added to AlertObservation in this PR."""
+
+    def _make_alert_obs(self, **overrides) -> AlertObservation:
+        defaults = dict(
+            predator_visible=0.0,
+            predator_certainty=0.0,
+            predator_occluded=0.0,
+            predator_dx=0.0,
+            predator_dy=0.0,
+            predator_smell_strength=0.0,
+            predator_motion_salience=0.0,
+            visual_predator_threat=0.0,
+            olfactory_predator_threat=0.0,
+            dominant_predator_none=1.0,
+            dominant_predator_visual=0.0,
+            dominant_predator_olfactory=0.0,
+            recent_pain=0.0,
+            recent_contact=0.0,
+            on_shelter=0.0,
+            night=0.0,
+            predator_trace_dx=0.0,
+            predator_trace_dy=0.0,
+            predator_trace_strength=0.0,
+            predator_memory_dx=0.0,
+            predator_memory_dy=0.0,
+            predator_memory_age=1.0,
+            escape_memory_dx=0.0,
+            escape_memory_dy=0.0,
+            escape_memory_age=1.0,
+        )
+        defaults.update(overrides)
+        return AlertObservation(**defaults)
+
+    def test_alert_observation_has_visual_predator_threat_field(self) -> None:
+        obs = self._make_alert_obs(visual_predator_threat=0.7)
+        self.assertAlmostEqual(obs.visual_predator_threat, 0.7)
+
+    def test_alert_observation_has_olfactory_predator_threat_field(self) -> None:
+        obs = self._make_alert_obs(olfactory_predator_threat=0.5)
+        self.assertAlmostEqual(obs.olfactory_predator_threat, 0.5)
+
+    def test_alert_observation_has_dominant_predator_flags(self) -> None:
+        obs = self._make_alert_obs(
+            dominant_predator_none=0.0,
+            dominant_predator_visual=1.0,
+            dominant_predator_olfactory=0.0,
+        )
+        self.assertAlmostEqual(obs.dominant_predator_none, 0.0)
+        self.assertAlmostEqual(obs.dominant_predator_visual, 1.0)
+        self.assertAlmostEqual(obs.dominant_predator_olfactory, 0.0)
+
+    def test_alert_observation_dominant_predator_default_is_none(self) -> None:
+        obs = self._make_alert_obs()
+        self.assertAlmostEqual(obs.dominant_predator_none, 1.0)
+        self.assertAlmostEqual(obs.dominant_predator_visual, 0.0)
+        self.assertAlmostEqual(obs.dominant_predator_olfactory, 0.0)
+
+    def test_alert_observation_serializes_to_correct_shape(self) -> None:
+        from spider_cortex_sim.interfaces import OBSERVATION_INTERFACE_BY_KEY
+        obs = self._make_alert_obs(
+            visual_predator_threat=0.3,
+            olfactory_predator_threat=0.1,
+            dominant_predator_none=0.0,
+            dominant_predator_visual=1.0,
+        )
+        interface = OBSERVATION_INTERFACE_BY_KEY["alert"]
+        vec = interface.vector_from_mapping(obs.as_mapping())
+        self.assertEqual(vec.shape, (interface.input_dim,))
+
+    def test_alert_observation_round_trips_through_vector(self) -> None:
+        from spider_cortex_sim.interfaces import OBSERVATION_INTERFACE_BY_KEY
+        obs = self._make_alert_obs(
+            visual_predator_threat=0.4,
+            olfactory_predator_threat=0.2,
+            dominant_predator_none=0.0,
+            dominant_predator_olfactory=1.0,
+        )
+        interface = OBSERVATION_INTERFACE_BY_KEY["alert"]
+        vec = interface.vector_from_mapping(obs.as_mapping())
+        rebound = interface.bind_values(vec)
+        self.assertAlmostEqual(rebound["visual_predator_threat"], 0.4)
+        self.assertAlmostEqual(rebound["olfactory_predator_threat"], 0.2)
+        self.assertAlmostEqual(rebound["dominant_predator_none"], 0.0)
+        self.assertAlmostEqual(rebound["dominant_predator_visual"], 0.0)
+        self.assertAlmostEqual(rebound["dominant_predator_olfactory"], 1.0)
+
+    def test_alert_interface_input_names_include_new_fields(self) -> None:
+        interface = MODULE_INTERFACE_BY_NAME["alert_center"]
+        input_names = [spec.name for spec in interface.inputs]
+        self.assertIn("visual_predator_threat", input_names)
+        self.assertIn("olfactory_predator_threat", input_names)
+        self.assertIn("dominant_predator_none", input_names)
+        self.assertIn("dominant_predator_visual", input_names)
+        self.assertIn("dominant_predator_olfactory", input_names)
+
+    def test_alert_interface_new_fields_have_correct_bounds(self) -> None:
+        interface = MODULE_INTERFACE_BY_NAME["alert_center"]
+        bounds = {spec.name: (spec.minimum, spec.maximum) for spec in interface.inputs}
+        self.assertEqual(bounds["visual_predator_threat"], (0.0, 1.0))
+        self.assertEqual(bounds["olfactory_predator_threat"], (0.0, 1.0))
+        self.assertEqual(bounds["dominant_predator_none"], (0.0, 1.0))
+        self.assertEqual(bounds["dominant_predator_visual"], (0.0, 1.0))
+        self.assertEqual(bounds["dominant_predator_olfactory"], (0.0, 1.0))
+
+
+class VisualObservationNewFieldsTest(unittest.TestCase):
+    """Tests for new fields added to VisualObservation in this PR."""
+
+    def _make_visual_obs(self, **overrides) -> VisualObservation:
+        defaults = dict(
+            food_visible=0.0,
+            food_certainty=0.0,
+            food_occluded=0.0,
+            food_dx=0.0,
+            food_dy=0.0,
+            shelter_visible=0.0,
+            shelter_certainty=0.0,
+            shelter_occluded=0.0,
+            shelter_dx=0.0,
+            shelter_dy=0.0,
+            predator_visible=0.0,
+            predator_certainty=0.0,
+            predator_occluded=0.0,
+            predator_dx=0.0,
+            predator_dy=0.0,
+            heading_dx=1.0,
+            heading_dy=0.0,
+            food_trace_strength=0.0,
+            shelter_trace_strength=0.0,
+            predator_trace_strength=0.0,
+            predator_motion_salience=0.0,
+            visual_predator_threat=0.0,
+            olfactory_predator_threat=0.0,
+            day=1.0,
+            night=0.0,
+        )
+        defaults.update(overrides)
+        return VisualObservation(**defaults)
+
+    def test_visual_observation_has_visual_predator_threat_field(self) -> None:
+        obs = self._make_visual_obs(visual_predator_threat=0.6)
+        self.assertAlmostEqual(obs.visual_predator_threat, 0.6)
+
+    def test_visual_observation_has_olfactory_predator_threat_field(self) -> None:
+        obs = self._make_visual_obs(olfactory_predator_threat=0.3)
+        self.assertAlmostEqual(obs.olfactory_predator_threat, 0.3)
+
+    def test_visual_observation_round_trips_through_vector(self) -> None:
+        from spider_cortex_sim.interfaces import OBSERVATION_INTERFACE_BY_KEY
+        obs = self._make_visual_obs(
+            visual_predator_threat=0.5,
+            olfactory_predator_threat=0.1,
+        )
+        interface = OBSERVATION_INTERFACE_BY_KEY["visual"]
+        vec = interface.vector_from_mapping(obs.as_mapping())
+        rebound = interface.bind_values(vec)
+        self.assertAlmostEqual(rebound["visual_predator_threat"], 0.5)
+        self.assertAlmostEqual(rebound["olfactory_predator_threat"], 0.1)
+
+    def test_visual_interface_input_names_include_new_fields(self) -> None:
+        interface = MODULE_INTERFACE_BY_NAME["visual_cortex"]
+        input_names = [spec.name for spec in interface.inputs]
+        self.assertIn("visual_predator_threat", input_names)
+        self.assertIn("olfactory_predator_threat", input_names)
+
+    def test_visual_interface_new_fields_have_correct_bounds(self) -> None:
+        interface = MODULE_INTERFACE_BY_NAME["visual_cortex"]
+        bounds = {spec.name: (spec.minimum, spec.maximum) for spec in interface.inputs}
+        self.assertEqual(bounds["visual_predator_threat"], (0.0, 1.0))
+        self.assertEqual(bounds["olfactory_predator_threat"], (0.0, 1.0))
+
+
+class InterfaceVersionBumpTest(unittest.TestCase):
+    """Tests verifying the version bumps for visual_cortex and alert_center in this PR."""
+
+    def test_visual_cortex_version_is_5(self) -> None:
+        interface = MODULE_INTERFACE_BY_NAME["visual_cortex"]
+        self.assertEqual(interface.version, 5)
+
+    def test_alert_center_version_is_7(self) -> None:
+        interface = MODULE_INTERFACE_BY_NAME["alert_center"]
+        self.assertEqual(interface.version, 7)
+
+    def test_visual_cortex_version_greater_than_three(self) -> None:
+        interface = MODULE_INTERFACE_BY_NAME["visual_cortex"]
+        self.assertGreater(interface.version, 3)
+
+    def test_alert_center_version_greater_than_four(self) -> None:
+        interface = MODULE_INTERFACE_BY_NAME["alert_center"]
+        self.assertGreater(interface.version, 4)
+
+    def test_markdown_contains_visual_cortex_version_5(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("Version: `5`", md)
+
+    def test_markdown_contains_alert_center_version_7(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("Version: `7`", md)
+
+    def test_visual_cortex_input_dim_matches_field_count(self) -> None:
+        interface = MODULE_INTERFACE_BY_NAME["visual_cortex"]
+        obs = VisualObservation(
+            food_visible=0.0,
+            food_certainty=0.0,
+            food_occluded=0.0,
+            food_dx=0.0,
+            food_dy=0.0,
+            shelter_visible=0.0,
+            shelter_certainty=0.0,
+            shelter_occluded=0.0,
+            shelter_dx=0.0,
+            shelter_dy=0.0,
+            predator_visible=0.0,
+            predator_certainty=0.0,
+            predator_occluded=0.0,
+            predator_dx=0.0,
+            predator_dy=0.0,
+            heading_dx=1.0,
+            heading_dy=0.0,
+            food_trace_strength=0.0,
+            shelter_trace_strength=0.0,
+            predator_trace_strength=0.0,
+            predator_motion_salience=0.0,
+            visual_predator_threat=0.0,
+            olfactory_predator_threat=0.0,
+            day=1.0,
+            night=0.0,
+        )
+        mapping = obs.as_mapping()
+        self.assertEqual(len(mapping), interface.input_dim)
+
+    def test_alert_center_input_dim_includes_three_new_fields(self) -> None:
+        # alert_center had 20 fields before PR, now has 25 (+ threat scalars and three dominant-type flags)
+        interface = MODULE_INTERFACE_BY_NAME["alert_center"]
+        self.assertGreaterEqual(interface.input_dim, 25)
+
+
+class InterfaceRegistryFingerprintChangedTest(unittest.TestCase):
+    """Tests for the updated registry fingerprint in this PR."""
+
+    def test_fingerprint_is_non_empty_string(self) -> None:
+        fp = interface_registry_fingerprint()
+        self.assertIsInstance(fp, str)
+        self.assertTrue(len(fp) > 0)
+
+    def test_fingerprint_matches_documented_value(self) -> None:
+        # The new fingerprint from docs/interfaces.md after PR
+        expected = "177abe8cc5bd584e0995d6855f54f22a96cad8948145411fc877538c830ada10"
+        fp = interface_registry_fingerprint()
+        self.assertEqual(fp, expected)
 
 
 if __name__ == "__main__":

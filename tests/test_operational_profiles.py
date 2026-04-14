@@ -3,6 +3,7 @@ import unittest
 from spider_cortex_sim.operational_profiles import (
     DEFAULT_OPERATIONAL_PROFILE,
     OPERATIONAL_PROFILES,
+    OPTIONAL_PERCEPTION_DEFAULTS,
     OperationalProfile,
     canonical_operational_profile_names,
     resolve_operational_profile,
@@ -38,6 +39,11 @@ class OperationalProfileRegistryTest(unittest.TestCase):
         self.assertEqual(summary["perception"]["night_vision_range_penalty"], 1.0)
         self.assertEqual(summary["perception"]["visibility_clutter_penalty"], 0.18)
         self.assertEqual(summary["perception"]["lizard_detection_threshold"], 0.45)
+        self.assertEqual(summary["perception"]["fov_half_angle"], 60.0)
+        self.assertEqual(summary["perception"]["peripheral_half_angle"], 90.0)
+        self.assertEqual(summary["perception"]["peripheral_certainty_penalty"], 0.35)
+        self.assertEqual(summary["perception"]["perceptual_delay_ticks"], 1.0)
+        self.assertEqual(summary["perception"]["perceptual_delay_noise"], 0.5)
 
     def test_default_profile_preserves_current_reward_values(self) -> None:
         summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
@@ -150,6 +156,32 @@ class OperationalProfileFromSummaryTest(unittest.TestCase):
         self.assertAlmostEqual(profile.perception["night_vision_range_penalty"], 2.0)
         self.assertAlmostEqual(profile.reward["predator_threat_smell_threshold"], 0.01)
 
+    def test_from_summary_adds_optional_perception_defaults_for_legacy_summary(self) -> None:
+        """
+        Ensure legacy perception summaries missing optional keys receive defaults when loaded.
+        
+        Verifies that `OperationalProfile.from_summary()` fills missing perception keys with expected defaults:
+        - `fov_half_angle` -> 60.0
+        - `peripheral_half_angle` -> 90.0
+        - `peripheral_certainty_penalty` -> 0.35
+        - `perceptual_delay_ticks` -> 1.0
+        - `perceptual_delay_noise` -> 0.5
+        """
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        del summary["perception"]["fov_half_angle"]
+        del summary["perception"]["peripheral_half_angle"]
+        del summary["perception"]["peripheral_certainty_penalty"]
+        del summary["perception"]["perceptual_delay_ticks"]
+        del summary["perception"]["perceptual_delay_noise"]
+
+        profile = OperationalProfile.from_summary(summary)
+
+        self.assertAlmostEqual(profile.perception["fov_half_angle"], 60.0)
+        self.assertAlmostEqual(profile.perception["peripheral_half_angle"], 90.0)
+        self.assertAlmostEqual(profile.perception["peripheral_certainty_penalty"], 0.35)
+        self.assertAlmostEqual(profile.perception["perceptual_delay_ticks"], 1.0)
+        self.assertAlmostEqual(profile.perception["perceptual_delay_noise"], 0.5)
+
     def test_from_summary_missing_percept_trace_ttl_raises_value_error(self) -> None:
         summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
         del summary["perception"]["percept_trace_ttl"]
@@ -205,6 +237,11 @@ class OperationalProfileDefaultKeysTest(unittest.TestCase):
             "predator_motion_bonus",
             "percept_trace_ttl",
             "percept_trace_decay",
+            "fov_half_angle",
+            "peripheral_half_angle",
+            "peripheral_certainty_penalty",
+            "perceptual_delay_ticks",
+            "perceptual_delay_noise",
         }
         self.assertEqual(set(DEFAULT_OPERATIONAL_PROFILE.perception.keys()), required)
 
@@ -248,6 +285,96 @@ class OperationalProfileDefaultKeysTest(unittest.TestCase):
 
     def test_default_name_is_string(self) -> None:
         self.assertIsInstance(DEFAULT_OPERATIONAL_PROFILE.name, str)
+
+
+class OptionalPerceptionDefaultsTest(unittest.TestCase):
+    """Tests for the OPTIONAL_PERCEPTION_DEFAULTS constant."""
+
+    def test_contains_fov_half_angle(self) -> None:
+        self.assertIn("fov_half_angle", OPTIONAL_PERCEPTION_DEFAULTS)
+
+    def test_contains_peripheral_half_angle(self) -> None:
+        self.assertIn("peripheral_half_angle", OPTIONAL_PERCEPTION_DEFAULTS)
+
+    def test_contains_peripheral_certainty_penalty(self) -> None:
+        self.assertIn("peripheral_certainty_penalty", OPTIONAL_PERCEPTION_DEFAULTS)
+
+    def test_contains_perceptual_delay_ticks(self) -> None:
+        self.assertIn("perceptual_delay_ticks", OPTIONAL_PERCEPTION_DEFAULTS)
+
+    def test_contains_perceptual_delay_noise(self) -> None:
+        self.assertIn("perceptual_delay_noise", OPTIONAL_PERCEPTION_DEFAULTS)
+
+    def test_has_exactly_five_keys(self) -> None:
+        self.assertEqual(len(OPTIONAL_PERCEPTION_DEFAULTS), 5)
+
+    def test_fov_half_angle_default_is_60(self) -> None:
+        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["fov_half_angle"], 60.0)
+
+    def test_peripheral_half_angle_default_is_90(self) -> None:
+        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["peripheral_half_angle"], 90.0)
+
+    def test_peripheral_certainty_penalty_default_is_0_35(self) -> None:
+        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["peripheral_certainty_penalty"], 0.35)
+
+    def test_perceptual_delay_ticks_default_is_1(self) -> None:
+        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["perceptual_delay_ticks"], 1.0)
+
+    def test_perceptual_delay_noise_default_is_0_5(self) -> None:
+        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["perceptual_delay_noise"], 0.5)
+
+    def test_all_values_are_floats(self) -> None:
+        for key, val in OPTIONAL_PERCEPTION_DEFAULTS.items():
+            self.assertIsInstance(val, float, f"OPTIONAL_PERCEPTION_DEFAULTS[{key!r}] is not a float")
+
+    def test_peripheral_half_angle_exceeds_fov_half_angle(self) -> None:
+        self.assertGreater(
+            OPTIONAL_PERCEPTION_DEFAULTS["peripheral_half_angle"],
+            OPTIONAL_PERCEPTION_DEFAULTS["fov_half_angle"],
+        )
+
+    def test_from_summary_uses_optional_defaults_for_partial_perception(self) -> None:
+        """from_summary with only required keys should add all optional defaults."""
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        for key in list(OPTIONAL_PERCEPTION_DEFAULTS):
+            summary["perception"].pop(key, None)
+
+        profile = OperationalProfile.from_summary(summary)
+
+        for key, expected_val in OPTIONAL_PERCEPTION_DEFAULTS.items():
+            self.assertAlmostEqual(
+                profile.perception[key],
+                expected_val,
+                msg=f"Expected OPTIONAL_PERCEPTION_DEFAULTS[{key!r}]={expected_val} for legacy summary",
+            )
+
+    def test_from_summary_does_not_override_existing_optional_keys(self) -> None:
+        """Explicit values in the summary must not be replaced by defaults."""
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        summary["perception"]["fov_half_angle"] = 45.0
+        summary["perception"]["peripheral_half_angle"] = 120.0
+
+        profile = OperationalProfile.from_summary(summary)
+
+        self.assertAlmostEqual(profile.perception["fov_half_angle"], 45.0)
+        self.assertAlmostEqual(profile.perception["peripheral_half_angle"], 120.0)
+
+
+class DefaultOperationalProfilePerceptionKeysTest(unittest.TestCase):
+    def test_fov_half_angle_present_with_default_value(self) -> None:
+        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["fov_half_angle"], 60.0)
+
+    def test_peripheral_half_angle_present_with_default_value(self) -> None:
+        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["peripheral_half_angle"], 90.0)
+
+    def test_peripheral_certainty_penalty_present_with_default_value(self) -> None:
+        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["peripheral_certainty_penalty"], 0.35)
+
+    def test_perceptual_delay_ticks_present_with_default_value(self) -> None:
+        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["perceptual_delay_ticks"], 1.0)
+
+    def test_perceptual_delay_noise_present_with_default_value(self) -> None:
+        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["perceptual_delay_noise"], 0.5)
 
 
 if __name__ == "__main__":

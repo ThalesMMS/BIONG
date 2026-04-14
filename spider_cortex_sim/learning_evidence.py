@@ -10,6 +10,7 @@ class LearningEvidenceConditionSpec:
     description: str
     policy_mode: str = "normal"
     train_budget: str = "base"
+    training_regime: str | None = None
     eval_reflex_scale: float | None = None
     checkpoint_source: str = "final"
     supports_architectures: tuple[str, ...] = ("modular", "monolithic")
@@ -19,27 +20,45 @@ def canonical_learning_evidence_conditions() -> Dict[str, LearningEvidenceCondit
     """
     Canonical registry of learning-evidence condition specifications.
     
-    Each mapping key is a canonical condition name and each value is a
+    Each key is a canonical condition name and each value is a corresponding
     LearningEvidenceConditionSpec describing policy mode, training budget,
-    evaluation reflex scaling, checkpoint source, and supported architectures.
-    The registry includes the canonical conditions used by the system such as
-    "trained_final", "trained_without_reflex_support", "random_init",
+    optional training_regime, evaluation reflex scaling, checkpoint source, and
+    supported architectures. The registry includes the canonical conditions used
+    by the system: "trained_final", "trained_without_reflex_support",
+    "trained_reflex_annealed", "trained_late_finetuning", "random_init",
     "reflex_only", "freeze_half_budget", and "trained_long_budget".
     
     Returns:
-        Mapping from canonical condition name to its LearningEvidenceConditionSpec.
+        Dict[str, LearningEvidenceConditionSpec]: Mapping from canonical condition
+            name to its LearningEvidenceConditionSpec.
     """
     return {
         "trained_final": LearningEvidenceConditionSpec(
             name="trained_final",
-            description="Final checkpoint trained with the base budget and evaluated normally.",
+            description="Final checkpoint trained with the base budget and evaluated under the default runtime configuration as a secondary diagnostic.",
             train_budget="base",
             checkpoint_source="final",
         ),
         "trained_without_reflex_support": LearningEvidenceConditionSpec(
             name="trained_without_reflex_support",
-            description="Same trained checkpoint, but evaluated with reflex support disabled.",
+            description="Primary learned-behavior condition: same trained checkpoint evaluated with reflex support disabled.",
             train_budget="base",
+            eval_reflex_scale=0.0,
+            checkpoint_source="final",
+        ),
+        "trained_reflex_annealed": LearningEvidenceConditionSpec(
+            name="trained_reflex_annealed",
+            description="Named reflex-annealed training regime evaluated as a self-sufficient no-reflex benchmark.",
+            train_budget="base",
+            training_regime="reflex_annealed",
+            eval_reflex_scale=0.0,
+            checkpoint_source="final",
+        ),
+        "trained_late_finetuning": LearningEvidenceConditionSpec(
+            name="trained_late_finetuning",
+            description="Named late no-reflex fine-tuning regime evaluated as the experiment-of-record self-sufficient benchmark.",
+            train_budget="base",
+            training_regime="late_finetuning",
             eval_reflex_scale=0.0,
             checkpoint_source="final",
         ),

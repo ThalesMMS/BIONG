@@ -65,20 +65,46 @@ def build_tick_context(world: "SpiderWorld", action_idx: int) -> TickContext:
         )
 
     intended_action = ACTIONS[action_idx]
-    executed_action, motor_noise_applied = world._apply_motor_noise(intended_action)
     snapshot = world._capture_tick_snapshot()
     context = TickContext(
         action_idx=int(action_idx),
         intended_action=intended_action,
-        executed_action=executed_action,
-        motor_noise_applied=bool(motor_noise_applied),
+        executed_action=intended_action,
+        motor_noise_applied=False,
         snapshot=snapshot,
         reward_components=world._empty_reward_components(),
         info={
-            "action": executed_action,
+            "action": intended_action,
             "intended_action": intended_action,
-            "executed_action": executed_action,
-            "motor_noise_applied": bool(motor_noise_applied),
+            "executed_action": intended_action,
+            "motor_noise_applied": False,
+            "motor_slip_reason": "none",
+            "motor_execution_difficulty": 0.0,
+            "motor_execution_components": {},
+            "motor_execution": {
+                "difficulty": 0.0,
+                "components": {},
+                "slip": {
+                    "occurred": False,
+                    "reason": "none",
+                    "original_action": intended_action,
+                    "executed_action": intended_action,
+                    "slip_probability": 0.0,
+                    "execution_difficulty": 0.0,
+                    "terrain": "unknown",
+                    "components": {},
+                },
+            },
+            "motor_slip": {
+                "occurred": False,
+                "reason": "none",
+                "original_action": intended_action,
+                "executed_action": intended_action,
+                "slip_probability": 0.0,
+                "execution_difficulty": 0.0,
+                "terrain": "unknown",
+                "components": {},
+            },
             "ate": False,
             "slept": False,
             "pain": False,
@@ -88,19 +114,59 @@ def build_tick_context(world: "SpiderWorld", action_idx: int) -> TickContext:
         },
     )
     context.record_event("pre_tick", "snapshot", **snapshot.to_payload())
-    context.record_event(
-        "action",
-        "action_resolved",
-        action_index=int(action_idx),
-        intended_action=intended_action,
-        executed_action=executed_action,
-        motor_noise_applied=bool(motor_noise_applied),
-    )
     return context
 
 
 def run_action_stage(world: "SpiderWorld", context: TickContext) -> None:
     """Apply the resolved action and record the movement result."""
+    slip_info = world._apply_motor_noise(context.intended_action)
+    context.executed_action = str(slip_info["executed_action"])
+    context.motor_noise_applied = bool(slip_info["occurred"])
+    context.execution_difficulty = float(slip_info["execution_difficulty"])
+    components = slip_info.get("components", {})
+    context.execution_components = dict(components) if isinstance(components, dict) else {}
+    context.motor_slip_info = dict(slip_info)
+    context.info.update(
+        {
+            "action": context.intended_action,
+            "intended_action": context.intended_action,
+            "executed_action": context.executed_action,
+            "motor_noise_applied": bool(context.motor_noise_applied),
+            "motor_slip_reason": str(slip_info["reason"]),
+            "slip_reason": str(slip_info["reason"]),
+            "motor_execution_difficulty": context.execution_difficulty,
+            "motor_execution_components": dict(context.execution_components),
+            "motor_slip": dict(context.motor_slip_info),
+            "motor_execution": {
+                "difficulty": context.execution_difficulty,
+                "components": dict(context.execution_components),
+                "slip": dict(context.motor_slip_info),
+            },
+        }
+    )
+    context.record_event(
+        "action",
+        "action_resolved",
+        action_index=int(context.action_idx),
+        intended_action=context.intended_action,
+        executed_action=context.executed_action,
+        motor_noise_applied=bool(context.motor_noise_applied),
+        slip_reason=str(slip_info["reason"]),
+        slip_probability=round(float(slip_info["slip_probability"]), 6),
+        execution_difficulty=round(float(context.execution_difficulty), 6),
+        orientation_alignment=round(
+            float(context.execution_components.get("orientation_alignment", 1.0)),
+            6,
+        ),
+        terrain_difficulty=round(
+            float(context.execution_components.get("terrain_difficulty", 0.0)),
+            6,
+        ),
+        fatigue_factor=round(
+            float(context.execution_components.get("fatigue_factor", 0.0)),
+            6,
+        ),
+    )
     context.moved = bool(world._move_spider_action(context.executed_action))
     context.record_event(
         "action",
@@ -162,11 +228,18 @@ def run_terrain_stage(world: "SpiderWorld", context: TickContext) -> None:
 
 
 def _maybe_apply_predator_contact(world: "SpiderWorld", context: TickContext) -> bool:
-    """Apply predator contact if the spider and lizard currently overlap and contact has not been applied yet.
-
-    Returns True if contact was applied, False otherwise.
     """
-    if world.spider_pos() == world.lizard_pos() and not context.predator_contact_applied:
+    Apply predator contact when the spider overlaps any predator and contact hasn't been applied yet.
+    
+    If contact is applied, calls apply_predator_contact and sets context.predator_contact_applied to True.
+    
+    Returns:
+        True if contact was applied, False otherwise.
+    """
+    if (
+        any(world.spider_pos() == predator_pos for predator_pos in world.predator_positions())
+        and not context.predator_contact_applied
+    ):
         apply_predator_contact(world, context.reward_components, context.info, tick_context=context)
         context.predator_contact_applied = True
         return True
@@ -219,16 +292,50 @@ def run_autonomic_stage(world: "SpiderWorld", context: TickContext) -> None:
 
 
 def run_predator_update_stage(world: "SpiderWorld", context: TickContext) -> None:
-    """Advance the predator and apply a second contact check after it moves."""
+    """
+    Advance each predator controller, record per-predator movement and mode transitions, and perform a post-movement predator contact check.
+    
+    Updates TickContext fields and emitted event:
+    - Sets `context.predator_moved` to True if any predator moved.
+    - Sets `context.info["predator_moved_each"]` to a list of per-predator moved flags.
+    - Records any per-predator mode transitions in `context.info["predator_transitions"]`.
+    - If the global lizard mode changed, sets `context.info["predator_transition"]` with `from`/`to`.
+    - Emits a "predator_update" event containing `moved`, `mode_before`, `mode_after`, `transition`, and `lizard_pos`.
+    
+    Parameters:
+        world: The simulation world containing predator controllers and lizard state.
+        context: The tick-scoped context mutated with predator diagnostics and events.
+    """
     predator_mode_before = world.lizard.mode
-    context.predator_moved = bool(world.predator_controller.update(world))
+    predator_moved_each: list[bool] = [False] * world.predator_count
+    predator_transitions: list[dict[str, object]] = []
+    for controller in world.predator_controllers:
+        predator_index = int(controller.predator_index)
+        predator = world.get_predator(predator_index)
+        mode_before = predator.mode
+        moved = bool(controller.update(world))
+        while len(predator_moved_each) <= predator_index:
+            predator_moved_each.append(False)
+        predator_moved_each[predator_index] = moved
+        mode_after = predator.mode
+        if mode_before != mode_after:
+            predator_transitions.append(
+                {
+                    "index": int(predator_index),
+                    "from": mode_before,
+                    "to": mode_after,
+                }
+            )
+    context.predator_moved = any(predator_moved_each)
     predator_mode_after = world.lizard.mode
     if predator_mode_before != predator_mode_after:
         context.info["predator_transition"] = {
             "from": predator_mode_before,
             "to": predator_mode_after,
         }
+    context.info["predator_transitions"] = predator_transitions
     context.info["predator_moved"] = bool(context.predator_moved)
+    context.info["predator_moved_each"] = predator_moved_each
     context.record_event(
         "predator_update",
         "predator_update",
@@ -236,6 +343,8 @@ def run_predator_update_stage(world: "SpiderWorld", context: TickContext) -> Non
         mode_before=predator_mode_before,
         mode_after=predator_mode_after,
         transition=context.info["predator_transition"],
+        moved_each=list(predator_moved_each),
+        transitions=list(predator_transitions),
         lizard_pos=[int(world.lizard.x), int(world.lizard.y)],
     )
     _maybe_apply_predator_contact(world, context)
@@ -290,9 +399,18 @@ def run_postprocess_stage(world: "SpiderWorld", context: TickContext) -> None:
 
 
 def run_memory_stage(world: "SpiderWorld", context: TickContext) -> None:
-    """Refresh persistent memory slots and emit the updated targets."""
+    """Refresh perception-derived memory slots and emit the updated targets."""
 
     def _target(slot: MemorySlot) -> list[int] | None:
+        """
+        Get the memory slot's target as a list of indices, or None if the slot has no target.
+        
+        Parameters:
+            slot (MemorySlot): Memory slot whose `target` (an iterable of ints) will be converted to a list.
+        
+        Returns:
+            list[int] or None: A list of target indices when `slot.target` is present, `None` otherwise.
+        """
         return list(slot.target) if slot.target is not None else None
 
     world.refresh_memory(predator_escape=context.predator_escape)
@@ -333,7 +451,7 @@ TICK_STAGES: tuple[StageDescriptor, ...] = (
         name="action",
         run=run_action_stage,
         mutates=(
-            "context.{moved,event_log}",
+            "context.{executed_action,motor_noise_applied,execution_difficulty,execution_components,motor_slip_info,moved,info,event_log}",
             "world.state.{x,y,last_move_dx,last_move_dy,heading_dx,heading_dy}",
         ),
     ),
@@ -386,6 +504,7 @@ TICK_STAGES: tuple[StageDescriptor, ...] = (
             "world.{_last_on_shelter,_last_predator_visible,tick}",
         ),
     ),
+    # Mechanical maintenance of perception-grounded memory and percept traces.
     StageDescriptor(
         name="memory",
         run=run_memory_stage,

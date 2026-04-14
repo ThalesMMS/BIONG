@@ -5,6 +5,7 @@ from spider_cortex_sim.reward import (
     REWARD_COMPONENT_NAMES,
     REWARD_COMPONENT_AUDIT,
     REWARD_PROFILES,
+    SHAPING_DISPOSITIONS,
     apply_action_and_terrain_effects,
     apply_pressure_penalties,
     apply_progress_and_event_rewards,
@@ -14,14 +15,94 @@ from spider_cortex_sim.reward import (
     reward_component_audit,
     reward_profile_audit,
     reward_total,
+    shaping_disposition_summary,
 )
 from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
 from spider_cortex_sim.world import SpiderWorld
 from spider_cortex_sim.world_types import TickContext, TickSnapshot
 
 
+class ShapingDispositionTest(unittest.TestCase):
+    def test_high_risk_components_have_shaping_disposition(self) -> None:
+        """
+        Verify that every reward component marked with shaping_risk == "high" includes a valid shaping_disposition.
+        
+        Asserts that each audited component whose metadata["shaping_risk"] is "high" contains the "shaping_disposition" key and that its value is one of the values in SHAPING_DISPOSITIONS.
+        """
+        audit = reward_component_audit()
+        for component_name, metadata in audit.items():
+            if metadata["shaping_risk"] != "high":
+                continue
+            self.assertIn(
+                "shaping_disposition",
+                metadata,
+                f"High-risk component {component_name!r} needs a disposition",
+            )
+            self.assertIn(metadata["shaping_disposition"], SHAPING_DISPOSITIONS)
+
+    def test_progress_components_have_shaping_disposition(self) -> None:
+        audit = reward_component_audit()
+        for component_name, metadata in audit.items():
+            if metadata["category"] != "progress":
+                continue
+            self.assertIn(
+                "shaping_disposition",
+                metadata,
+                f"Progress component {component_name!r} needs a disposition",
+            )
+            self.assertIn(metadata["shaping_disposition"], SHAPING_DISPOSITIONS)
+
+    def test_shaping_disposition_summary_has_expected_categories(self) -> None:
+        summary = shaping_disposition_summary()
+        self.assertEqual(set(summary), set(SHAPING_DISPOSITIONS) | {"counts"})
+        self.assertIsInstance(summary["counts"], dict)
+        self.assertEqual(set(summary["counts"]), set(SHAPING_DISPOSITIONS))
+        for disposition in SHAPING_DISPOSITIONS:
+            self.assertIsInstance(summary[disposition], list)
+
+    def test_under_investigation_components_have_rationale(self) -> None:
+        # REWARD_COMPONENT_AUDIT currently has no under-investigation entries;
+        # if one is added, it must carry an explicit rationale.
+        audit = reward_component_audit()
+        for component_name, metadata in audit.items():
+            if metadata["shaping_disposition"] != "under_investigation":
+                continue
+            rationale = metadata.get("disposition_rationale")
+            self.assertIsInstance(
+                rationale,
+                str,
+                f"Under-investigation component {component_name!r} needs a rationale",
+            )
+            self.assertGreater(len(rationale.strip()), 0)
+
+    def test_missing_shaping_disposition_raises_value_error(self) -> None:
+        metadata = dict(REWARD_COMPONENT_AUDIT["feeding"])
+        metadata.pop("shaping_disposition")
+        REWARD_COMPONENT_AUDIT["missing_disposition_test"] = metadata
+        try:
+            with self.assertRaisesRegex(ValueError, "missing shaping_disposition"):
+                shaping_disposition_summary()
+            with self.assertRaisesRegex(ValueError, "missing shaping_disposition"):
+                reward_profile_audit("classic")
+        finally:
+            del REWARD_COMPONENT_AUDIT["missing_disposition_test"]
+
+
 class RewardModuleTest(unittest.TestCase):
     def _profile_with_reward_updates(self, **updates: float) -> OperationalProfile:
+        """
+        Create an OperationalProfile derived from DEFAULT_OPERATIONAL_PROFILE with specified reward fields overridden.
+        
+        Parameters:
+            **updates: float
+                Reward field names and their new numeric values to apply to the profile's `reward` section. Keys must be valid reward keys present in the default profile; values will be cast to `float`.
+        
+        Returns:
+            OperationalProfile: An OperationalProfile constructed from the modified summary with the provided reward updates applied.
+        
+        Raises:
+            ValueError: If any provided update key is not a valid reward key; the exception message lists the unknown keys and the allowed keys.
+        """
         summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
         summary["name"] = "reward_test_profile"
         summary["version"] = 7
@@ -251,7 +332,11 @@ class RewardModuleTest(unittest.TestCase):
 
     def test_reward_component_audit_all_entries_have_required_fields(self) -> None:
         audit = reward_component_audit()
-        required_fields = {"category", "source", "gates", "config_keys", "configured_weight_keys", "shaping_risk", "notes"}
+        required_fields = {
+            "category", "source", "gates", "config_keys",
+            "configured_weight_keys", "shaping_risk",
+            "shaping_disposition", "notes",
+        }
         for component_name, metadata in audit.items():
             for field in required_fields:
                 self.assertIn(
@@ -270,6 +355,69 @@ class RewardModuleTest(unittest.TestCase):
                 f"Component {name!r} has unexpected shaping_risk {data['shaping_risk']!r}",
             )
 
+    def test_reward_component_audit_shaping_disposition_values_are_valid(self) -> None:
+        audit = reward_component_audit()
+        valid_dispositions = set(SHAPING_DISPOSITIONS)
+        for name, data in audit.items():
+            self.assertIn(
+                data["shaping_disposition"],
+                valid_dispositions,
+                f"Component {name!r} has unexpected shaping_disposition {data['shaping_disposition']!r}",
+            )
+
+    def test_reward_component_audit_requires_rationale_for_non_outcome_signals(self) -> None:
+        audit = reward_component_audit()
+        for name, data in audit.items():
+            with self.subTest(component=name):
+                if data["shaping_disposition"] == "outcome_signal":
+                    continue
+                self.assertIn(
+                    "disposition_rationale",
+                    data,
+                    f"Component {name!r} needs a shaping disposition rationale",
+                )
+                self.assertIsInstance(data["disposition_rationale"], str)
+                self.assertGreater(len(data["disposition_rationale"].strip()), 0)
+
+    def test_high_risk_progress_components_are_marked_removed(self) -> None:
+        """
+        Verify that the high-risk progress reward components are assigned the "removed" shaping disposition and that their disposition rationale mentions "austere".
+        
+        Checks the audit entries for "food_progress", "shelter_progress", and "predator_escape".
+        """
+        audit = reward_component_audit()
+        for component_name in ("food_progress", "shelter_progress", "predator_escape"):
+            self.assertEqual(audit[component_name]["shaping_disposition"], "removed")
+            self.assertIn("austere", audit[component_name]["disposition_rationale"])
+
+    def test_low_risk_outcome_components_are_marked_outcome_signals(self) -> None:
+        """
+        Asserts that specific low-risk reward components are labeled with the "outcome_signal" shaping disposition.
+        
+        Verifies that the audit entries for "predator_contact", "feeding", and "death_penalty" have `shaping_disposition == "outcome_signal"`.
+        """
+        audit = reward_component_audit()
+        for component_name in ("predator_contact", "feeding", "death_penalty"):
+            self.assertEqual(audit[component_name]["shaping_disposition"], "outcome_signal")
+            self.assertIsInstance(
+                audit[component_name]["disposition_rationale"],
+                str,
+            )
+            self.assertGreater(
+                len(audit[component_name]["disposition_rationale"].strip()),
+                0,
+            )
+
+    def test_shaping_disposition_summary_groups_components_and_counts(self) -> None:
+        summary = shaping_disposition_summary()
+        counts = summary["counts"]
+        for disposition in SHAPING_DISPOSITIONS:
+            components = summary[disposition]
+            self.assertEqual(counts[disposition], len(components))
+        self.assertIn("food_progress", summary["removed"])
+        self.assertIn("feeding", summary["outcome_signal"])
+        self.assertIn("resting", summary["weakened"])
+
     def test_reward_profile_audit_raises_key_error_for_unknown_profile(self) -> None:
         with self.assertRaises(KeyError):
             reward_profile_audit("nonexistent_profile")
@@ -278,10 +426,33 @@ class RewardModuleTest(unittest.TestCase):
         audit = reward_profile_audit("classic")
         expected_keys = {
             "profile", "component_weight_proxy", "category_weight_proxy",
-            "configurable_category_weight_proxy", "dominant_category",
-            "hardcoded_mass", "non_configurable_components", "notes",
+            "configurable_category_weight_proxy", "disposition_summary",
+            "dominant_category", "hardcoded_mass",
+            "non_configurable_components", "notes",
         }
         self.assertEqual(set(audit.keys()), expected_keys)
+
+    def test_reward_profile_audit_disposition_summary_contains_all_dispositions(self) -> None:
+        audit = reward_profile_audit("classic")
+        disposition_summary = audit["disposition_summary"]
+        self.assertEqual(set(disposition_summary.keys()), set(SHAPING_DISPOSITIONS))
+        for disposition, data in disposition_summary.items():
+            self.assertIn("components", data, disposition)
+            self.assertIn("component_count", data, disposition)
+            self.assertIn("total_weight_proxy", data, disposition)
+            self.assertEqual(data["component_count"], len(data["components"]))
+
+    def test_reward_profile_audit_reports_removed_disposition_weight_gap(self) -> None:
+        classic_audit = reward_profile_audit("classic")
+        austere_audit = reward_profile_audit("austere")
+        self.assertGreater(
+            classic_audit["disposition_summary"]["removed"]["total_weight_proxy"],
+            0.0,
+        )
+        self.assertEqual(
+            austere_audit["disposition_summary"]["removed"]["total_weight_proxy"],
+            0.0,
+        )
 
     def test_reward_profile_audit_dominant_category_is_valid(self) -> None:
         for profile_name in REWARD_PROFILES:
@@ -1269,6 +1440,152 @@ class RewardProfileClutterNarrowFatigueValuesTest(unittest.TestCase):
                     f"{name}: clutter_fatigue should be >= narrow_fatigue",
                 )
 
+
+class ShapingDispositionSummaryAdditionalTest(unittest.TestCase):
+    """Additional tests for shaping_disposition_summary and reward_profile_audit disposition_summary."""
+
+    def test_shaping_disposition_summary_components_are_sorted_alphabetically(self) -> None:
+        summary = shaping_disposition_summary()
+        for disposition in SHAPING_DISPOSITIONS:
+            components = summary[disposition]
+            self.assertEqual(
+                components,
+                sorted(components),
+                f"Components for disposition {disposition!r} are not sorted",
+            )
+
+    def test_shaping_disposition_summary_total_count_equals_all_components(self) -> None:
+        summary = shaping_disposition_summary()
+        total_from_counts = sum(summary["counts"][d] for d in SHAPING_DISPOSITIONS)
+        total_components = len(REWARD_COMPONENT_NAMES)
+        self.assertEqual(total_from_counts, total_components)
+
+    def test_shaping_disposition_summary_no_duplicate_components_across_dispositions(self) -> None:
+        summary = shaping_disposition_summary()
+        seen = []
+        for disposition in SHAPING_DISPOSITIONS:
+            seen.extend(summary[disposition])
+        self.assertEqual(len(seen), len(set(seen)), "Some components appear in multiple dispositions")
+
+    def test_shaping_disposition_summary_every_component_name_appears_exactly_once(self) -> None:
+        summary = shaping_disposition_summary()
+        all_components = []
+        for disposition in SHAPING_DISPOSITIONS:
+            all_components.extend(summary[disposition])
+        self.assertEqual(sorted(all_components), sorted(REWARD_COMPONENT_NAMES))
+
+    def test_shaping_disposition_summary_defended_components_are_non_empty(self) -> None:
+        summary = shaping_disposition_summary()
+        self.assertGreater(len(summary["defended"]), 0)
+
+    def test_shaping_disposition_summary_removed_components_include_progress_terms(self) -> None:
+        summary = shaping_disposition_summary()
+        for component in ("food_progress", "shelter_progress", "predator_escape",
+                          "day_exploration", "shelter_entry", "night_shelter_bonus"):
+            self.assertIn(component, summary["removed"])
+
+    def test_shaping_disposition_summary_outcome_signal_components_include_feeding_and_death(self) -> None:
+        summary = shaping_disposition_summary()
+        self.assertIn("feeding", summary["outcome_signal"])
+        self.assertIn("predator_contact", summary["outcome_signal"])
+        self.assertIn("death_penalty", summary["outcome_signal"])
+
+    def test_shaping_disposition_summary_weakened_contains_resting(self) -> None:
+        summary = shaping_disposition_summary()
+        self.assertIn("resting", summary["weakened"])
+
+    def test_reward_profile_audit_disposition_components_are_sorted(self) -> None:
+        for profile_name in REWARD_PROFILES:
+            audit = reward_profile_audit(profile_name)
+            for disposition, data in audit["disposition_summary"].items():
+                components = data["components"]
+                self.assertEqual(
+                    components,
+                    sorted(components),
+                    f"Profile {profile_name!r} disposition {disposition!r} components not sorted",
+                )
+
+    def test_reward_profile_audit_disposition_weight_proxies_are_non_negative(self) -> None:
+        for profile_name in REWARD_PROFILES:
+            audit = reward_profile_audit(profile_name)
+            for disposition, data in audit["disposition_summary"].items():
+                self.assertGreaterEqual(
+                    data["total_weight_proxy"],
+                    0.0,
+                    f"Profile {profile_name!r} disposition {disposition!r} has negative weight proxy",
+                )
+
+    def test_reward_profile_audit_disposition_component_counts_sum_to_total(self) -> None:
+        audit = reward_profile_audit("classic")
+        total_from_disposition = sum(
+            data["component_count"]
+            for data in audit["disposition_summary"].values()
+        )
+        self.assertEqual(total_from_disposition, len(REWARD_COMPONENT_NAMES))
+
+    def test_reward_profile_audit_disposition_components_union_equals_all_components(self) -> None:
+        for profile_name in REWARD_PROFILES:
+            audit = reward_profile_audit(profile_name)
+            all_in_disposition = []
+            for data in audit["disposition_summary"].values():
+                all_in_disposition.extend(data["components"])
+            self.assertEqual(
+                sorted(all_in_disposition),
+                sorted(REWARD_COMPONENT_NAMES),
+                f"Profile {profile_name!r} disposition components do not cover all reward components",
+            )
+
+    def test_reward_profile_audit_austere_removed_weight_is_zero(self) -> None:
+        audit = reward_profile_audit("austere")
+        self.assertEqual(audit["disposition_summary"]["removed"]["total_weight_proxy"], 0.0)
+
+    def test_reward_profile_audit_classic_removed_weight_exceeds_austere(self) -> None:
+        classic = reward_profile_audit("classic")
+        austere = reward_profile_audit("austere")
+        self.assertGreater(
+            classic["disposition_summary"]["removed"]["total_weight_proxy"],
+            austere["disposition_summary"]["removed"]["total_weight_proxy"],
+        )
+
+    def test_reward_profile_audit_defended_weight_positive_in_all_profiles(self) -> None:
+        for profile_name in REWARD_PROFILES:
+            audit = reward_profile_audit(profile_name)
+            self.assertGreater(
+                audit["disposition_summary"]["defended"]["total_weight_proxy"],
+                0.0,
+                f"Profile {profile_name!r} has no defended weight",
+            )
+
+    def test_reward_profile_audit_outcome_signal_summary_is_well_formed(self) -> None:
+        expected_components = {"predator_contact", "feeding", "death_penalty"}
+        for profile_name in REWARD_PROFILES:
+            audit = reward_profile_audit(profile_name)
+            outcome_signal = audit["disposition_summary"]["outcome_signal"]
+            self.assertIsInstance(outcome_signal, dict)
+            self.assertIn("components", outcome_signal)
+            self.assertIn("component_count", outcome_signal)
+            self.assertIn("total_weight_proxy", outcome_signal)
+            self.assertTrue(
+                expected_components.issubset(set(outcome_signal["components"])),
+                f"Profile {profile_name!r} missing expected outcome-signal components",
+            )
+            self.assertEqual(
+                outcome_signal["component_count"],
+                len(outcome_signal["components"]),
+            )
+            self.assertIsInstance(outcome_signal["total_weight_proxy"], float)
+
+    def test_reward_profile_audit_disposition_all_dispositions_present_in_ecological(self) -> None:
+        audit = reward_profile_audit("ecological")
+        self.assertEqual(set(audit["disposition_summary"].keys()), set(SHAPING_DISPOSITIONS))
+
+    def test_shaping_dispositions_sequence_has_five_values(self) -> None:
+        self.assertEqual(len(SHAPING_DISPOSITIONS), 5)
+        self.assertIn("defended", SHAPING_DISPOSITIONS)
+        self.assertIn("weakened", SHAPING_DISPOSITIONS)
+        self.assertIn("removed", SHAPING_DISPOSITIONS)
+        self.assertIn("outcome_signal", SHAPING_DISPOSITIONS)
+        self.assertIn("under_investigation", SHAPING_DISPOSITIONS)
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,116 +30,227 @@ def one_hot(index: int, size: int) -> Array:
 
 
 def _weight_scale(dim: int) -> float:
-    """Return the standard deviation for weight initialization given a layer dimension."""
+    """
+    Compute the standard deviation to use for weight initialization for a layer of the given dimension.
+    
+    Parameters:
+        dim (int): Layer dimension used to scale the initialization; values less than 1 are treated as 1.
+    
+    Returns:
+        float: Standard deviation computed as 0.35 / sqrt(max(1, dim)).
+    """
     return 0.35 / np.sqrt(max(1, dim))
+
+
+def _coerce_state_array(state: dict[str, object], key: str, shape: tuple[int, ...], *, name: str) -> Array:
+    """
+    Validate and convert an entry from a saved state dict into a float NumPy array with an exact shape.
+    
+    Parameters:
+        state (dict[str, object]): Mapping containing serialized arrays.
+        key (str): Key in `state` whose value will be converted.
+        shape (tuple[int, ...]): Expected shape of the resulting array.
+        name (str): Human-readable name used in the error message on mismatch.
+    
+    Returns:
+        Array: A copied NumPy array of dtype `float` with the specified `shape`.
+    
+    Raises:
+        ValueError: If `state[key]` is missing or does not have the expected `shape`.
+    """
+    if key not in state:
+        raise ValueError(f"{name}: missing required state key {key!r}")
+    array = np.asarray(state[key], dtype=float)
+    if array.shape != shape:
+        raise ValueError(f"{name}: {key} expected {shape}, received {array.shape}")
+    return np.array(array, dtype=float, copy=True)
+
+
+def _state_scalar(value: object) -> object:
+    if isinstance(value, np.ndarray) and value.shape == ():
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
+
+
+def _validate_state_dict(
+    state: dict[str, object],
+    *,
+    expected_keys: set[str],
+    expected_metadata: dict[str, object],
+    name: str,
+) -> None:
+    """
+    Validate that a state dictionary contains exactly the expected keys and that specified metadata entries match expected values.
+    
+    Parameters:
+        state (dict[str, object]): Serialized state dictionary to check.
+        expected_keys (set[str]): Exact set of keys that `state` must contain.
+        expected_metadata (dict[str, object]): Mapping of metadata keys to their expected scalar values; each entry is compared against the corresponding value in `state` after coercion via `_state_scalar`.
+        name (str): Contextual name used in raised error messages.
+    
+    Raises:
+        ValueError: If `state` is missing or contains unexpected keys, or if any metadata entry does not equal its expected value.
+    """
+    actual_keys = set(state.keys())
+    missing = sorted(expected_keys - actual_keys)
+    unexpected = sorted(actual_keys - expected_keys)
+    if missing or unexpected:
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing keys {missing}")
+        if unexpected:
+            parts.append(f"unexpected keys {unexpected}")
+        raise ValueError(f"{name}: state_dict key mismatch ({'; '.join(parts)})")
+
+    for key, expected in expected_metadata.items():
+        actual = _state_scalar(state[key])
+        if actual != expected:
+            raise ValueError(f"{name}: metadata {key!r} expected {expected!r}, received {actual!r}")
+
+
+def _parameter_norm_of(*arrays: np.ndarray) -> float:
+    """Return the L2 norm of all elements across the given parameter arrays."""
+    return float(np.sqrt(sum(np.sum(a**2) for a in arrays)))
+
+
+def _clip_grad_logits(grad_logits: Array, grad_clip: float) -> Array:
+    """Sanitize and clip a gradient vector by its L2 norm."""
+    grad_logits = np.asarray(grad_logits, dtype=float)
+    if grad_logits.ndim != 1:
+        raise ValueError("grad_logits must be a 1-D vector")
+    grad_clip_array = np.asarray(grad_clip, dtype=float)
+    if grad_clip_array.shape != ():
+        raise ValueError("grad_clip must be a finite non-negative scalar")
+    grad_clip_value = float(grad_clip_array)
+    if not np.isfinite(grad_clip_value) or grad_clip_value < 0.0:
+        raise ValueError("grad_clip must be a finite non-negative scalar")
+    if grad_clip_value == 0.0:
+        return np.zeros_like(grad_logits, dtype=float)
+    grad_logits = np.nan_to_num(grad_logits, nan=0.0, posinf=5.0, neginf=-5.0)
+    norm = float(np.linalg.norm(grad_logits))
+    if norm > grad_clip_value:
+        grad_logits = grad_logits * (grad_clip_value / (norm + 1e-8))
+    return grad_logits
+
+
+def _sigmoid(x: Array) -> Array:
+    """
+    Compute a numerically-stabilized sigmoid of the input.
+    
+    Parameters:
+        x (array-like): Input values to transform. Will be converted to a float NumPy array; NaNs are replaced with 0 and infinities are clamped to the range [-60, 60] before applying the sigmoid.
+    
+    Returns:
+        ndarray: Array of the same shape as `x` containing sigmoid outputs in the range (0, 1).
+    """
+    x = np.clip(np.nan_to_num(np.asarray(x, dtype=float), nan=0.0, posinf=60.0, neginf=-60.0), -60.0, 60.0)
+    return 1.0 / (1.0 + np.exp(-x))
 
 
 @dataclass
 class ProposalCache:
     x: Array
-    h1: Array
-    h2: Array
+    h: Array
+
+
+@dataclass
+class RecurrentProposalCache:
+    x: Array
+    h_prev: Array
+    h_new: Array
 
 
 class ProposalNetwork:
-    """Small MLP that produces action logits for a cortical subsystem."""
+    """Small single-hidden-layer MLP that produces action logits for a cortical subsystem."""
 
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, rng: np.random.Generator, name: str) -> None:
         """
-        Initialize the ProposalNetwork's parameters and cache.
+        Initialize a single-hidden-layer proposal network with randomly initialized weights and zero biases.
         
         Parameters:
             input_dim (int): Dimensionality of the input vector.
-            hidden_dim (int): Number of hidden units in each hidden layer.
-            output_dim (int): Number of output logits.
-            rng (np.random.Generator): Random number generator used to sample initial weights.
-            name (str): Identifier for this network instance.
-        
-        Details:
-            - Initializes weight matrices and bias vectors with shapes:
-                W1: (hidden_dim, input_dim), b1: (hidden_dim,)
-                W_mid: (hidden_dim, hidden_dim), b_mid: (hidden_dim,)
-                W2: (output_dim, hidden_dim), b2: (output_dim,)
-            - Weights are drawn from a normal distribution with standard deviations
-              scale1 = 0.35 / sqrt(max(1, input_dim)), scale_mid and scale2 = 0.35 / sqrt(max(1, hidden_dim)).
-            - The parameter cache is initialized to None.
+            hidden_dim (int): Number of units in the hidden (tanh) layer.
+            output_dim (int): Dimensionality of the output logits.
+            rng (np.random.Generator): RNG used to draw initial weight values.
+            name (str): Human-readable name for the network instance.
         """
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.name = name
-        scale1 = 0.35 / np.sqrt(max(1, input_dim))
-        scale_mid = 0.35 / np.sqrt(max(1, hidden_dim))
-        scale2 = 0.35 / np.sqrt(max(1, hidden_dim))
-        self.W1 = rng.normal(0.0, scale1, size=(hidden_dim, input_dim))
+        self.W1 = rng.normal(0.0, _weight_scale(input_dim), size=(hidden_dim, input_dim))
         self.b1 = np.zeros(hidden_dim, dtype=float)
-        self.W_mid = rng.normal(0.0, scale_mid, size=(hidden_dim, hidden_dim))
-        self.b_mid = np.zeros(hidden_dim, dtype=float)
-        self.W2 = rng.normal(0.0, scale2, size=(output_dim, hidden_dim))
+        self.W2 = rng.normal(0.0, _weight_scale(hidden_dim), size=(output_dim, hidden_dim))
         self.b2 = np.zeros(output_dim, dtype=float)
         self.cache: Optional[ProposalCache] = None
 
     def forward(self, x: Array, *, store_cache: bool = True) -> Array:
+        """
+        Compute proposal logits from the input and optionally cache the input and hidden activation for later backpropagation.
+        
+        Parameters:
+            x (Array): Input feature vector.
+            store_cache (bool): If True, store input and hidden activation in the instance cache for use by backward.
+        
+        Returns:
+            Array: Proposal logits (float array) with values clipped to the range [-20.0, 20.0].
+        """
         x = np.nan_to_num(np.asarray(x, dtype=float), nan=0.0, posinf=1.0, neginf=-1.0)
-        z1 = self.W1 @ x + self.b1
-        h1 = np.tanh(z1)
-        z_mid = self.W_mid @ h1 + self.b_mid
-        h2 = np.tanh(z_mid)
+        h = np.tanh(self.W1 @ x + self.b1)
         logits = np.clip(
-            np.nan_to_num(self.W2 @ h2 + self.b2, nan=0.0, posinf=20.0, neginf=-20.0),
+            np.nan_to_num(self.W2 @ h + self.b2, nan=0.0, posinf=20.0, neginf=-20.0),
             -20.0,
             20.0,
         )
         if store_cache:
-            self.cache = ProposalCache(x=x, h1=h1, h2=h2)
+            self.cache = ProposalCache(x=x, h=h)
         return logits
 
     def backward(self, grad_logits: Array, lr: float, grad_clip: float = 5.0) -> None:
         """
-        Perform a gradient step on network parameters using backpropagated logits.
+        Apply gradients to the network parameters using the most recent cached input and hidden activation, updating parameters in-place with simple SGD.
         
-        Sanitizes and optionally clips `grad_logits`, computes parameter gradients using the cached
-        forward pass, and updates weights and biases with a simple SGD step.
+        The provided `grad_logits` is sanitized (NaNs → 0, positive/negative infinities clamped to ±5) and, if its L2 norm exceeds `grad_clip`, scaled down to that threshold. Gradients for the output head (W2, b2) and the shared hidden layer (W1, b1) are computed using the cached `x` and `h` and the derivative of tanh, then applied as `param -= lr * grad`.
         
         Parameters:
-            grad_logits: Gradient of the loss w.r.t. the output logits. NaNs are converted to 0, +inf to 5, and -inf to -5; the vector is then scaled so its Euclidean norm does not exceed `grad_clip`.
-            lr: Learning rate used to scale the parameter updates.
-            grad_clip: Maximum allowed Euclidean norm for `grad_logits`; values above this are scaled down.
+            grad_logits (Array): Gradient of the loss with respect to the output logits.
+            lr (float): Learning rate used to scale parameter updates.
+            grad_clip (float): Maximum allowed L2 norm for `grad_logits`; gradients with larger norm are scaled down (default 5.0).
         
         Raises:
-            RuntimeError: If called when no forward-pass cache is available.
+            RuntimeError: If called before a forward pass populated the cache.
         """
         if self.cache is None:
             raise RuntimeError(f"Network {self.name} backward called without cache.")
-        grad_logits = np.nan_to_num(np.asarray(grad_logits, dtype=float), nan=0.0, posinf=5.0, neginf=-5.0)
-        norm = float(np.linalg.norm(grad_logits))
-        if norm > grad_clip:
-            grad_logits = grad_logits * (grad_clip / (norm + 1e-8))
-        x = self.cache.x
-        h1 = self.cache.h1
-        h2 = self.cache.h2
+        grad_logits = _clip_grad_logits(grad_logits, grad_clip)
 
-        grad_W2 = np.outer(grad_logits, h2)
+        x = self.cache.x
+        h = self.cache.h
+        grad_W2 = np.outer(grad_logits, h)
         grad_b2 = grad_logits
 
-        dh2 = self.W2.T @ grad_logits
-        dz_mid = dh2 * (1.0 - h2**2)
-        grad_W_mid = np.outer(dz_mid, h1)
-        grad_b_mid = dz_mid
-
-        dh1 = self.W_mid.T @ dz_mid
-        dz1 = dh1 * (1.0 - h1**2)
+        dh = self.W2.T @ grad_logits
+        dz1 = dh * (1.0 - h**2)
         grad_W1 = np.outer(dz1, x)
         grad_b1 = dz1
 
         self.W2 -= lr * grad_W2
         self.b2 -= lr * grad_b2
-        self.W_mid -= lr * grad_W_mid
-        self.b_mid -= lr * grad_b_mid
         self.W1 -= lr * grad_W1
         self.b1 -= lr * grad_b1
 
     def state_dict(self) -> dict[str, object]:
+        """
+        Return a serializable state dictionary containing the network's configuration and parameter arrays.
+        
+        Returns:
+            dict[str, object]: Mapping with keys:
+                - "name": network name (str)
+                - "input_dim", "hidden_dim", "output_dim": network dimensions (int)
+                - "W1", "b1", "W2", "b2": copies of the weight and bias arrays (numpy.ndarray)
+        """
         return {
             "name": self.name,
             "input_dim": self.input_dim,
@@ -147,56 +258,245 @@ class ProposalNetwork:
             "output_dim": self.output_dim,
             "W1": self.W1.copy(),
             "b1": self.b1.copy(),
-            "W_mid": self.W_mid.copy(),
-            "b_mid": self.b_mid.copy(),
             "W2": self.W2.copy(),
             "b2": self.b2.copy(),
         }
 
     def load_state_dict(self, state: dict[str, object]) -> None:
-        W1 = np.asarray(state["W1"], dtype=float)
-        b1 = np.asarray(state["b1"], dtype=float)
-        W_mid = np.asarray(state["W_mid"], dtype=float)
-        b_mid = np.asarray(state["b_mid"], dtype=float)
-        W2 = np.asarray(state["W2"], dtype=float)
-        b2 = np.asarray(state["b2"], dtype=float)
-        if W1.shape != (self.hidden_dim, self.input_dim):
-            raise ValueError(
-                f"{self.name}: W1 expected {(self.hidden_dim, self.input_dim)}, received {W1.shape}"
-            )
-        if W_mid.shape != (self.hidden_dim, self.hidden_dim):
-            raise ValueError(
-                f"{self.name}: W_mid expected {(self.hidden_dim, self.hidden_dim)}, received {W_mid.shape}"
-            )
-        if W2.shape != (self.output_dim, self.hidden_dim):
-            raise ValueError(
-                f"{self.name}: W2 expected {(self.output_dim, self.hidden_dim)}, received {W2.shape}"
-            )
-        self.W1 = W1
-        self.b1 = b1
-        self.W_mid = W_mid
-        self.b_mid = b_mid
-        self.W2 = W2
-        self.b2 = b2
+        """
+        Load and validate the network parameters from `state` and clear the forward cache.
+        
+        Expects `state` to contain keys "W1", "b1", "W2", and "b2" whose values are array-like objects with exact shapes
+        `(hidden_dim, input_dim)`, `(hidden_dim,)`, `(output_dim, hidden_dim)`, and `(output_dim,)` respectively.
+        Each array is converted to a float NumPy array before assignment. After loading, any cached forward activations are cleared.
+        
+        Parameters:
+            state (dict[str, object]): Mapping of parameter names to array-like values.
+        
+        Raises:
+            ValueError: If a required key is missing or an array has an unexpected shape.
+        """
+        _validate_state_dict(
+            state,
+            expected_keys={"name", "input_dim", "hidden_dim", "output_dim", "W1", "b1", "W2", "b2"},
+            expected_metadata={
+                "name": self.name,
+                "input_dim": self.input_dim,
+                "hidden_dim": self.hidden_dim,
+                "output_dim": self.output_dim,
+            },
+            name=self.name,
+        )
+        self.W1 = _coerce_state_array(state, "W1", (self.hidden_dim, self.input_dim), name=self.name)
+        self.b1 = _coerce_state_array(state, "b1", (self.hidden_dim,), name=self.name)
+        self.W2 = _coerce_state_array(state, "W2", (self.output_dim, self.hidden_dim), name=self.name)
+        self.b2 = _coerce_state_array(state, "b2", (self.output_dim,), name=self.name)
         self.cache = None
 
     def parameter_norm(self) -> float:
-        total = (
-            np.sum(self.W1**2)
-            + np.sum(self.b1**2)
-            + np.sum(self.W_mid**2)
-            + np.sum(self.b_mid**2)
-            + np.sum(self.W2**2)
-            + np.sum(self.b2**2)
+        """
+        Compute the Euclidean (L2) norm of the network's parameters.
+
+        Returns:
+            The L2 norm computed as sqrt(sum of squares of W1, b1, W2, and b2) as a float.
+        """
+        return _parameter_norm_of(self.W1, self.b1, self.W2, self.b2)
+
+
+class RecurrentProposalNetwork:
+    """Simple Elman RNN proposer that keeps agent-owned hidden state."""
+
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, rng: np.random.Generator, name: str) -> None:
+        """
+        Initialize a recurrent proposal network with a single tanh hidden state.
+
+        Parameters:
+            input_dim (int): Dimensionality of the input vector.
+            hidden_dim (int): Size of the recurrent hidden state.
+            output_dim (int): Dimensionality of the output logits.
+            rng (np.random.Generator): RNG used to draw initial weight values.
+            name (str): Human-readable name for the network instance.
+        """
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.name = name
+        self.W_xh = rng.normal(0.0, _weight_scale(input_dim), size=(hidden_dim, input_dim))
+        self.W_hh = rng.normal(0.0, _weight_scale(hidden_dim), size=(hidden_dim, hidden_dim))
+        self.b_h = np.zeros(hidden_dim, dtype=float)
+        self.W_out = rng.normal(0.0, _weight_scale(hidden_dim), size=(output_dim, hidden_dim))
+        self.b_out = np.zeros(output_dim, dtype=float)
+        self.hidden_state = np.zeros(hidden_dim, dtype=float)
+        self.cache: Optional[RecurrentProposalCache] = None
+
+    def reset_hidden_state(self) -> None:
+        """Reset the recurrent hidden state and clear any cached activations."""
+        self.hidden_state = np.zeros(self.hidden_dim, dtype=float)
+        self.cache = None
+
+    def get_hidden_state(self) -> Array:
+        """Return a copy of the current recurrent hidden state."""
+        return self.hidden_state.copy()
+
+    def set_hidden_state(self, hidden_state: Array) -> None:
+        """Replace the current recurrent hidden state with a validated copy."""
+        hidden_state = np.asarray(hidden_state, dtype=float)
+        if hidden_state.shape != (self.hidden_dim,):
+            raise ValueError(
+                f"{self.name}: hidden_state expected {(self.hidden_dim,)}, "
+                f"received {hidden_state.shape}"
+            )
+        self.hidden_state = hidden_state.copy()
+
+    def forward(self, x: Array, *, store_cache: bool = True) -> Array:
+        """
+        Compute proposal logits and advance the recurrent hidden state.
+
+        The previous hidden state is treated as fixed context for a single-step
+        update; backward updates recurrent parameters from the most recent step
+        without backpropagating through earlier timesteps.
+        """
+        x = np.asarray(x, dtype=float)
+        if x.shape != (self.input_dim,):
+            raise ValueError(
+                f"{self.name}: x expected shape {(self.input_dim,)}, received {x.shape}"
+            )
+        x = np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+        h_prev = self.hidden_state.copy()
+        h_new = np.tanh(self.W_xh @ x + self.W_hh @ h_prev + self.b_h)
+        logits = np.clip(
+            np.nan_to_num(self.W_out @ h_new + self.b_out, nan=0.0, posinf=20.0, neginf=-20.0),
+            -20.0,
+            20.0,
         )
-        return float(np.sqrt(total))
+        self.hidden_state = h_new.copy()
+        if store_cache:
+            self.cache = RecurrentProposalCache(x=x, h_prev=h_prev, h_new=h_new)
+        return logits
+
+    def backward(self, grad_logits: Array, lr: float, grad_clip: float = 5.0) -> None:
+        """
+        Apply a single-step recurrent update using the latest cached transition.
+
+        Gradients are computed for W_out/b_out and for the current recurrent
+        transition W_xh/W_hh/b_h. The cached h_prev is treated as constant,
+        matching the simulator's existing single-step TD update pattern.
+        """
+        if self.cache is None:
+            raise RuntimeError(f"Network {self.name} backward called without cache.")
+        grad_logits = _clip_grad_logits(grad_logits, grad_clip)
+        if grad_logits.shape != (self.output_dim,):
+            raise ValueError(
+                f"{self.name}: grad_logits expected shape {(self.output_dim,)}, "
+                f"received {grad_logits.shape}"
+            )
+
+        x = self.cache.x
+        h_prev = self.cache.h_prev
+        h_new = self.cache.h_new
+        grad_W_out = np.outer(grad_logits, h_new)
+        grad_b_out = grad_logits
+
+        dh = self.W_out.T @ grad_logits
+        dz = dh * (1.0 - h_new**2)
+        grad_W_xh = np.outer(dz, x)
+        grad_W_hh = np.outer(dz, h_prev)
+        grad_b_h = dz
+
+        self.W_out -= lr * grad_W_out
+        self.b_out -= lr * grad_b_out
+        self.W_xh -= lr * grad_W_xh
+        self.W_hh -= lr * grad_W_hh
+        self.b_h -= lr * grad_b_h
+
+    def state_dict(self) -> dict[str, object]:
+        """
+        Return a serializable parameter snapshot without live hidden state.
+
+        Hidden state is episode-local runtime state, so checkpoints persist only
+        the recurrent weights and biases.
+        """
+        return {
+            "name": self.name,
+            "input_dim": self.input_dim,
+            "hidden_dim": self.hidden_dim,
+            "output_dim": self.output_dim,
+            "W_xh": self.W_xh.copy(),
+            "W_hh": self.W_hh.copy(),
+            "b_h": self.b_h.copy(),
+            "W_out": self.W_out.copy(),
+            "b_out": self.b_out.copy(),
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        """Load recurrent parameters from `state` and reset runtime hidden state."""
+        _validate_state_dict(
+            state,
+            expected_keys={
+                "name",
+                "input_dim",
+                "hidden_dim",
+                "output_dim",
+                "W_xh",
+                "W_hh",
+                "b_h",
+                "W_out",
+                "b_out",
+            },
+            expected_metadata={
+                "name": self.name,
+                "input_dim": self.input_dim,
+                "hidden_dim": self.hidden_dim,
+                "output_dim": self.output_dim,
+            },
+            name=self.name,
+        )
+        new_W_xh = _coerce_state_array(
+            state,
+            "W_xh",
+            (self.hidden_dim, self.input_dim),
+            name=self.name,
+        )
+        new_W_hh = _coerce_state_array(
+            state,
+            "W_hh",
+            (self.hidden_dim, self.hidden_dim),
+            name=self.name,
+        )
+        new_b_h = _coerce_state_array(
+            state,
+            "b_h",
+            (self.hidden_dim,),
+            name=self.name,
+        )
+        new_W_out = _coerce_state_array(
+            state,
+            "W_out",
+            (self.output_dim, self.hidden_dim),
+            name=self.name,
+        )
+        new_b_out = _coerce_state_array(
+            state,
+            "b_out",
+            (self.output_dim,),
+            name=self.name,
+        )
+        self.W_xh = new_W_xh
+        self.W_hh = new_W_hh
+        self.b_h = new_b_h
+        self.W_out = new_W_out
+        self.b_out = new_b_out
+        self.reset_hidden_state()
+
+    def parameter_norm(self) -> float:
+        """Return the L2 norm of all recurrent proposer parameters."""
+        return _parameter_norm_of(self.W_xh, self.W_hh, self.b_h, self.W_out, self.b_out)
 
 
 @dataclass
 class MotorCache:
     x: Array
-    h1: Array
-    h2: Array
+    h: Array
 
 
 class MotorNetwork:
@@ -204,55 +504,53 @@ class MotorNetwork:
 
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, rng: np.random.Generator, name: str = "motor_cortex") -> None:
         """
-        Initialize the MotorNetwork's parameters and metadata.
+        Initialize the MotorNetwork's parameters and empty runtime cache.
         
         Parameters:
-            input_dim (int): Dimensionality of the input vector.
-            hidden_dim (int): Number of hidden units in each shared hidden layer.
-            output_dim (int): Number of policy outputs (action logits).
-            rng (np.random.Generator): Random generator used to sample initial weights from normal distributions.
-            name (str): Optional network name; defaults to "motor_cortex".
+            input_dim (int): Dimension of the input feature vector.
+            hidden_dim (int): Size of the shared hidden layer.
+            output_dim (int): Number of policy logits (action space size).
+            rng (np.random.Generator): Random number generator used to sample initial weights.
+            name (str): Human-readable name for the network instance (default "motor_cortex").
         
-        Details:
-            - Allocates and initializes weight and bias arrays:
-                - W1: (hidden_dim, input_dim), b1: (hidden_dim,)
-                - W_mid: (hidden_dim, hidden_dim), b_mid: (hidden_dim,)
-                - W2_policy: (output_dim, hidden_dim), b2_policy: (output_dim,)
-                - W2_value: (1, hidden_dim), b2_value: (1,)
-            - Weight scales use 0.35 / sqrt(max(1, dimension)) per layer.
-            - Sets self.cache to None.
+        Notes:
+            - Shared and head weights are sampled from a normal distribution with standard
+              deviation given by `_weight_scale(...)`; all biases are initialized to zero.
+            - `self.cache` is initialized to `None`.
         """
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.name = name
-        scale1 = 0.35 / np.sqrt(max(1, input_dim))
-        scale_mid = 0.35 / np.sqrt(max(1, hidden_dim))
-        scale2 = 0.35 / np.sqrt(max(1, hidden_dim))
-        self.W1 = rng.normal(0.0, scale1, size=(hidden_dim, input_dim))
+        self.W1 = rng.normal(0.0, _weight_scale(input_dim), size=(hidden_dim, input_dim))
         self.b1 = np.zeros(hidden_dim, dtype=float)
-        self.W_mid = rng.normal(0.0, scale_mid, size=(hidden_dim, hidden_dim))
-        self.b_mid = np.zeros(hidden_dim, dtype=float)
-        self.W2_policy = rng.normal(0.0, scale2, size=(output_dim, hidden_dim))
+        self.W2_policy = rng.normal(0.0, _weight_scale(hidden_dim), size=(output_dim, hidden_dim))
         self.b2_policy = np.zeros(output_dim, dtype=float)
         self.W2_value = rng.normal(0.0, _weight_scale(hidden_dim), size=(1, hidden_dim))
         self.b2_value = np.zeros(1, dtype=float)
         self.cache: Optional[MotorCache] = None
 
     def forward(self, x: Array, *, store_cache: bool = True) -> tuple[Array, float]:
+        """
+        Compute policy logits and a scalar value from input features using the network's shared trunk and two heads.
+        
+        Parameters:
+            x (Array): Input feature vector; NaNs and infinities are sanitized before computation.
+            store_cache (bool): If True, save inputs and hidden activation for later backpropagation.
+        
+        Returns:
+            tuple[Array, float]: A pair where the first element is the clipped policy logits vector and the second is the scalar value estimate.
+        """
         x = np.nan_to_num(np.asarray(x, dtype=float), nan=0.0, posinf=1.0, neginf=-1.0)
-        z1 = self.W1 @ x + self.b1
-        h1 = np.tanh(z1)
-        z_mid = self.W_mid @ h1 + self.b_mid
-        h2 = np.tanh(z_mid)
+        h = np.tanh(self.W1 @ x + self.b1)
         policy_logits = np.clip(
-            np.nan_to_num(self.W2_policy @ h2 + self.b2_policy, nan=0.0, posinf=20.0, neginf=-20.0),
+            np.nan_to_num(self.W2_policy @ h + self.b2_policy, nan=0.0, posinf=20.0, neginf=-20.0),
             -20.0,
             20.0,
         )
-        value = float(np.nan_to_num((self.W2_value @ h2 + self.b2_value)[0], nan=0.0, posinf=20.0, neginf=-20.0))
+        value = float(np.nan_to_num((self.W2_value @ h + self.b2_value)[0], nan=0.0, posinf=20.0, neginf=-20.0))
         if store_cache:
-            self.cache = MotorCache(x=x, h1=h1, h2=h2)
+            self.cache = MotorCache(x=x, h=h)
         return policy_logits, value
 
     def backward(
@@ -263,51 +561,35 @@ class MotorNetwork:
         grad_clip: float = 5.0,
     ) -> Array:
         """
-        Apply gradients to the motor network's parameters and return the gradient with respect to the input.
-        
-        Sanitizes and clips the provided policy-logits and value gradients, computes gradients for the policy head, value head, and shared layers, performs an SGD parameter update using the given learning rate, and returns the gradient of the loss with respect to the input vector.
+        Apply gradients to the network's parameters using the cached forward activations and return the gradient with respect to the input.
         
         Parameters:
-            grad_policy_logits (Array): Gradient of the loss with respect to the policy logits.
-            grad_value (float): Gradient of the loss with respect to the scalar value output.
-            lr (float): Learning rate used for the parameter update.
-            grad_clip (float): Maximum allowed norm (or absolute value for the scalar) for gradients; defaults to 5.0.
+            grad_policy_logits (Array): Gradient of the loss with respect to the policy logits; will be sanitized and clipped by Euclidean norm to at most `grad_clip`.
+            grad_value (float): Gradient of the loss with respect to the scalar value head; will be clipped to the range `[-grad_clip, grad_clip]`.
+            lr (float): Learning rate applied to parameter updates.
+            grad_clip (float): Threshold for gradient clipping (default 5.0).
         
         Returns:
-            Array: Gradient of the loss with respect to the input vector `x`.
+            Array: Gradient of the loss with respect to the network input `x`.
         
         Raises:
-            RuntimeError: If called when no forward-pass cache is available.
+            RuntimeError: If no forward cache is available when calling backward.
         """
         if self.cache is None:
             raise RuntimeError("Motor network backward called without cache.")
-        grad_policy_logits = np.nan_to_num(
-            np.asarray(grad_policy_logits, dtype=float),
-            nan=0.0,
-            posinf=5.0,
-            neginf=-5.0,
-        )
-        gp_norm = float(np.linalg.norm(grad_policy_logits))
-        if gp_norm > grad_clip:
-            grad_policy_logits = grad_policy_logits * (grad_clip / (gp_norm + 1e-8))
+        grad_policy_logits = _clip_grad_logits(grad_policy_logits, grad_clip)
         grad_value = float(np.clip(grad_value, -grad_clip, grad_clip))
 
         x = self.cache.x
-        h1 = self.cache.h1
-        h2 = self.cache.h2
+        h = self.cache.h
 
-        grad_W2_policy = np.outer(grad_policy_logits, h2)
+        grad_W2_policy = np.outer(grad_policy_logits, h)
         grad_b2_policy = grad_policy_logits
-        grad_W2_value = grad_value * h2.reshape(1, -1)
+        grad_W2_value = grad_value * h.reshape(1, -1)
         grad_b2_value = np.array([grad_value], dtype=float)
 
-        dh2 = self.W2_policy.T @ grad_policy_logits + self.W2_value.T[:, 0] * grad_value
-        dz_mid = dh2 * (1.0 - h2**2)
-        grad_W_mid = np.outer(dz_mid, h1)
-        grad_b_mid = dz_mid
-
-        dh1 = self.W_mid.T @ dz_mid
-        dz1 = dh1 * (1.0 - h1**2)
+        dh = self.W2_policy.T @ grad_policy_logits + self.W2_value.T[:, 0] * grad_value
+        dz1 = dh * (1.0 - h**2)
         grad_x = self.W1.T @ dz1
         grad_W1 = np.outer(dz1, x)
         grad_b1 = dz1
@@ -316,8 +598,6 @@ class MotorNetwork:
         self.b2_policy -= lr * grad_b2_policy
         self.W2_value -= lr * grad_W2_value
         self.b2_value -= lr * grad_b2_value
-        self.W_mid -= lr * grad_W_mid
-        self.b_mid -= lr * grad_b_mid
         self.W1 -= lr * grad_W1
         self.b1 -= lr * grad_b1
         return grad_x
@@ -327,6 +607,22 @@ class MotorNetwork:
         return value
 
     def state_dict(self) -> dict[str, object]:
+        """
+        Return a serializable snapshot of the network's configuration and parameters.
+        
+        Returns:
+            A dict containing:
+                - "name" (str): Network name.
+                - "input_dim" (int): Input dimension.
+                - "hidden_dim" (int): Hidden layer dimension.
+                - "output_dim" (int): Output dimension.
+                - "W1" (Array): Copy of the first-layer weight matrix.
+                - "b1" (Array): Copy of the first-layer bias vector.
+                - "W2_policy" (Array): Copy of the policy head weight matrix.
+                - "b2_policy" (Array): Copy of the policy head bias vector.
+                - "W2_value" (Array): Copy of the value head weight matrix.
+                - "b2_value" (Array): Copy of the value head bias vector.
+        """
         return {
             "name": self.name,
             "input_dim": self.input_dim,
@@ -334,8 +630,6 @@ class MotorNetwork:
             "output_dim": self.output_dim,
             "W1": self.W1.copy(),
             "b1": self.b1.copy(),
-            "W_mid": self.W_mid.copy(),
-            "b_mid": self.b_mid.copy(),
             "W2_policy": self.W2_policy.copy(),
             "b2_policy": self.b2_policy.copy(),
             "W2_value": self.W2_value.copy(),
@@ -343,45 +637,377 @@ class MotorNetwork:
         }
 
     def load_state_dict(self, state: dict[str, object]) -> None:
-        W1 = np.asarray(state["W1"], dtype=float)
-        b1 = np.asarray(state["b1"], dtype=float)
-        W_mid = np.asarray(state["W_mid"], dtype=float)
-        b_mid = np.asarray(state["b_mid"], dtype=float)
-        W2_policy = np.asarray(state["W2_policy"], dtype=float)
-        b2_policy = np.asarray(state["b2_policy"], dtype=float)
-        W2_value = np.asarray(state["W2_value"], dtype=float)
-        b2_value = np.asarray(state["b2_value"], dtype=float)
-        if W1.shape != (self.hidden_dim, self.input_dim):
-            raise ValueError(
-                f"{self.name}: W1 expected {(self.hidden_dim, self.input_dim)}, received {W1.shape}"
-            )
-        if W_mid.shape != (self.hidden_dim, self.hidden_dim):
-            raise ValueError(
-                f"{self.name}: W_mid expected {(self.hidden_dim, self.hidden_dim)}, received {W_mid.shape}"
-            )
-        if W2_policy.shape != (self.output_dim, self.hidden_dim):
-            raise ValueError(
-                f"{self.name}: W2_policy expected {(self.output_dim, self.hidden_dim)}, received {W2_policy.shape}"
-            )
-        self.W1 = W1
-        self.b1 = b1
-        self.W_mid = W_mid
-        self.b_mid = b_mid
-        self.W2_policy = W2_policy
-        self.b2_policy = b2_policy
-        self.W2_value = W2_value
-        self.b2_value = b2_value
+        """
+        Load and validate network parameters from a state dictionary and reset the forward cache.
+        
+        Each parameter array is coerced and checked for the exact expected shape; on success the internal parameter arrays are replaced and the cached activations are cleared.
+        
+        Raises:
+            ValueError: If a required key is missing or the associated array does not match the expected shape.
+        """
+        _validate_state_dict(
+            state,
+            expected_keys={
+                "name",
+                "input_dim",
+                "hidden_dim",
+                "output_dim",
+                "W1",
+                "b1",
+                "W2_policy",
+                "b2_policy",
+                "W2_value",
+                "b2_value",
+            },
+            expected_metadata={
+                "name": self.name,
+                "input_dim": self.input_dim,
+                "hidden_dim": self.hidden_dim,
+                "output_dim": self.output_dim,
+            },
+            name=self.name,
+        )
+        self.W1 = _coerce_state_array(state, "W1", (self.hidden_dim, self.input_dim), name=self.name)
+        self.b1 = _coerce_state_array(state, "b1", (self.hidden_dim,), name=self.name)
+        self.W2_policy = _coerce_state_array(
+            state,
+            "W2_policy",
+            (self.output_dim, self.hidden_dim),
+            name=self.name,
+        )
+        self.b2_policy = _coerce_state_array(state, "b2_policy", (self.output_dim,), name=self.name)
+        self.W2_value = _coerce_state_array(state, "W2_value", (1, self.hidden_dim), name=self.name)
+        self.b2_value = _coerce_state_array(state, "b2_value", (1,), name=self.name)
         self.cache = None
 
     def parameter_norm(self) -> float:
-        total = (
-            np.sum(self.W1**2)
-            + np.sum(self.b1**2)
-            + np.sum(self.W_mid**2)
-            + np.sum(self.b_mid**2)
-            + np.sum(self.W2_policy**2)
-            + np.sum(self.b2_policy**2)
-            + np.sum(self.W2_value**2)
-            + np.sum(self.b2_value**2)
+        """
+        Compute the Euclidean (L2) norm of all learnable parameters.
+        
+        Returns:
+            float: L2 norm (square root of the sum of squares) of W1, b1, W2_policy, b2_policy, W2_value, and b2_value.
+        """
+        return _parameter_norm_of(
+            self.W1, self.b1, self.W2_policy, self.b2_policy, self.W2_value, self.b2_value
         )
-        return float(np.sqrt(total))
+
+
+@dataclass
+class ArbitrationCache:
+    x: Array
+    h: Array
+
+
+class ArbitrationNetwork:
+    """
+    Learned arbitration network for valence selection, module gate adjustment, and value estimation.
+
+    The input is the concatenated evidence vector used by arbitration: six threat
+    signals, six hunger signals, six sleep signals, and six exploration signals.
+    The gate head returns multiplicative adjustments constrained to configured
+    bounds, defaulting to [0.5, 1.5].
+    This lets learning reduce or amplify a module's influence, while preventing
+    complete module silencing and uncapped amplification.
+    """
+
+    EVIDENCE_SIGNAL_NAMES = (
+        "threat.predator_visible",
+        "threat.predator_certainty",
+        "threat.predator_motion_salience",
+        "threat.recent_contact",
+        "threat.recent_pain",
+        "threat.predator_smell_strength",
+        "hunger.hunger",
+        "hunger.on_food",
+        "hunger.food_visible",
+        "hunger.food_certainty",
+        "hunger.food_smell_strength",
+        "hunger.food_memory_freshness",
+        "sleep.fatigue",
+        "sleep.sleep_debt",
+        "sleep.night",
+        "sleep.on_shelter",
+        "sleep.shelter_role_level",
+        "sleep.shelter_path_confidence",
+        "exploration.safety_margin",
+        "exploration.residual_drive",
+        "exploration.day",
+        "exploration.off_shelter",
+        "exploration.visual_openness",
+        "exploration.food_smell_directionality",
+    )
+    INPUT_DIM = len(EVIDENCE_SIGNAL_NAMES)
+    VALENCE_DIM = 4
+    GATE_DIM = 6
+    GATE_ADJUSTMENT_MIN = 0.5
+    GATE_ADJUSTMENT_MAX = 1.5
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        rng: np.random.Generator,
+        name: str = "arbitration",
+        gate_adjustment_min: float = GATE_ADJUSTMENT_MIN,
+        gate_adjustment_max: float = GATE_ADJUSTMENT_MAX,
+    ) -> None:
+        """
+        Create an arbitration network with a shared hidden trunk and three output heads (valence logits, gate adjustments, and scalar value), and initialize learnable parameters and cache.
+        
+        Parameters:
+            input_dim (int): Expected dimensionality of the concatenated arbitration evidence vector; must equal ArbitrationNetwork.INPUT_DIM.
+            hidden_dim (int): Size of the shared hidden layer.
+            rng (np.random.Generator): Random number generator used to initialize weight arrays.
+            name (str): Human-readable name used in state metadata and diagnostics.
+            gate_adjustment_min (float): Lower bound for learned multiplicative gate adjustments.
+            gate_adjustment_max (float): Upper bound for learned multiplicative gate adjustments.
+        
+        Raises:
+            ValueError: If `input_dim` does not equal ArbitrationNetwork.INPUT_DIM,
+                or if gate adjustment bounds are non-finite or unordered.
+        """
+        if input_dim != self.INPUT_DIM:
+            raise ValueError(
+                f"{name}: input_dim must be {self.INPUT_DIM} for the concatenated arbitration evidence vector; "
+                f"received {input_dim}"
+            )
+        gate_adjustment_min = float(gate_adjustment_min)
+        gate_adjustment_max = float(gate_adjustment_max)
+        if not np.isfinite(gate_adjustment_min) or not np.isfinite(gate_adjustment_max):
+            raise ValueError(f"{name}: gate adjustment bounds must be finite.")
+        if gate_adjustment_min >= gate_adjustment_max:
+            raise ValueError(f"{name}: gate adjustment bounds must be ordered as min < max.")
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.valence_dim = self.VALENCE_DIM
+        self.gate_dim = self.GATE_DIM
+        self.name = name
+        self.gate_adjustment_min = gate_adjustment_min
+        self.gate_adjustment_max = gate_adjustment_max
+        self.W1 = rng.normal(0.0, _weight_scale(input_dim), size=(hidden_dim, input_dim))
+        self.b1 = np.zeros(hidden_dim, dtype=float)
+        self.W2_valence = rng.normal(0.0, _weight_scale(hidden_dim), size=(self.valence_dim, hidden_dim))
+        self.b2_valence = np.zeros(self.valence_dim, dtype=float)
+        self.W2_gate = rng.normal(0.0, _weight_scale(hidden_dim), size=(self.gate_dim, hidden_dim))
+        self.b2_gate = np.zeros(self.gate_dim, dtype=float)
+        self.W2_value = rng.normal(0.0, _weight_scale(hidden_dim), size=(1, hidden_dim))
+        self.b2_value = np.zeros(1, dtype=float)
+        self.cache: Optional[ArbitrationCache] = None
+
+    def forward(self, evidence_vector: Array, *, store_cache: bool = True) -> tuple[Array, Array, float]:
+        """
+        Compute arbitration outputs from an evidence vector: valence logits, bounded gate adjustments, and a scalar value estimate.
+        
+        Parameters:
+            evidence_vector (Array): Input evidence of shape (input_dim,). Values are sanitized (NaNs → 0, +inf → 1, -inf → -1); a ValueError is raised if the shaped input does not equal (input_dim,).
+            store_cache (bool): If True, cache the sanitized input and hidden activations on the instance for use by a subsequent backward pass.
+        
+        Returns:
+            tuple:
+                valence_logits (Array): Logits for valence classification with shape (VALENCE_DIM,), clipped to [-20, 20].
+                gate_adjustments (Array): Bounded gate adjustment factors with shape (GATE_DIM,); each element equals gate_adjustment_min + (gate_adjustment_max - gate_adjustment_min) * sigmoid(raw_gate).
+                value (float): Scalar value estimate, clipped to [-20, 20].
+        """
+        x = np.nan_to_num(np.asarray(evidence_vector, dtype=float), nan=0.0, posinf=1.0, neginf=-1.0)
+        if x.shape != (self.input_dim,):
+            raise ValueError(f"{self.name}: evidence_vector expected shape {(self.input_dim,)}, received {x.shape}")
+        h = np.tanh(self.W1 @ x + self.b1)
+        valence_logits = np.clip(
+            np.nan_to_num(self.W2_valence @ h + self.b2_valence, nan=0.0, posinf=20.0, neginf=-20.0),
+            -20.0,
+            20.0,
+        )
+        raw_gate = np.clip(
+            np.nan_to_num(self.W2_gate @ h + self.b2_gate, nan=0.0, posinf=20.0, neginf=-20.0),
+            -20.0,
+            20.0,
+        )
+        gate_range = self.gate_adjustment_max - self.gate_adjustment_min
+        gate_adjustments = self.gate_adjustment_min + gate_range * _sigmoid(raw_gate)
+        value = float(np.nan_to_num((self.W2_value @ h + self.b2_value)[0], nan=0.0, posinf=20.0, neginf=-20.0))
+        if store_cache:
+            self.cache = ArbitrationCache(x=x, h=h)
+        return valence_logits, gate_adjustments, value
+
+    def backward(
+        self,
+        grad_valence_logits: Array,
+        grad_gate_adjustments: Array,
+        grad_value: float,
+        lr: float,
+        grad_clip: float = 5.0,
+    ) -> Array:
+        """
+        Apply SGD updates to the arbitration network's parameters using provided output gradients and return the gradient with respect to the evidence input.
+        
+        Parameters:
+            grad_valence_logits (Array): Gradient of the loss with respect to the valence logits output.
+            grad_gate_adjustments (Array): Gradient of the loss with respect to the constrained gate-adjustment outputs; this is backpropagated through the sigmoid-and-affine mapping to obtain gradients for the raw gate head.
+            grad_value (float): Gradient of the loss with respect to the scalar value output; this is clipped elementwise to the range [-grad_clip, grad_clip].
+            lr (float): Learning rate for the SGD parameter updates.
+            grad_clip (float): Maximum L2-norm for clipping applied to vector gradients (valence and gate); scalar gradients are clipped elementwise to [-grad_clip, grad_clip].
+        
+        Returns:
+            grad_x (Array): Gradient of the loss with respect to the evidence input (same shape as the network input).
+        
+        Raises:
+            RuntimeError: If no forward-pass cache is available when calling backward.
+        """
+        if self.cache is None:
+            raise RuntimeError("Arbitration network backward called without cache.")
+        grad_valence_logits = _clip_grad_logits(grad_valence_logits, grad_clip)
+        grad_gate_adjustments = _clip_grad_logits(grad_gate_adjustments, grad_clip)
+        grad_value = float(
+            np.clip(
+                np.nan_to_num(
+                    np.asarray(grad_value, dtype=float),
+                    nan=0.0,
+                    posinf=grad_clip,
+                    neginf=-grad_clip,
+                ),
+                -grad_clip,
+                grad_clip,
+            )
+        )
+
+        x = self.cache.x
+        h = self.cache.h
+        raw_gate = np.clip(
+            np.nan_to_num(self.W2_gate @ h + self.b2_gate, nan=0.0, posinf=20.0, neginf=-20.0),
+            -20.0,
+            20.0,
+        )
+        gate_sigmoid = _sigmoid(raw_gate)
+        gate_range = self.gate_adjustment_max - self.gate_adjustment_min
+        grad_gate_raw = grad_gate_adjustments * gate_range * gate_sigmoid * (1.0 - gate_sigmoid)
+
+        grad_W2_valence = np.outer(grad_valence_logits, h)
+        grad_b2_valence = grad_valence_logits
+        grad_W2_gate = np.outer(grad_gate_raw, h)
+        grad_b2_gate = grad_gate_raw
+        grad_W2_value = grad_value * h.reshape(1, -1)
+        grad_b2_value = np.array([grad_value], dtype=float)
+
+        dh = (
+            self.W2_valence.T @ grad_valence_logits
+            + self.W2_gate.T @ grad_gate_raw
+            + self.W2_value.T[:, 0] * grad_value
+        )
+        dz1 = dh * (1.0 - h**2)
+        grad_x = self.W1.T @ dz1
+        grad_W1 = np.outer(dz1, x)
+        grad_b1 = dz1
+
+        self.W2_valence -= lr * grad_W2_valence
+        self.b2_valence -= lr * grad_b2_valence
+        self.W2_gate -= lr * grad_W2_gate
+        self.b2_gate -= lr * grad_b2_gate
+        self.W2_value -= lr * grad_W2_value
+        self.b2_value -= lr * grad_b2_value
+        self.W1 -= lr * grad_W1
+        self.b1 -= lr * grad_b1
+        return grad_x
+
+    def state_dict(self) -> dict[str, object]:
+        """
+        Create a serializable snapshot of the network's metadata and parameter arrays.
+        
+        Returns:
+            state (dict[str, object]): Dictionary containing network metadata (`name`, `input_dim`, `hidden_dim`, `valence_dim`, `gate_dim`, `gate_adjustment_min`, `gate_adjustment_max`) and copies of the parameter arrays `W1`, `b1`, `W2_valence`, `b2_valence`, `W2_gate`, `b2_gate`, `W2_value`, and `b2_value`.
+        """
+        return {
+            "name": self.name,
+            "input_dim": self.input_dim,
+            "hidden_dim": self.hidden_dim,
+            "valence_dim": self.valence_dim,
+            "gate_dim": self.gate_dim,
+            "gate_adjustment_min": self.gate_adjustment_min,
+            "gate_adjustment_max": self.gate_adjustment_max,
+            "W1": self.W1.copy(),
+            "b1": self.b1.copy(),
+            "W2_valence": self.W2_valence.copy(),
+            "b2_valence": self.b2_valence.copy(),
+            "W2_gate": self.W2_gate.copy(),
+            "b2_gate": self.b2_gate.copy(),
+            "W2_value": self.W2_value.copy(),
+            "b2_value": self.b2_value.copy(),
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        """
+        Load network parameters from `state` into this ArbitrationNetwork, validating keys and metadata,
+        coercing arrays to exact expected shapes, and clearing the internal cache.
+        
+        Parameters:
+            state (dict[str, object]): Serializable state produced by `state_dict()` containing
+                the keys "name", "input_dim", "hidden_dim", "valence_dim", "gate_dim",
+                "gate_adjustment_min", "gate_adjustment_max",
+                "W1", "b1", "W2_valence", "b2_valence", "W2_gate", "b2_gate", "W2_value", and "b2_value".
+        
+        Raises:
+            ValueError: If the state is missing or contains unexpected keys, if metadata values
+                (name/dimensions) do not match this instance, or if any parameter has an incorrect shape.
+        """
+        _validate_state_dict(
+            state,
+            expected_keys={
+                "name",
+                "input_dim",
+                "hidden_dim",
+                "valence_dim",
+                "gate_dim",
+                "gate_adjustment_min",
+                "gate_adjustment_max",
+                "W1",
+                "b1",
+                "W2_valence",
+                "b2_valence",
+                "W2_gate",
+                "b2_gate",
+                "W2_value",
+                "b2_value",
+            },
+            expected_metadata={
+                "name": self.name,
+                "input_dim": self.input_dim,
+                "hidden_dim": self.hidden_dim,
+                "valence_dim": self.valence_dim,
+                "gate_dim": self.gate_dim,
+                "gate_adjustment_min": self.gate_adjustment_min,
+                "gate_adjustment_max": self.gate_adjustment_max,
+            },
+            name=self.name,
+        )
+        self.W1 = _coerce_state_array(state, "W1", (self.hidden_dim, self.input_dim), name=self.name)
+        self.b1 = _coerce_state_array(state, "b1", (self.hidden_dim,), name=self.name)
+        self.W2_valence = _coerce_state_array(
+            state,
+            "W2_valence",
+            (self.valence_dim, self.hidden_dim),
+            name=self.name,
+        )
+        self.b2_valence = _coerce_state_array(state, "b2_valence", (self.valence_dim,), name=self.name)
+        self.W2_gate = _coerce_state_array(
+            state,
+            "W2_gate",
+            (self.gate_dim, self.hidden_dim),
+            name=self.name,
+        )
+        self.b2_gate = _coerce_state_array(state, "b2_gate", (self.gate_dim,), name=self.name)
+        self.W2_value = _coerce_state_array(state, "W2_value", (1, self.hidden_dim), name=self.name)
+        self.b2_value = _coerce_state_array(state, "b2_value", (1,), name=self.name)
+        self.cache = None
+
+    def parameter_norm(self) -> float:
+        """
+        Compute the L2 (Euclidean) norm of all learnable arbitration parameters.
+        
+        Returns:
+            norm (float): L2 norm of the concatenated parameters W1, b1, W2_valence, b2_valence, W2_gate, b2_gate, W2_value, and b2_value.
+        """
+        return _parameter_norm_of(
+            self.W1, self.b1,
+            self.W2_valence, self.b2_valence,
+            self.W2_gate, self.b2_gate,
+            self.W2_value, self.b2_value,
+        )

@@ -5,15 +5,21 @@ from dataclasses import dataclass
 from typing import Mapping
 
 
+OPTIONAL_PERCEPTION_DEFAULTS: dict[str, float] = {
+    "fov_half_angle": 60.0,
+    "peripheral_half_angle": 90.0,
+    "peripheral_certainty_penalty": 0.35,
+    "perceptual_delay_ticks": 1.0,
+    "perceptual_delay_noise": 0.5,
+}
+
+
 def _copy_float_mapping(values: Mapping[str, float]) -> dict[str, float]:
     """
-    Create a new dict copying a mapping, coercing each key to `str` and each value to `float`.
-    
-    Parameters:
-        values (Mapping[str, float]): Mapping whose entries will be copied; keys and values are coerced.
+    Create a new dict by copying mapping entries with keys coerced to `str` and values coerced to `float`.
     
     Returns:
-        dict[str, float]: A new dictionary with every key converted to `str` and every value converted to `float`.
+        dict[str, float]: New dictionary whose keys are strings and whose values are floats.
     """
     return {str(name): float(value) for name, value in values.items()}
 
@@ -104,8 +110,9 @@ class OperationalProfile:
         and "reward". Ensures "name" is a `str`, "version" is `int` or coercible to `int`, and that
         "brain", "perception", and "reward" are mappings. The "brain" mapping must include the keys
         "aux_weights", "reflex_logit_strengths", and "reflex_thresholds", each a mapping. The
-        "perception" mapping must include "percept_trace_ttl" and "percept_trace_decay". On success,
-        returns a canonicalized OperationalProfile instance.
+        "perception" mapping must include "percept_trace_ttl" and "percept_trace_decay". Optional
+        perception keys introduced after older saved summaries are populated from sensible defaults.
+        On success, returns a canonicalized OperationalProfile instance.
         
         Parameters:
             summary (Mapping[str, object]): Mapping with the required structure described above.
@@ -175,13 +182,17 @@ class OperationalProfile:
                 f"{missing_perception}."
             )
 
+        perception_with_defaults = dict(perception)
+        for key, default in OPTIONAL_PERCEPTION_DEFAULTS.items():
+            perception_with_defaults.setdefault(key, default)
+
         return cls(
             name=name,
             version=version,
             brain_aux_weights=aux_weights,
             brain_reflex_logit_strengths=reflex_logit_strengths,
             brain_reflex_thresholds=reflex_thresholds,
-            perception=perception,
+            perception=perception_with_defaults,
             reward=reward,
         )
 
@@ -279,6 +290,11 @@ DEFAULT_OPERATIONAL_PROFILE = OperationalProfile(
         "predator_motion_bonus": 0.10,
         "percept_trace_ttl": 4.0,
         "percept_trace_decay": 0.65,
+        "fov_half_angle": 60.0,
+        "peripheral_half_angle": 90.0,
+        "peripheral_certainty_penalty": 0.35,
+        "perceptual_delay_ticks": 1.0,
+        "perceptual_delay_noise": 0.5,
     },
     reward={
         "predator_threat_contact_threshold": 0.0,

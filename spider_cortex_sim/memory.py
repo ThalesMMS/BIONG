@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING, Iterable
 
+from .perception import has_line_of_sight, predator_visible_to_spider, visible_object, visible_range
 from .world_types import MemorySlot
 
 if TYPE_CHECKING:
@@ -17,45 +18,109 @@ MEMORY_TTLS = {
 }
 
 
+MEMORY_AUDIT_CLASSIFICATIONS = {
+    "plausible_memory": {
+        "definition": (
+            "Perception-grounded state maintained by the environment pipeline. "
+            "Allowed sources are local visual perception, contact events, and movement "
+            "history; entries are TTL-bounded and age through refresh cycles."
+        ),
+        "allowed_sources": (
+            "local visual perception",
+            "contact events",
+            "movement history",
+        ),
+        "disallowed_sources": (
+            "unfiltered global object positions",
+            "predator intent or exact predator state without perception",
+            "grid state that bypasses the perception layer",
+        ),
+    },
+    "world_owned_memory": {
+        "definition": (
+            "Hypothetical memory state requiring direct world knowledge, such as "
+            "global food positions or predator intent. There are currently zero "
+            "explicit spider memory slots in this classification."
+        ),
+    },
+    "leakage": {
+        "definition": (
+            "Direct access to simulation internals that bypasses perception. This "
+            "classification is disallowed for network-facing explicit memory."
+        ),
+    },
+}
+
+
+# Living contract against future leakage:
+# - Do not write from world.food_positions unless filtered through visibility.
+# - Do not write from world.predator.position without a perception check.
+# - Do not write from grid state that bypasses the perception layer.
 MEMORY_LEAKAGE_AUDIT = {
     "food_memory": {
         "classification": "plausible_memory",
         "risk": "low",
         "source": "spider_cortex_sim.memory.refresh_memory",
         "update_rule": "nearest visible food",
+        "allowed_sources": ("local visual perception",),
+        "rationale": (
+            "Food targets come from _visible_positions(), which filters candidate "
+            "positions by visible_range() and has_line_of_sight() before nearest() "
+            "selects a target."
+        ),
         "notes": "This is the most ecological case: it depends on visible food and persists only for a short TTL.",
     },
     "predator_memory": {
-        "classification": "world_owned_memory",
-        "risk": "medium",
+        "classification": "plausible_memory",
+        "risk": "low",
         "source": "spider_cortex_sim.memory.refresh_memory",
-        "update_rule": "world.lizard_pos() when predator_visible_to_spider() or recent_contact",
-        "notes": "The recorded position is the lizard's real one; plausible as explicit memory, but still world-owned.",
+        "update_rule": "predator_visible_to_spider().position when visible; spider position on recent contact",
+        "allowed_sources": ("local visual perception", "contact events"),
+        "rationale": (
+            "Predator targets come from predator_visible_to_spider() when the predator "
+            "is visible, or from the spider's own position during recent contact."
+        ),
+        "notes": "Stores predator location only through visual perception, with contact events recorded as local proximity to the spider.",
     },
     "shelter_memory": {
-        "classification": "world_owned_memory",
-        "risk": "high",
+        "classification": "plausible_memory",
+        "risk": "low",
         "source": "spider_cortex_sim.memory.refresh_memory",
-        "update_rule": "world.safest_shelter_target() on shelter or when shelter cells are visible",
-        "notes": "Stores the safe shelter computed by the world, not just a shelter perceived by the agent.",
+        "update_rule": "visible_object(..., world.shelter_cells).position for perceived shelter cells",
+        "allowed_sources": ("local visual perception",),
+        "rationale": (
+            "Shelter targets come from visible_object(), which selects only shelter "
+            "cells available through the local perception query."
+        ),
+        "notes": "Stores shelter cells selected by local perception rather than a world-selected best shelter target.",
     },
     "escape_memory": {
-        "classification": "world_owned_memory",
-        "risk": "medium",
+        "classification": "plausible_memory",
+        "risk": "low",
         "source": "spider_cortex_sim.memory.refresh_memory",
         "update_rule": "escape_memory_target(world) from last_move_dx/last_move_dy",
-        "notes": "The escape route is built by an external rule and enters the observation space already formed.",
+        "allowed_sources": ("movement history",),
+        "rationale": (
+            "Escape targets are derived from last_move_dx and last_move_dy, then "
+            "clamped to world bounds without querying walkability, shelter policy, or "
+            "hidden object locations."
+        ),
+        "notes": "The escape target is derived from movement history and world-boundary clamping without walkability or shelter-policy queries.",
     },
 }
 
 
 def memory_leakage_audit() -> dict[str, dict[str, object]]:
     """
-    Provide the structured audit catalog for the module's explicit world-owned memory slots.
+    Provide the audit catalog for perception-grounded explicit memory slots.
+
+    The catalog distinguishes TTL-bounded memory fed by perception, contact,
+    and movement history from state that would require direct world knowledge.
     
     Returns:
         audit (dict[str, dict[str, object]]): A deep copy of MEMORY_LEAKAGE_AUDIT mapping each memory slot
-        name to its metadata dictionary (classification, risk, source, update_rule, notes).
+        name to its metadata dictionary (classification, risk, source, update_rule,
+        allowed_sources, rationale, notes).
     """
     return deepcopy(MEMORY_LEAKAGE_AUDIT)
 
@@ -91,7 +156,7 @@ def memory_vector(world: "SpiderWorld", slot: MemorySlot, *, ttl_name: str) -> t
 
 def age_or_clear_memory(slot: MemorySlot, *, ttl_name: str) -> None:
     """
-    Increment the age of a memory slot and clear it when its age exceeds the configured TTL.
+    Age a perception-grounded memory slot and clear it after its configured TTL.
     
     If the slot has no target, the function does nothing. Otherwise it increments the slot's
     age by 1 and, if the new age is greater than MEMORY_TTLS[ttl_name], clears the target
@@ -111,13 +176,14 @@ def age_or_clear_memory(slot: MemorySlot, *, ttl_name: str) -> None:
 
 def set_memory(slot: MemorySlot, target: tuple[int, int] | None) -> None:
     """
-    Set the memory slot's target and reset its age to zero.
+    Set a memory slot's target from an approved source and reset its age.
     
-    If `target` is None, the slot is not modified.
+    If `target` is None the slot is left unchanged. Otherwise the slot's
+    `target` is set to `target` and its `age` is reset to 0.
     
     Parameters:
-        slot (MemorySlot): The memory slot to update.
-        target (tuple[int, int] | None): Grid coordinates to store as the slot's target.
+        slot: The MemorySlot to update.
+        target: Grid coordinates to store as the slot's target, or None to keep the slot unchanged.
     """
     if target is None:
         return
@@ -127,21 +193,18 @@ def set_memory(slot: MemorySlot, target: tuple[int, int] | None) -> None:
 
 def escape_memory_target(world: "SpiderWorld") -> tuple[int, int]:
     """
-    Compute a one-step escape target in the direction of the spider's last move, clamped to world bounds and falling back to the spider's current position if the candidate cell is not walkable.
+    Compute a one-step escape target in the direction of the spider's last move, clamped to world bounds.
     
     Returns:
-        tuple[int, int]: A target grid position one step from the spider in the sign of its last movement (dx, dy). If that candidate is not walkable, returns the spider's current position.
+        tuple[int, int]: A target grid position one step from the spider in the sign of its last movement (dx, dy).
     """
-    dx = 0 if world.state.last_move_dx == 0 else (1 if world.state.last_move_dx > 0 else -1)
-    dy = 0 if world.state.last_move_dy == 0 else (1 if world.state.last_move_dy > 0 else -1)
+    dx = (world.state.last_move_dx > 0) - (world.state.last_move_dx < 0)
+    dy = (world.state.last_move_dy > 0) - (world.state.last_move_dy < 0)
     unclamped_target = (world.state.x + dx, world.state.y + dy)
-    target = (
+    return (
         max(0, min(world.width - 1, unclamped_target[0])),
         max(0, min(world.height - 1, unclamped_target[1])),
     )
-    if not world.is_walkable(target):
-        return world.spider_pos()
-    return target
 
 
 def _visible_positions(
@@ -158,8 +221,6 @@ def _visible_positions(
     Returns:
         list[tuple[int, int]]: Positions whose manhattan distance from the spider is less than or equal to the spider's perception radius and for which the spider has line of sight.
     """
-    from .perception import has_line_of_sight, visible_range
-
     radius = visible_range(world)
     return [
         pos
@@ -176,12 +237,16 @@ def refresh_memory(
     initial: bool = False,
 ) -> None:
     """
-    Update the spider's memory slots using current perceptions and optional predator-escape behavior.
+    Maintain perception-grounded memory using allowed update sources.
+
+    This is the environment-pipeline mechanism for aging, TTL expiration, and
+    writing targets derived from perception, contact, or movement history. It
+    does not provide a channel for direct world knowledge.
     
     If `initial` is False, age existing memories and clear those whose TTLs are exceeded. Then:
     - Set food memory to the nearest visible food position when any visible food exists.
-    - Set predator memory to the lizard position if predator visibility > 0.5 or recent contact > 0.0.
-    - Set shelter memory to the safest shelter target if the spider is on shelter, otherwise to a safest shelter target when any shelter cells are visible.
+    - Set predator memory to a perceived predator position, or to spider position on recent contact.
+    - Set shelter memory to a perceived shelter cell.
     - When `predator_escape` is True, set escape memory to the computed escape target.
     
     Parameters:
@@ -189,8 +254,6 @@ def refresh_memory(
         predator_escape (bool): If True, compute and store an escape target based on the last move.
         initial (bool): If True, skip aging/clearing of existing memory slots (used for initialization).
     """
-    from .perception import predator_visible_to_spider
-
     if not initial:
         age_or_clear_memory(world.state.food_memory, ttl_name="food")
         age_or_clear_memory(world.state.predator_memory, ttl_name="predator")
@@ -201,15 +264,19 @@ def refresh_memory(
     if visible_food:
         set_memory(world.state.food_memory, world.nearest(visible_food)[0])
 
-    if predator_visible_to_spider(world).visible > 0.5 or world.state.recent_contact > 0.0:
-        set_memory(world.state.predator_memory, world.lizard_pos())
+    predator_view = predator_visible_to_spider(world)
+    if predator_view.visible > 0.5:
+        set_memory(world.state.predator_memory, predator_view.position)
+    elif world.state.recent_contact > 0.0:
+        set_memory(world.state.predator_memory, world.spider_pos())
 
-    if world.on_shelter():
-        set_memory(world.state.shelter_memory, world.safest_shelter_target())
-    else:
-        visible_shelter = _visible_positions(world, world.shelter_cells)
-        if visible_shelter:
-            set_memory(world.state.shelter_memory, world.safest_shelter_target())
+    shelter_view = visible_object(
+        world,
+        world.shelter_cells,
+        radius=visible_range(world),
+    )
+    if shelter_view.position is not None:
+        set_memory(world.state.shelter_memory, shelter_view.position)
 
     if predator_escape:
         set_memory(world.state.escape_memory, escape_memory_target(world))

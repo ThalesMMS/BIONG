@@ -27,7 +27,15 @@ from spider_cortex_sim.maps import (
 from spider_cortex_sim.metrics import (
     EpisodeMetricAccumulator,
     EpisodeStats,
+    PREDATOR_TYPE_NAMES,
     aggregate_episode_stats,
+    _normalize_distribution,
+    _predator_type_threat,
+    _dominant_predator_type,
+    _diagnostic_predator_distance,
+    _first_active_predator_type,
+    _contact_predator_types,
+    _mean_map,
 )
 from spider_cortex_sim.predator import LizardState, PREDATOR_STATES, PredatorController
 from spider_cortex_sim.scenarios import (
@@ -344,7 +352,12 @@ def _make_fake_meta(food_dist: int = 5, shelter_dist: int = 3,
         "night": night,
         "predator_visible": predator_visible,
         "shelter_role": shelter_role,
-        "predator_dist": predator_dist,
+        "diagnostic": {
+            "diagnostic_predator_dist": predator_dist,
+            "diagnostic_home_dx": 0.0,
+            "diagnostic_home_dy": 0.0,
+            "diagnostic_home_dist": float(shelter_dist),
+        },
         "on_shelter": on_shelter,
     }
 
@@ -518,6 +531,43 @@ class MetricsAccumulatorNewFieldsTest(unittest.TestCase):
         snap = acc.snapshot()
         self.assertAlmostEqual(snap["shelter_distance_delta"], 3.0)
 
+    def test_record_transition_tracks_predator_contact_by_type(self) -> None:
+        acc = _make_accumulator()
+        obs_meta = _make_fake_meta(predator_visible=False)
+        next_meta = _make_fake_meta(predator_visible=True, predator_dist=1)
+        next_meta["dominant_predator_type_label"] = "visual"
+        next_meta["visual_predator_threat"] = 0.7
+        next_meta["olfactory_predator_threat"] = 0.0
+        next_meta["predators"] = [
+            {
+                "x": 6,
+                "y": 6,
+                "profile": {"detection_style": "visual"},
+            },
+            {
+                "x": 2,
+                "y": 3,
+                "profile": {"detection_style": "olfactory"},
+            }
+        ]
+        state = _make_fake_state()
+        state.x = 2
+        state.y = 3
+
+        acc.record_transition(
+            step=0,
+            observation_meta=obs_meta,
+            next_meta=next_meta,
+            info=_make_fake_info(predator_contact=True),
+            state=state,
+            predator_state_before="PATROL",
+            predator_state="CHASE",
+        )
+
+        snap = acc.snapshot()
+        self.assertEqual(snap["predator_contacts_by_type"]["visual"], 0)
+        self.assertEqual(snap["predator_contacts_by_type"]["olfactory"], 1)
+
 
 class AggregateEpisodeStatsNewFieldsTest(unittest.TestCase):
     """Tests for new aggregate_episode_stats fields."""
@@ -597,6 +647,46 @@ class AggregateEpisodeStatsNewFieldsTest(unittest.TestCase):
         stats = [self._minimal_episode_stats(food_distance_delta=-3.0)]
         result = aggregate_episode_stats(stats)
         self.assertAlmostEqual(result["mean_food_distance_delta"], -3.0)
+
+    def test_aggregate_includes_mean_predator_contacts_by_type(self) -> None:
+        """
+        Verifies that aggregate_episode_stats computes per-type mean predator contact counts across episodes.
+        
+        Provides two minimal EpisodeStats with complementary `predator_contacts_by_type` counts and asserts
+        the aggregated `mean_predator_contacts_by_type` contains the arithmetic mean for each predator type.
+        """
+        stats = [
+            self._minimal_episode_stats(predator_contacts_by_type={"visual": 2, "olfactory": 0}),
+            self._minimal_episode_stats(predator_contacts_by_type={"visual": 0, "olfactory": 2}),
+        ]
+        result = aggregate_episode_stats(stats)
+        self.assertAlmostEqual(result["mean_predator_contacts_by_type"]["visual"], 1.0)
+        self.assertAlmostEqual(result["mean_predator_contacts_by_type"]["olfactory"], 1.0)
+
+    def test_aggregate_includes_mean_module_response_by_predator_type(self) -> None:
+        stats = [
+            self._minimal_episode_stats(
+                module_response_by_predator_type={
+                    "visual": {"visual_cortex": 0.8, "sensory_cortex": 0.2},
+                    "olfactory": {"visual_cortex": 0.1, "sensory_cortex": 0.9},
+                }
+            ),
+            self._minimal_episode_stats(
+                module_response_by_predator_type={
+                    "visual": {"visual_cortex": 0.6, "sensory_cortex": 0.4},
+                    "olfactory": {"visual_cortex": 0.2, "sensory_cortex": 0.8},
+                }
+            ),
+        ]
+        result = aggregate_episode_stats(stats)
+        self.assertAlmostEqual(
+            result["mean_module_response_by_predator_type"]["visual"]["visual_cortex"],
+            0.7,
+        )
+        self.assertAlmostEqual(
+            result["mean_module_response_by_predator_type"]["olfactory"]["sensory_cortex"],
+            0.85,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1172,6 +1262,490 @@ class SimulationScenarioMapSwitchingTest(unittest.TestCase):
         self.assertIn("mean_shelter_distance_delta", stats)
         self.assertIn("mean_predator_mode_transitions", stats)
         self.assertIn("dominant_predator_state", stats)
+
+
+class NormalizeDistributionTest(unittest.TestCase):
+    """Tests for metrics._normalize_distribution() - new in this PR."""
+
+    def test_empty_mapping_returns_empty(self) -> None:
+        result = _normalize_distribution({})
+        self.assertEqual(result, {})
+
+    def test_single_item_returns_one(self) -> None:
+        result = _normalize_distribution({"a": 5})
+        self.assertAlmostEqual(result["a"], 1.0)
+
+    def test_two_equal_items_return_half_each(self) -> None:
+        result = _normalize_distribution({"a": 3, "b": 3})
+        self.assertAlmostEqual(result["a"], 0.5)
+        self.assertAlmostEqual(result["b"], 0.5)
+
+    def test_zero_total_returns_all_zeros(self) -> None:
+        result = _normalize_distribution({"a": 0, "b": 0})
+        self.assertAlmostEqual(result["a"], 0.0)
+        self.assertAlmostEqual(result["b"], 0.0)
+
+    def test_proportions_sum_to_one(self) -> None:
+        result = _normalize_distribution({"a": 1, "b": 2, "c": 7})
+        total = sum(result.values())
+        self.assertAlmostEqual(total, 1.0)
+
+    def test_keys_are_strings(self) -> None:
+        result = _normalize_distribution({"module_a": 4, "module_b": 6})
+        for key in result:
+            self.assertIsInstance(key, str)
+
+    def test_values_are_floats(self) -> None:
+        result = _normalize_distribution({"a": 10})
+        for value in result.values():
+            self.assertIsInstance(value, float)
+
+    def test_three_unequal_counts(self) -> None:
+        result = _normalize_distribution({"a": 1, "b": 2, "c": 7})
+        self.assertAlmostEqual(result["a"], 0.1)
+        self.assertAlmostEqual(result["b"], 0.2)
+        self.assertAlmostEqual(result["c"], 0.7)
+
+
+class PredatorTypeThreatTest(unittest.TestCase):
+    """Tests for metrics._predator_type_threat() - new in this PR."""
+
+    def test_returns_visual_threat_when_present(self) -> None:
+        meta = {"visual_predator_threat": 0.6}
+        self.assertAlmostEqual(_predator_type_threat(meta, "visual"), 0.6)
+
+    def test_returns_olfactory_threat_when_present(self) -> None:
+        meta = {"olfactory_predator_threat": 0.3}
+        self.assertAlmostEqual(_predator_type_threat(meta, "olfactory"), 0.3)
+
+    def test_missing_key_returns_zero(self) -> None:
+        self.assertAlmostEqual(_predator_type_threat({}, "visual"), 0.0)
+
+    def test_none_value_returns_zero(self) -> None:
+        meta = {"visual_predator_threat": None}
+        self.assertAlmostEqual(_predator_type_threat(meta, "visual"), 0.0)
+
+    def test_zero_value_returns_zero(self) -> None:
+        meta = {"visual_predator_threat": 0.0}
+        self.assertAlmostEqual(_predator_type_threat(meta, "visual"), 0.0)
+
+    def test_constructs_key_correctly(self) -> None:
+        meta = {"custom_predator_threat": 0.9}
+        self.assertAlmostEqual(_predator_type_threat(meta, "custom"), 0.9)
+
+
+class DominantPredatorTypeTest(unittest.TestCase):
+    """Tests for metrics._dominant_predator_type() - new in this PR."""
+
+    def test_label_takes_precedence(self) -> None:
+        meta = {
+            "dominant_predator_type_label": "visual",
+            "visual_predator_threat": 0.1,
+            "olfactory_predator_threat": 0.9,
+        }
+        result = _dominant_predator_type(meta)
+        self.assertEqual(result, "visual")
+
+    def test_label_case_insensitive(self) -> None:
+        meta = {"dominant_predator_type_label": "OLFACTORY"}
+        result = _dominant_predator_type(meta)
+        self.assertEqual(result, "olfactory")
+
+    def test_invalid_label_falls_back_to_threat_comparison(self) -> None:
+        meta = {
+            "dominant_predator_type_label": "unknown",
+            "visual_predator_threat": 0.3,
+            "olfactory_predator_threat": 0.7,
+        }
+        result = _dominant_predator_type(meta)
+        self.assertEqual(result, "olfactory")
+
+    def test_visual_wins_when_higher(self) -> None:
+        meta = {"visual_predator_threat": 0.8, "olfactory_predator_threat": 0.2}
+        self.assertEqual(_dominant_predator_type(meta), "visual")
+
+    def test_olfactory_wins_when_higher(self) -> None:
+        meta = {"visual_predator_threat": 0.2, "olfactory_predator_threat": 0.8}
+        self.assertEqual(_dominant_predator_type(meta), "olfactory")
+
+    def test_both_zero_returns_empty_string(self) -> None:
+        meta = {"visual_predator_threat": 0.0, "olfactory_predator_threat": 0.0}
+        self.assertEqual(_dominant_predator_type(meta), "")
+
+    def test_empty_meta_returns_empty_string(self) -> None:
+        self.assertEqual(_dominant_predator_type({}), "")
+
+    def test_equal_threats_returns_visual(self) -> None:
+        # When equal, visual is returned (olfactory > visual is False)
+        meta = {"visual_predator_threat": 0.5, "olfactory_predator_threat": 0.5}
+        result = _dominant_predator_type(meta)
+        self.assertEqual(result, "visual")
+
+
+class DiagnosticPredatorDistanceTest(unittest.TestCase):
+    """Tests for metrics._diagnostic_predator_distance() - new in this PR."""
+
+    def test_reads_diagnostic_dist(self) -> None:
+        meta = {"diagnostic": {"diagnostic_predator_dist": 5}}
+        self.assertEqual(_diagnostic_predator_distance(meta), 5)
+
+    def test_missing_diagnostic_returns_zero(self) -> None:
+        self.assertEqual(_diagnostic_predator_distance({}), 0)
+
+    def test_non_mapping_diagnostic_returns_zero(self) -> None:
+        meta = {"diagnostic": "not_a_mapping"}
+        self.assertEqual(_diagnostic_predator_distance(meta), 0)
+
+    def test_missing_dist_key_returns_zero(self) -> None:
+        meta = {"diagnostic": {}}
+        self.assertEqual(_diagnostic_predator_distance(meta), 0)
+
+    def test_none_dist_returns_zero(self) -> None:
+        meta = {"diagnostic": {"diagnostic_predator_dist": None}}
+        self.assertEqual(_diagnostic_predator_distance(meta), 0)
+
+    def test_float_dist_is_truncated_to_int(self) -> None:
+        meta = {"diagnostic": {"diagnostic_predator_dist": 3.9}}
+        self.assertEqual(_diagnostic_predator_distance(meta), 3)
+
+
+class FirstActivePredatorTypeTest(unittest.TestCase):
+    """Tests for metrics._first_active_predator_type() - new in this PR."""
+
+    def test_returns_visual_when_present(self) -> None:
+        active = {"visual": {"start_step": 1}, "olfactory": {"start_step": 2}}
+        self.assertEqual(_first_active_predator_type(active), "visual")
+
+    def test_returns_olfactory_when_only_olfactory(self) -> None:
+        active = {"olfactory": {"start_step": 1}}
+        self.assertEqual(_first_active_predator_type(active), "olfactory")
+
+    def test_returns_empty_when_no_predator_types(self) -> None:
+        active = {"unknown_type": {}}
+        self.assertEqual(_first_active_predator_type(active), "")
+
+    def test_returns_empty_when_mapping_empty(self) -> None:
+        self.assertEqual(_first_active_predator_type({}), "")
+
+    def test_visual_preferred_over_olfactory_order(self) -> None:
+        # PREDATOR_TYPE_NAMES order: visual comes first
+        active = {"olfactory": {}, "visual": {}}
+        self.assertEqual(_first_active_predator_type(active), "visual")
+
+
+class ContactPredatorTypesTest(unittest.TestCase):
+    """Tests for metrics._contact_predator_types() - new in this PR."""
+
+    def _make_state(self, x: int = 5, y: int = 5) -> object:
+        from unittest.mock import MagicMock
+        state = MagicMock()
+        state.x = x
+        state.y = y
+        return state
+
+    def test_returns_visual_when_visual_predator_at_same_cell(self) -> None:
+        meta = {
+            "predators": [
+                {"x": 5, "y": 5, "profile": {"detection_style": "visual"}}
+            ]
+        }
+        state = self._make_state(5, 5)
+        result = _contact_predator_types(meta, state=state)
+        self.assertIn("visual", result)
+
+    def test_returns_olfactory_when_olfactory_predator_at_same_cell(self) -> None:
+        meta = {
+            "predators": [
+                {"x": 3, "y": 4, "profile": {"detection_style": "olfactory"}}
+            ]
+        }
+        state = self._make_state(3, 4)
+        result = _contact_predator_types(meta, state=state)
+        self.assertIn("olfactory", result)
+
+    def test_returns_empty_when_predator_at_different_cell(self) -> None:
+        meta = {
+            "predators": [
+                {"x": 1, "y": 1, "profile": {"detection_style": "visual"}}
+            ],
+            "visual_predator_threat": 0.0,
+            "olfactory_predator_threat": 0.0,
+        }
+        state = self._make_state(5, 5)
+        result = _contact_predator_types(meta, state=state)
+        self.assertEqual(result, [])
+
+    def test_no_state_coords_falls_back_to_dominant_type(self) -> None:
+        from unittest.mock import MagicMock
+        state = MagicMock()
+        state.x = None
+        state.y = None
+        meta = {"visual_predator_threat": 0.8, "olfactory_predator_threat": 0.0}
+        result = _contact_predator_types(meta, state=state)
+        self.assertEqual(result, ["visual"])
+
+    def test_multiple_predators_at_same_cell_returns_all_types(self) -> None:
+        meta = {
+            "predators": [
+                {"x": 2, "y": 2, "profile": {"detection_style": "visual"}},
+                {"x": 2, "y": 2, "profile": {"detection_style": "olfactory"}},
+            ]
+        }
+        state = self._make_state(2, 2)
+        result = _contact_predator_types(meta, state=state)
+        self.assertIn("visual", result)
+        self.assertIn("olfactory", result)
+
+    def test_no_predators_list_falls_back_to_dominant_type(self) -> None:
+        meta = {
+            "visual_predator_threat": 0.0,
+            "olfactory_predator_threat": 0.6,
+        }
+        state = self._make_state(5, 5)
+        result = _contact_predator_types(meta, state=state)
+        self.assertEqual(result, ["olfactory"])
+
+    def test_predator_without_profile_mapping_is_skipped(self) -> None:
+        meta = {
+            "predators": [
+                {"x": 5, "y": 5, "profile": "not_a_mapping"},
+            ],
+            "visual_predator_threat": 0.0,
+            "olfactory_predator_threat": 0.0,
+        }
+        state = self._make_state(5, 5)
+        result = _contact_predator_types(meta, state=state)
+        self.assertEqual(result, [])
+
+    def test_unknown_detection_style_not_included(self) -> None:
+        meta = {
+            "predators": [
+                {"x": 5, "y": 5, "profile": {"detection_style": "unknown_style"}},
+            ],
+            "visual_predator_threat": 0.0,
+            "olfactory_predator_threat": 0.0,
+        }
+        state = self._make_state(5, 5)
+        result = _contact_predator_types(meta, state=state)
+        self.assertNotIn("unknown_style", result)
+
+
+class MeanMapTest(unittest.TestCase):
+    """Tests for metrics._mean_map() - new in this PR."""
+
+    def _minimal_stats(self, **kwargs) -> "EpisodeStats":
+        from spider_cortex_sim.world import REWARD_COMPONENT_NAMES
+        from spider_cortex_sim.predator import PREDATOR_STATES
+        defaults = dict(
+            episode=0, seed=0, training=False, scenario=None,
+            total_reward=0.0, steps=10, food_eaten=0, sleep_events=0,
+            shelter_entries=0, alert_events=0, predator_contacts=0,
+            predator_sightings=0, predator_escapes=0,
+            night_ticks=0, night_shelter_ticks=0, night_still_ticks=0,
+            night_role_ticks={"outside": 0, "entrance": 0, "inside": 0, "deep": 0},
+            night_shelter_occupancy_rate=0.0, night_stillness_rate=0.0,
+            night_role_distribution={"outside": 0.0, "entrance": 0.0, "inside": 0.0, "deep": 0.0},
+            predator_response_events=0, mean_predator_response_latency=0.0,
+            mean_sleep_debt=0.0, food_distance_delta=0.0, shelter_distance_delta=0.0,
+            final_hunger=0.0, final_fatigue=0.0, final_sleep_debt=0.0,
+            final_health=1.0, alive=True,
+            reward_component_totals={n: 0.0 for n in REWARD_COMPONENT_NAMES},
+            predator_state_ticks={s: 0 for s in PREDATOR_STATES},
+            predator_mode_transitions=0,
+            dominant_predator_state="PATROL",
+        )
+        defaults.update(kwargs)
+        return EpisodeStats(**defaults)
+
+    def test_empty_history_returns_all_zeros(self) -> None:
+        result = _mean_map([], ["a", "b"], lambda s, n: 1.0)
+        self.assertEqual(result, {"a": 0.0, "b": 0.0})
+
+    def test_single_episode_returns_getter_value(self) -> None:
+        stats = self._minimal_stats(food_eaten=5)
+        result = _mean_map([stats], ["food_eaten"], lambda s, n: float(s.food_eaten))
+        self.assertAlmostEqual(result["food_eaten"], 5.0)
+
+    def test_multiple_episodes_returns_mean(self) -> None:
+        stats1 = self._minimal_stats(food_eaten=4)
+        stats2 = self._minimal_stats(food_eaten=6)
+        result = _mean_map([stats1, stats2], ["food_eaten"], lambda s, n: float(s.food_eaten))
+        self.assertAlmostEqual(result["food_eaten"], 5.0)
+
+    def test_returns_dict_with_correct_keys(self) -> None:
+        stats = self._minimal_stats()
+        result = _mean_map([stats], ["x", "y", "z"], lambda s, n: 0.0)
+        self.assertEqual(set(result.keys()), {"x", "y", "z"})
+
+
+class PredatorTypeNamesConstantTest(unittest.TestCase):
+    """Tests for metrics.PREDATOR_TYPE_NAMES - new in this PR."""
+
+    def test_contains_visual(self) -> None:
+        self.assertIn("visual", PREDATOR_TYPE_NAMES)
+
+    def test_contains_olfactory(self) -> None:
+        self.assertIn("olfactory", PREDATOR_TYPE_NAMES)
+
+    def test_has_two_entries(self) -> None:
+        self.assertEqual(len(PREDATOR_TYPE_NAMES), 2)
+
+
+class EpisodeStatsNewFieldsTest(unittest.TestCase):
+    """Tests for new EpisodeStats fields - predator_contacts_by_type, predator_escapes_by_type, etc."""
+
+    def _make_stats(self, **overrides) -> EpisodeStats:
+        from spider_cortex_sim.world import REWARD_COMPONENT_NAMES
+        from spider_cortex_sim.predator import PREDATOR_STATES
+        defaults = dict(
+            episode=0, seed=0, training=False, scenario=None,
+            total_reward=0.0, steps=10, food_eaten=0, sleep_events=0,
+            shelter_entries=0, alert_events=0, predator_contacts=0,
+            predator_sightings=0, predator_escapes=0,
+            night_ticks=0, night_shelter_ticks=0, night_still_ticks=0,
+            night_role_ticks={"outside": 0, "entrance": 0, "inside": 0, "deep": 0},
+            night_shelter_occupancy_rate=0.0, night_stillness_rate=0.0,
+            night_role_distribution={"outside": 0.0, "entrance": 0.0, "inside": 0.0, "deep": 0.0},
+            predator_response_events=0, mean_predator_response_latency=0.0,
+            mean_sleep_debt=0.0, food_distance_delta=0.0, shelter_distance_delta=0.0,
+            final_hunger=0.0, final_fatigue=0.0, final_sleep_debt=0.0,
+            final_health=1.0, alive=True,
+            reward_component_totals={n: 0.0 for n in REWARD_COMPONENT_NAMES},
+            predator_state_ticks={s: 0 for s in PREDATOR_STATES},
+            predator_mode_transitions=0,
+            dominant_predator_state="PATROL",
+        )
+        defaults.update(overrides)
+        return EpisodeStats(**defaults)
+
+    def test_default_predator_contacts_by_type_is_empty_dict(self) -> None:
+        stats = self._make_stats()
+        self.assertIsInstance(stats.predator_contacts_by_type, dict)
+
+    def test_default_predator_escapes_by_type_is_empty_dict(self) -> None:
+        stats = self._make_stats()
+        self.assertIsInstance(stats.predator_escapes_by_type, dict)
+
+    def test_default_predator_response_latency_by_type_is_empty_dict(self) -> None:
+        stats = self._make_stats()
+        self.assertIsInstance(stats.predator_response_latency_by_type, dict)
+
+    def test_default_module_response_by_predator_type_is_empty_dict(self) -> None:
+        stats = self._make_stats()
+        self.assertIsInstance(stats.module_response_by_predator_type, dict)
+
+    def test_predator_contacts_by_type_can_be_set(self) -> None:
+        stats = self._make_stats(predator_contacts_by_type={"visual": 3, "olfactory": 1})
+        self.assertEqual(stats.predator_contacts_by_type["visual"], 3)
+        self.assertEqual(stats.predator_contacts_by_type["olfactory"], 1)
+
+    def test_predator_escapes_by_type_can_be_set(self) -> None:
+        stats = self._make_stats(predator_escapes_by_type={"visual": 2, "olfactory": 0})
+        self.assertEqual(stats.predator_escapes_by_type["visual"], 2)
+
+    def test_predator_response_latency_by_type_can_be_set(self) -> None:
+        stats = self._make_stats(predator_response_latency_by_type={"visual": 3.5, "olfactory": 0.0})
+        self.assertAlmostEqual(stats.predator_response_latency_by_type["visual"], 3.5)
+
+    def test_module_response_by_predator_type_can_be_set(self) -> None:
+        module_response = {
+            "visual": {"visual_cortex": 0.7, "sensory_cortex": 0.3},
+            "olfactory": {"visual_cortex": 0.2, "sensory_cortex": 0.8},
+        }
+        stats = self._make_stats(module_response_by_predator_type=module_response)
+        self.assertAlmostEqual(
+            stats.module_response_by_predator_type["visual"]["visual_cortex"], 0.7
+        )
+
+
+class EpisodeAccumulatorPredatorTypeFieldsTest(unittest.TestCase):
+    """Tests for EpisodeMetricAccumulator new predator-type fields and initialization."""
+
+    def test_accumulator_initializes_contacts_by_type(self) -> None:
+        acc = _make_accumulator()
+        self.assertIn("visual", acc.predator_contacts_by_type)
+        self.assertIn("olfactory", acc.predator_contacts_by_type)
+        self.assertEqual(acc.predator_contacts_by_type["visual"], 0)
+        self.assertEqual(acc.predator_contacts_by_type["olfactory"], 0)
+
+    def test_accumulator_initializes_escapes_by_type(self) -> None:
+        acc = _make_accumulator()
+        self.assertIn("visual", acc.predator_escapes_by_type)
+        self.assertIn("olfactory", acc.predator_escapes_by_type)
+
+    def test_accumulator_initializes_response_latencies_by_type(self) -> None:
+        acc = _make_accumulator()
+        self.assertIn("visual", acc.predator_response_latencies_by_type)
+        self.assertIsInstance(acc.predator_response_latencies_by_type["visual"], list)
+
+    def test_accumulator_initializes_module_response_by_predator_type_counts(self) -> None:
+        acc = _make_accumulator()
+        self.assertIn("visual", acc.module_response_by_predator_type_counts)
+        self.assertIn("olfactory", acc.module_response_by_predator_type_counts)
+
+    def test_snapshot_includes_predator_contacts_by_type(self) -> None:
+        acc = _make_accumulator()
+        snap = acc.snapshot()
+        self.assertIn("predator_contacts_by_type", snap)
+        self.assertIn("visual", snap["predator_contacts_by_type"])
+        self.assertIn("olfactory", snap["predator_contacts_by_type"])
+
+    def test_snapshot_includes_predator_escapes_by_type(self) -> None:
+        acc = _make_accumulator()
+        snap = acc.snapshot()
+        self.assertIn("predator_escapes_by_type", snap)
+
+    def test_record_transition_preserves_escape_type_when_response_window_closes(self) -> None:
+        acc = _make_accumulator()
+        state = _make_fake_state()
+
+        obs_meta = _make_fake_meta(predator_visible=False, predator_dist=3)
+        obs_meta["visual_predator_threat"] = 0.0
+        obs_meta["olfactory_predator_threat"] = 0.0
+
+        threat_meta = _make_fake_meta(predator_visible=True, predator_dist=2)
+        threat_meta["visual_predator_threat"] = 0.8
+        threat_meta["olfactory_predator_threat"] = 0.0
+        threat_meta["dominant_predator_type_label"] = "visual"
+
+        acc.record_transition(
+            step=0,
+            observation_meta=obs_meta,
+            next_meta=threat_meta,
+            info=_make_fake_info(),
+            state=state,
+            predator_state_before="PATROL",
+            predator_state="PATROL",
+        )
+
+        escape_info = _make_fake_info()
+        escape_info["predator_escape"] = True
+        escape_meta = _make_fake_meta(predator_visible=False, predator_dist=5)
+        escape_meta["visual_predator_threat"] = 0.0
+        escape_meta["olfactory_predator_threat"] = 0.0
+
+        acc.record_transition(
+            step=1,
+            observation_meta=threat_meta,
+            next_meta=escape_meta,
+            info=escape_info,
+            state=state,
+            predator_state_before="PATROL",
+            predator_state="PATROL",
+        )
+
+        self.assertEqual(acc.predator_escapes_by_type["visual"], 1)
+        self.assertEqual(acc.predator_escapes_by_type["olfactory"], 0)
+
+    def test_snapshot_includes_predator_response_latency_by_type(self) -> None:
+        acc = _make_accumulator()
+        snap = acc.snapshot()
+        self.assertIn("predator_response_latency_by_type", snap)
+
+    def test_snapshot_includes_module_response_by_predator_type(self) -> None:
+        acc = _make_accumulator()
+        snap = acc.snapshot()
+        self.assertIn("module_response_by_predator_type", snap)
 
 
 if __name__ == "__main__":

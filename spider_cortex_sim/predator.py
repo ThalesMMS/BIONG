@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Sequence, Tuple
 
+from .perception import predator_detects_spider
+
 
 if TYPE_CHECKING:
     from .world import SpiderWorld
@@ -15,6 +17,56 @@ PREDATOR_STATES: Sequence[str] = (
     "CHASE",
     "WAIT",
     "RECOVER",
+)
+
+
+@dataclass(frozen=True)
+class PredatorProfile:
+    name: str
+    vision_range: int
+    smell_range: int
+    detection_style: str
+    move_interval: int
+    detection_threshold: float
+
+    def __post_init__(self) -> None:
+        """
+        Validate that the profile's detection_style is either 'visual' or 'olfactory'.
+        
+        Raises:
+            ValueError: If `detection_style` is not 'visual' or 'olfactory'.
+        """
+        if self.detection_style not in {"visual", "olfactory"}:
+            raise ValueError(
+                "PredatorProfile.detection_style must be 'visual' or 'olfactory'."
+            )
+
+
+DEFAULT_LIZARD_PROFILE = PredatorProfile(
+    name="lizard",
+    vision_range=3,
+    smell_range=7,
+    detection_style="visual",
+    move_interval=2,
+    detection_threshold=0.45,
+)
+
+VISUAL_HUNTER_PROFILE = PredatorProfile(
+    name="visual_hunter",
+    vision_range=6,
+    smell_range=2,
+    detection_style="visual",
+    move_interval=2,
+    detection_threshold=0.45,
+)
+
+OLFACTORY_HUNTER_PROFILE = PredatorProfile(
+    name="olfactory_hunter",
+    vision_range=3,
+    smell_range=6,
+    detection_style="olfactory",
+    move_interval=2,
+    detection_threshold=0.45,
 )
 
 
@@ -33,6 +85,7 @@ class LizardState:
     ambush_ticks: int = 0
     chase_streak: int = 0
     failed_chases: int = 0
+    profile: PredatorProfile | None = None
 
 
 class PredatorController:
@@ -44,20 +97,48 @@ class PredatorController:
     RECOVER_MOVES = 4
     MAX_FAILED_CHASES = 3
 
-    def update(self, world: "SpiderWorld") -> bool:
+    def __init__(self, predator_index: int = 0) -> None:
         """
-        Advance the predator's finite-state machine for a single game tick, handling detection-driven transitions, target priming, movement scheduling, and post-move bookkeeping.
-        
-        This updates the lizard's mode, targeting fields, and counters (e.g., `chase_streak`, `failed_chases`, `ambush_ticks`, `recover_ticks`, `mode_ticks`) based on whether the spider is detected and the current mode, may change mode via the controller's helper methods, and attempts a scheduled movement when allowed. It also applies mode-specific post-move rules for `WAIT` and `RECOVER`.
+        Initialize the PredatorController with the index of the predator it will control.
         
         Parameters:
-            world (SpiderWorld): The game world used to read and modify the lizard state, query detection/positions, and perform movement.
+            predator_index (int): Index of the predator entity in the world (converted to int).
+        """
+        self.predator_index = int(predator_index)
+
+    def _predator(self, world: "SpiderWorld") -> LizardState:
+        """
+        Retrieve the LizardState for this controller's predator from the given world.
         
         Returns:
-            bool: `True` if the lizard moved during this tick, `False` otherwise.
+            The LizardState instance corresponding to this controller's predator_index.
         """
-        lizard = world.lizard
-        detected = world.lizard_detects_spider()
+        return world.get_predator(self.predator_index)
+
+    def _predator_pos(self, world: "SpiderWorld") -> tuple[int, int]:
+        """
+        Get the controlled predator's current grid coordinates.
+        
+        Returns:
+            tuple[int, int]: (x, y) coordinates of the predator within the world.
+        """
+        predator = self._predator(world)
+        return predator.x, predator.y
+
+    def update(self, world: "SpiderWorld") -> bool:
+        """
+        Advance the predator's finite-state machine by one simulation tick.
+        
+        Updates the predator's mode, targeting fields, and internal counters (for example: chase_streak, failed_chases, ambush_ticks, recover_ticks, mode_ticks); primes targets on detection, performs mode-driven transitions, schedules and attempts movement when allowed, and applies mode-specific post-move rules for WAIT and RECOVER.
+        
+        Parameters:
+            world (SpiderWorld): The game world used to read and modify the predator state and query positions/detection.
+        
+        Returns:
+            bool: True if the predator moved during this tick, False otherwise.
+        """
+        lizard = self._predator(world)
+        detected = self._detect_spider(world)
 
         if detected:
             self._prime_targets(world, world.spider_pos())
@@ -84,7 +165,7 @@ class PredatorController:
             moved = self._step_mode(world)
 
         if lizard.mode == "WAIT":
-            if lizard.wait_target is not None and world.manhattan(world.lizard_pos(), lizard.wait_target) <= 1:
+            if lizard.wait_target is not None and world.manhattan(self._predator_pos(world), lizard.wait_target) <= 1:
                 if moved:
                     lizard.mode_ticks = 0
                     lizard.ambush_ticks = 0
@@ -139,24 +220,119 @@ class PredatorController:
 
     def _can_move_this_tick(self, world: "SpiderWorld") -> bool:
         """
-        Decides whether the lizard is allowed to move on the current world tick.
+        Determine whether this predator may move on the current world tick.
+        
+        Uses the resolved predator profile's move_interval; when the predator's mode is "RECOVER" the interval is doubled.
         
         Returns:
-            `true` if the lizard may move this tick according to the world's move interval (the interval is doubled while the lizard's mode is `RECOVER`), `false` otherwise.
+            True if the predator may move this tick, False otherwise.
         """
-        interval = world.lizard_move_interval
-        if world.lizard.mode == "RECOVER":
+        interval = self._resolved_profile(world).move_interval
+        if self._predator(world).mode == "RECOVER":
             interval *= 2
         return world.tick % max(1, interval) == 0
 
+    def _world_profile(self, world: "SpiderWorld") -> PredatorProfile:
+        """
+        Constructs a PredatorProfile for the lizard using the world's operational perception and lizard-specific configuration.
+        
+        The returned profile uses:
+        - name "lizard"
+        - vision and smell ranges from world.lizard_vision_range and world.predator_smell_range (cast to int)
+        - detection_style set to "visual"
+        - move_interval taken from world.lizard_move_interval and clamped to at least 1
+        - detection_threshold read from world.operational_profile.perception["lizard_detection_threshold"] (cast to float)
+        
+        Returns:
+            PredatorProfile: A profile populated from the world's lizard configuration.
+        """
+        cfg = world.operational_profile.perception
+        return PredatorProfile(
+            name="lizard",
+            vision_range=int(world.lizard_vision_range),
+            smell_range=int(world.predator_smell_range),
+            detection_style="visual",
+            move_interval=max(1, int(world.lizard_move_interval)),
+            detection_threshold=float(cfg["lizard_detection_threshold"]),
+        )
+
+    def _resolved_profile(self, world: "SpiderWorld") -> PredatorProfile:
+        """
+        Resolve the effective predator profile for the controlled lizard.
+        
+        Parameters:
+            world (SpiderWorld): Simulation world used to build a world-derived profile when the predator has no explicit profile.
+        
+        Returns:
+            PredatorProfile: The predator's explicit profile when one is set; otherwise a profile constructed from world configuration.
+        """
+        profile = self._predator(world).profile
+        if profile is None:
+            return self._world_profile(world)
+        return profile
+
+    def _explicit_profile(self, world: "SpiderWorld") -> PredatorProfile | None:
+        """
+        Return the predator's explicit profile, if one is set.
+        
+        Parameters:
+            world (SpiderWorld): Simulation world containing the predator.
+        
+        Returns:
+            PredatorProfile | None: The predator's explicit profile, or `None` if the predator has no profile.
+        """
+        profile = self._predator(world).profile
+        if profile is None:
+            return None
+        return profile
+
+    def _targeting_radius(self, world: "SpiderWorld") -> int | None:
+        """
+        Determine the explicit targeting radius derived from the predator's profile.
+        
+        If the predator has an explicit profile, returns the larger of its vision and smell ranges, coerced to an integer and clamped to at least 1. If no explicit profile is set, returns None.
+        
+        Returns:
+            int | None: Radius in cells (at least 1) when an explicit profile exists, `None` otherwise.
+        """
+        profile = self._explicit_profile(world)
+        if profile is None:
+            return None
+        return max(1, int(max(profile.vision_range, profile.smell_range)))
+
+    def _detect_spider(self, world: "SpiderWorld") -> bool:
+        """
+        Determine whether this controller's predator currently detects the spider in the given world.
+        
+        Returns:
+            True if the predator detects the spider, False otherwise.
+        """
+        return predator_detects_spider(world, self._predator(world))
+
     def _candidate_moves(self, world: "SpiderWorld") -> List[Tuple[int, int]]:
+        """
+        Produce one-step candidate destination coordinates for the controlled predator.
+        
+        Clamps moves to map bounds and returns positions reachable in a single step from the predator's current location while excluding: the predator's current cell, duplicate positions, cells occupied by other predators, non-walkable cells, and cells not suitable for lizards.
+        
+        Parameters:
+            world (SpiderWorld): The game world containing map, occupancy, and movement deltas.
+        
+        Returns:
+            List[Tuple[int, int]]: A list of candidate (x, y) coordinates, in the order discovered from world.move_deltas.
+        """
         seen: set[Tuple[int, int]] = set()
         candidates: List[Tuple[int, int]] = []
+        predator = self._predator(world)
+        other_predator_positions = set(world.predator_positions())
+        other_predator_positions.discard(self._predator_pos(world))
         for dx, dy in world.move_deltas:
-            nx = max(0, min(world.width - 1, world.lizard.x + dx))
-            ny = max(0, min(world.height - 1, world.lizard.y + dy))
+            nx = max(0, min(world.width - 1, predator.x + dx))
+            ny = max(0, min(world.height - 1, predator.y + dy))
             candidate = (nx, ny)
-            if candidate == world.lizard_pos() or candidate in seen:
+            if candidate == self._predator_pos(world) or candidate in seen:
+                continue
+            if candidate in other_predator_positions:
                 continue
             if not world.is_walkable(candidate):
                 continue
@@ -168,16 +344,16 @@ class PredatorController:
 
     def _step_towards(self, world: "SpiderWorld", target: Tuple[int, int]) -> bool:
         """
-        Move the lizard one grid step toward the given target coordinate.
+        Move the controlled predator one step toward the given target coordinate.
         
-        Selects valid neighboring moves, ranks them by Manhattan distance to the target (closer preferred), prefers cells with terrain `"OPEN"`, and uses the position as a final tie-break. If multiple moves share the best rank, optionally choose randomly among them according to world.noise_profile.predator["random_choice_prob"] using world.predator_rng. Updates world.lizard.x and world.lizard.y when a move is made.
+        Attempts to choose a valid neighboring cell that reduces Manhattan distance to target, preferring cells on terrain labeled "OPEN" and breaking ties deterministically except when the world's predator noise profile permits a random choice. On success updates the predator's stored (x, y) position.
         
         Parameters:
-            world (SpiderWorld): Game world used for move validation, ranking, and RNG; the lizard position is updated on success.
+            world (SpiderWorld): World context used for move validation, terrain checks, and RNG.
             target (Tuple[int, int]): (x, y) coordinate to approach.
         
         Returns:
-            bool: `True` if the lizard moved to a new position, `False` otherwise.
+            bool: `True` if the predator moved to a new position, `False` otherwise.
         """
         candidates = self._candidate_moves(world)
         if not candidates:
@@ -215,7 +391,8 @@ class PredatorController:
             choice = best_candidates[choice_idx]
         else:
             choice = ranked[0]
-        world.lizard.x, world.lizard.y = choice
+        predator = self._predator(world)
+        predator.x, predator.y = choice
         return True
 
     def _pick_patrol_target(
@@ -235,11 +412,14 @@ class PredatorController:
         Returns:
             Tuple[int, int] | None: The selected patrol target coordinate, or `None` if no valid spawn cell exists.
         """
-        current = world.lizard_pos()
+        current = self._predator_pos(world)
+        occupied_spawn_cells = set(world.predator_positions())
         candidates = [
             pos
             for pos in world.map_template.lizard_spawn_cells
-            if pos != current and world.is_lizard_walkable(pos)
+            if pos != current
+            and pos not in occupied_spawn_cells
+            and world.is_lizard_walkable(pos)
         ]
         if not candidates:
             return None
@@ -307,15 +487,50 @@ class PredatorController:
         Parameters:
             target (Tuple[int, int]): Coordinates (x, y) of the detected spider.
         """
-        lizard = world.lizard
+        lizard = self._predator(world)
+        target_radius = self._targeting_radius(world)
         lizard.last_known_spider = target
-        lizard.wait_target = world.nearest_shelter_entrance(origin=target)
-        lizard.investigate_target = self._reachable_probe_target(world, target)
+        lizard.wait_target = self._nearest_wait_target(world, target, radius=target_radius)
+        lizard.investigate_target = self._reachable_probe_target(
+            world,
+            target,
+            radius=target_radius,
+        )
+
+    def _nearest_wait_target(
+        self,
+        world: "SpiderWorld",
+        anchor: Tuple[int, int],
+        *,
+        radius: int | None = None,
+    ) -> Tuple[int, int] | None:
+        """
+        Select the nearest shelter entrance to an anchor coordinate, optionally restricting candidates by radius.
+        
+        Parameters:
+            world (SpiderWorld): Simulation world providing shelter entrance locations and distance metric.
+            anchor (Tuple[int, int]): Reference coordinate to measure Manhattan distance from.
+            radius (int | None, optional): If provided, only consider entrances with Manhattan distance <= max(1, radius).
+        
+        Returns:
+            Tuple[int, int] | None: The nearest entrance coordinate (ties broken by position order), or `None` if no entrance qualifies.
+        """
+        entrances = sorted(world.shelter_entrance_cells)
+        if radius is not None:
+            entrances = [
+                pos for pos in entrances if world.manhattan(pos, anchor) <= max(1, radius)
+            ]
+        if not entrances:
+            return None
+        entrances.sort(key=lambda pos: (world.manhattan(pos, anchor), pos))
+        return entrances[0]
 
     def _reachable_probe_target(
         self,
         world: "SpiderWorld",
         anchor: Tuple[int, int],
+        *,
+        radius: int | None = None,
     ) -> Tuple[int, int] | None:
         """
         Selects a reachable probe position near an anchor to use as an investigation target.
@@ -334,6 +549,10 @@ class PredatorController:
             for y in range(world.height)
             if world.is_lizard_walkable((x, y))
         ]
+        if radius is not None:
+            candidates = [
+                pos for pos in candidates if world.manhattan(pos, anchor) <= max(1, radius)
+            ]
         if not candidates:
             return None
         candidates.sort(
@@ -366,7 +585,7 @@ class PredatorController:
         Parameters:
             world (SpiderWorld): The simulation world providing the lizard state and target computation helpers.
         """
-        lizard = world.lizard
+        lizard = self._predator(world)
         if lizard.last_known_spider is None:
             self._set_mode(lizard, "PATROL")
             return
@@ -386,7 +605,7 @@ class PredatorController:
         
         Increments the lizard's `failed_chases`, ensures `recover_ticks` is sufficiently long based on recent chase history, and re-primes targets if a last-known spider position exists. Chooses the next FSM mode in the following priority: set to `WAIT` when the last-known position maps to a shelter and a `wait_target` is available; otherwise `INVESTIGATE` if an `investigate_target` exists; otherwise `RECOVER` if `recover_ticks > 0`; otherwise `PATROL`.
         """
-        lizard = world.lizard
+        lizard = self._predator(world)
         lizard.failed_chases = min(self.MAX_FAILED_CHASES, lizard.failed_chases + 1)
         lizard.recover_ticks = max(
             lizard.recover_ticks,
@@ -420,7 +639,7 @@ class PredatorController:
         Parameters:
             world (SpiderWorld): Simulation world providing the lizard state and target computations.
         """
-        lizard = world.lizard
+        lizard = self._predator(world)
         if lizard.last_known_spider is not None:
             self._prime_targets(world, lizard.last_known_spider)
         if lizard.wait_target is not None:
@@ -442,14 +661,14 @@ class PredatorController:
         Returns:
             bool: `True` if the lizard moved during this call, `False` otherwise.
         """
-        lizard = world.lizard
+        lizard = self._predator(world)
         if lizard.mode == "PATROL":
-            if lizard.patrol_target is None or world.lizard_pos() == lizard.patrol_target:
+            if lizard.patrol_target is None or self._predator_pos(world) == lizard.patrol_target:
                 lizard.patrol_target = self._pick_patrol_target(world)
             if lizard.patrol_target is None:
                 return False
             moved = self._step_towards(world, lizard.patrol_target)
-            if moved and world.lizard_pos() == lizard.patrol_target:
+            if moved and self._predator_pos(world) == lizard.patrol_target:
                 lizard.patrol_target = self._pick_patrol_target(world)
             return moved
 
@@ -461,29 +680,33 @@ class PredatorController:
                 self._set_mode(lizard, "PATROL")
                 return False
             if lizard.investigate_target is None:
-                lizard.investigate_target = self._reachable_probe_target(world, lizard.last_known_spider)
+                lizard.investigate_target = self._reachable_probe_target(
+                    world,
+                    lizard.last_known_spider,
+                    radius=self._targeting_radius(world),
+                )
             if lizard.investigate_target is None:
                 self._enter_wait_or_recover(world)
                 return False
             moved = self._step_towards(world, lizard.investigate_target)
             lizard.investigate_ticks += 1
-            if world.lizard_pos() == lizard.investigate_target:
+            if self._predator_pos(world) == lizard.investigate_target:
                 self._enter_wait_or_recover(world)
             return moved
 
         if lizard.mode == "WAIT":
             if lizard.wait_target is None:
                 return False
-            if world.manhattan(world.lizard_pos(), lizard.wait_target) <= 1:
+            if world.manhattan(self._predator_pos(world), lizard.wait_target) <= 1:
                 return False
             moved = self._step_towards(world, lizard.wait_target)
-            if moved and world.manhattan(world.lizard_pos(), lizard.wait_target) <= 1:
+            if moved and world.manhattan(self._predator_pos(world), lizard.wait_target) <= 1:
                 lizard.mode_ticks = 0
             return moved
 
         if lizard.mode == "RECOVER":
             lizard.recover_ticks = max(0, lizard.recover_ticks - 1)
-            if lizard.patrol_target is None or world.lizard_pos() == lizard.patrol_target:
+            if lizard.patrol_target is None or self._predator_pos(world) == lizard.patrol_target:
                 lizard.patrol_target = self._pick_patrol_target(
                     world,
                     retreat_from=lizard.wait_target or lizard.last_known_spider,
