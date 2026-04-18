@@ -31,10 +31,11 @@ New pipeline:
   - broad bodily and situational state for arbitration: hunger, fatigue, health, pain, contact, food or shelter status, predator cues, day or night cycle, last movement, sleep debt, and shelter depth
 
 - `motor_context`
-  - version: 3
-  - input dimension: 13
-  - local execution or correction context: food or shelter status, predator cues, day or night cycle, last movement, shelter depth, body orientation, local terrain difficulty, and fatigue
-  - ordered signals: `on_food`, `on_shelter`, `predator_visible`, `predator_certainty`, `day`, `night`, `last_move_dx`, `last_move_dy`, `shelter_role_level`, `heading_dx`, `heading_dy`, `terrain_difficulty`, `fatigue`
+  - version: 5
+  - input dimension: 14
+  - local execution or correction context: food or shelter status, predator cues, day or night cycle, last movement, shelter depth, body orientation, local terrain difficulty, fatigue, and momentum
+  - ordered signals: `on_food`, `on_shelter`, `predator_visible`, `predator_certainty`, `day`, `night`, `last_move_dx`, `last_move_dy`, `shelter_role_level`, `heading_dx`, `heading_dy`, `terrain_difficulty`, `fatigue`, `momentum`
+  - ownership note: `momentum` is execution-relevant body state for `motor_cortex`, not decision-priority context for `action_center`
 
 ## Decision Versus Execution
 
@@ -56,13 +57,25 @@ Trace and `info` payloads preserve this distinction:
 
 The old flat random action flip has been replaced by an execution slip model applied after `motor_cortex`.
 
-Execution difficulty is computed from body orientation, terrain, and fatigue:
+Execution difficulty is computed from body orientation, terrain, fatigue, and
+bounded execution momentum:
 
 1. The intended movement vector is compared with the spider's body heading.
 2. The normalized dot product is mapped into `orientation_alignment` in `[0, 1]`, where `1` is aligned and `0` is opposite.
 3. Terrain under the spider is mapped to `terrain_difficulty`: `OPEN -> 0.0`, `CLUTTER -> 0.4`, `NARROW -> 0.7`.
 4. Fatigue is read from body state as a `[0, 1]` multiplier.
-5. Combined execution difficulty is `terrain_difficulty * (1 - orientation_alignment) * (1 + fatigue)`, clipped to `[0, 1]`.
+5. Base execution difficulty is `terrain_difficulty * (1 - orientation_alignment) * (1 + fatigue)`.
+6. When `orientation_alignment > 0.7`, bounded `momentum` reduces difficulty with `difficulty *= (1.0 - momentum * 0.5)`.
+7. The final difficulty is clipped to `[0, 1]`.
+
+The stateful transition model is specified in `docs/embodiment_design.md`:
+aligned movement builds bounded execution momentum, turns and rest decay or
+reset it, and the action space remains unchanged.
+
+Sharp heading changes also feed the physiology system. Heading changes of
+90 degrees or greater add `turn_fatigue_cost`, 180-degree reversals add
+`reverse_fatigue_cost`, and `ORIENT_*` actions pay those costs when they
+produce the same large heading changes.
 
 Slip probability uses `action_flip_prob` as a base slip rate and adds embodiment pressure from `orientation_slip_factor`, `terrain_slip_factor`, and `fatigue_slip_factor`. These factors live in `NoiseConfig.motor`, so preset noise profiles can scale physical unreliability without changing the action space.
 
@@ -102,6 +115,38 @@ At runtime:
 The benchmark path is intended to measure the learned arbitration policy rather than hidden manual steering. For that reason, `BrainAblationConfig` defaults `enable_deterministic_guards` and `enable_food_direction_bias` to `false`. With those defaults, clear predator pressure and high hunger remain visible as evidence, but they do not override the learned valence selection. If the learned policy selects `hunger`, the final action logits are also left untouched by food-direction steering.
 
 The previous hand-authored scaffolding is still available as an explicit ablation. When `enable_deterministic_guards=True`, clear predator pressure can force `threat`, and safe high hunger can force `hunger`. When `enable_food_direction_bias=True`, deterministic evaluation can add a bounded `+3.0` logit bonus to the action facing the best available food cue, selected in visible, trace, memory, then smell order, when the cue direction magnitude exceeds `0.05`. These switches are diagnostic tools and regression baselines, not the default benchmark behavior.
+
+## Scaffold Classification for Claim Tests
+
+Claim-test reports attach a scaffold classification derived from the ablation config summary and the observed evaluation reflex scale. This taxonomy is reporting-only: it does not change training, simulation rollout behavior, arbitration behavior, or checkpoint selection. It only changes how claim-test outputs are labeled, qualified, or failed in reporting.
+
+The claim suite uses three support levels:
+
+- `MINIMAL_MANUAL` (`minimal_manual`): no deterministic guards, no food-direction bias, `eval_reflex_scale` is absent or `<= 0.0`, `warm_start_scale <= 0.25`, and `use_learned_arbitration=True`.
+- `STANDARD_CONSTRAINED` (`standard_constrained`): no hard runtime scaffolds are active, but either `warm_start_scale > 0.25` or `use_learned_arbitration=False`.
+- `SCAFFOLDED_RUNTIME` (`scaffolded_runtime`): any of `enable_deterministic_guards=True`, `enable_food_direction_bias=True`, or `eval_reflex_scale > 0.0`.
+
+Primary claims use that level to decide how a passing metric result is reported:
+
+| Support level | Primary-claim reporting outcome |
+| --- | --- |
+| `MINIMAL_MANUAL` | Keep `passed`, set `claim_severity="full"`, and mark `benchmark_of_record_eligible=true`. |
+| `STANDARD_CONSTRAINED` | Keep `passed`, set `claim_severity="qualified"`, and mark `benchmark_of_record_eligible=false`. |
+| `SCAFFOLDED_RUNTIME` | Convert a metric pass into claim-test `failed`, set `claim_severity="non_benchmark"`, and emit an explicit scaffold-dependence reason. |
+
+Non-primary claims do not change pass/fail status based on scaffold level. They only inherit the reporting severity that matches the detected level.
+
+The finding labels are computed from the following exact conditions:
+
+| Input field | Exact condition | Finding label |
+| --- | --- | --- |
+| `enable_deterministic_guards` | `True` | `deterministic_guards_enabled` |
+| `enable_food_direction_bias` | `True` | `food_direction_bias_enabled` |
+| `warm_start_scale` | `> 0.25` | `warm_start_prior_active` |
+| `use_learned_arbitration` | `False` | `fixed_arbitration_runtime` |
+| `eval_reflex_scale` | `> 0.0` | `reflex_support_at_eval` |
+
+These labels surface residual scaffolding explicitly in claim rows, summaries, and offline exports without introducing alternate runtime paths.
 
 ## Reflexes
 

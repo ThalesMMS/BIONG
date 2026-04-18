@@ -175,20 +175,43 @@ class StageFunctionTest(unittest.TestCase):
         action_name = self._walkable_action(world)
         context = self._build_context(world, action_name)
 
-        stages.run_action_stage(world, context)
+        with patch.object(stages, "apply_motor_noise", wraps=stages.apply_motor_noise) as motor_noise:
+            stages.run_action_stage(world, context)
 
+        motor_noise.assert_called_once_with(world, action_name)
         self.assertTrue(context.moved)
         action_event = next(event for event in context.event_log if event.name == "action_resolved")
         self.assertEqual(action_event.stage, "action")
+        self.assertEqual(action_event.payload["intended_action"], action_name)
+        self.assertEqual(action_event.payload["executed_action"], context.executed_action)
         self.assertIn("execution_difficulty", action_event.payload)
         self.assertIn("slip_probability", action_event.payload)
+        self.assertIn("turn_angle", action_event.payload)
+        self.assertIn("turn_fatigue_applied", action_event.payload)
         movement_event = context.event_log[-1]
         self.assertEqual(movement_event.stage, "action")
         self.assertEqual(movement_event.name, "movement_applied")
         self.assertEqual(
             set(movement_event.payload.keys()),
-            {"moved", "spider_pos", "last_move_dx", "last_move_dy"},
+            {"moved", "spider_pos", "last_move_dx", "last_move_dy", "momentum"},
         )
+        self.assertEqual(movement_event.payload["momentum"], context.info["momentum_after"])
+
+    def test_run_action_stage_applies_reverse_turn_fatigue_to_orient_action(self) -> None:
+        world = self._make_world(seed=13)
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        world.state.fatigue = 0.2
+        context = self._build_context(world, "ORIENT_LEFT")
+
+        stages.run_action_stage(world, context)
+
+        self.assertAlmostEqual(world.state.fatigue, 0.204)
+        self.assertAlmostEqual(context.info["turn_angle"], 180.0)
+        self.assertAlmostEqual(context.info["turn_fatigue_applied"], 0.004)
+        action_event = next(event for event in context.event_log if event.name == "action_resolved")
+        self.assertAlmostEqual(action_event.payload["turn_angle"], 180.0)
+        self.assertAlmostEqual(action_event.payload["turn_fatigue_applied"], 0.004)
 
     def test_run_terrain_stage_updates_context_and_records_effects(self) -> None:
         world = self._make_world(seed=17)
@@ -424,8 +447,10 @@ class StageFunctionTest(unittest.TestCase):
         context.predator_escape = True
         world.tick = 7
 
-        stages.run_memory_stage(world, context)
+        with patch.object(stages, "refresh_all_memory", wraps=stages.refresh_all_memory) as refresh_all:
+            stages.run_memory_stage(world, context)
 
+        refresh_all.assert_called_once_with(world, predator_escape=True)
         memory_event = context.event_log[-1]
         self.assertEqual(memory_event.stage, "memory")
         self.assertEqual(memory_event.name, "memory_refreshed")

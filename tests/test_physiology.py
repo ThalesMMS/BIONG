@@ -6,8 +6,10 @@ from spider_cortex_sim.physiology import (
     apply_homeostasis_penalties,
     apply_predator_contact,
     apply_restoration,
+    apply_turn_fatigue,
     apply_wakefulness,
     clip_state,
+    heading_change_angle,
     reset_sleep_state,
     resolve_autonomic_behaviors,
     rest_streak_norm,
@@ -44,6 +46,51 @@ class PhysiologyModuleTest(unittest.TestCase):
         apply_restoration(world, "DEEP_SLEEP", night=True, shelter_role="deep")
         self.assertLess(world.state.fatigue, 0.8)
         self.assertLess(world.state.sleep_debt, 0.7)
+
+    def test_heading_change_angle_reports_right_angle(self) -> None:
+        self.assertAlmostEqual(heading_change_angle((1, 0), (0, -1)), 90.0)
+
+    def test_heading_change_angle_reports_reverse(self) -> None:
+        self.assertAlmostEqual(heading_change_angle((1, 0), (-1, 0)), 180.0)
+
+    def test_apply_turn_fatigue_charges_right_angle_turn(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        initial_fatigue = 0.2
+        expected_cost = float(world.reward_config["turn_fatigue_cost"])
+        world.state.fatigue = initial_fatigue
+
+        diagnostics = apply_turn_fatigue(world, (1, 0), (0, -1))
+
+        self.assertAlmostEqual(world.state.fatigue, initial_fatigue + expected_cost)
+        self.assertAlmostEqual(diagnostics["turn_angle"], 90.0)
+        self.assertAlmostEqual(diagnostics["turn_fatigue_applied"], expected_cost)
+
+    def test_apply_turn_fatigue_charges_sharp_turn(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        initial_fatigue = 0.2
+        expected_cost = float(world.reward_config["turn_fatigue_cost"])
+        world.state.fatigue = initial_fatigue
+
+        diagnostics = apply_turn_fatigue(world, (1, 1), (-1, 0))
+
+        self.assertAlmostEqual(world.state.fatigue, initial_fatigue + expected_cost)
+        self.assertGreater(diagnostics["turn_angle"], 90.0)
+        self.assertAlmostEqual(diagnostics["turn_fatigue_applied"], expected_cost)
+
+    def test_apply_turn_fatigue_charges_reverse_cost(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        initial_fatigue = 0.2
+        expected_cost = float(world.reward_config["reverse_fatigue_cost"])
+        world.state.fatigue = initial_fatigue
+
+        diagnostics = apply_turn_fatigue(world, (1, 0), (-1, 0))
+
+        self.assertAlmostEqual(world.state.fatigue, initial_fatigue + expected_cost)
+        self.assertAlmostEqual(diagnostics["turn_angle"], 180.0)
+        self.assertAlmostEqual(diagnostics["turn_fatigue_applied"], expected_cost)
 
     def test_resolve_autonomic_behaviors_feeds_when_on_food(self) -> None:
         world = SpiderWorld(seed=5, lizard_move_interval=999999)
@@ -213,6 +260,38 @@ class PhysiologyModuleTest(unittest.TestCase):
         apply_restoration(world, "SETTLING", night=True, shelter_role="inside")
         self.assertLess(world.state.fatigue, fatigue_before)
 
+    def test_apply_restoration_settling_resets_momentum(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        world.state.momentum = 0.7
+
+        diagnostics = apply_restoration(world, "SETTLING", night=True, shelter_role="inside")
+
+        self.assertAlmostEqual(world.state.momentum, 0.0)
+        self.assertAlmostEqual(diagnostics["momentum_before"], 0.7)
+        self.assertAlmostEqual(diagnostics["momentum_after"], 0.0)
+        self.assertTrue(diagnostics["momentum_reset"])
+
+    def test_apply_restoration_resting_keeps_momentum_zero(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        world.state.momentum = 0.4
+
+        diagnostics = apply_restoration(world, "RESTING", night=True, shelter_role="deep")
+
+        self.assertAlmostEqual(world.state.momentum, 0.0)
+        self.assertTrue(diagnostics["momentum_reset"])
+
+    def test_apply_restoration_deep_sleep_keeps_momentum_zero(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        world.state.momentum = 0.4
+
+        diagnostics = apply_restoration(world, "DEEP_SLEEP", night=True, shelter_role="deep")
+
+        self.assertAlmostEqual(world.state.momentum, 0.0)
+        self.assertTrue(diagnostics["momentum_reset"])
+
     def test_apply_restoration_settling_night_increases_health(self) -> None:
         world = SpiderWorld(seed=3, lizard_move_interval=999999)
         world.reset(seed=3)
@@ -252,6 +331,7 @@ class PhysiologyModuleTest(unittest.TestCase):
         world.state.health = 1.5
         world.state.recent_pain = 2.0
         world.state.recent_contact = 5.0
+        world.state.momentum = 2.0
         clip_state(world)
         self.assertAlmostEqual(world.state.hunger, 1.0)
         self.assertAlmostEqual(world.state.fatigue, 1.0)
@@ -259,6 +339,7 @@ class PhysiologyModuleTest(unittest.TestCase):
         self.assertAlmostEqual(world.state.health, 1.0)
         self.assertAlmostEqual(world.state.recent_pain, 1.0)
         self.assertAlmostEqual(world.state.recent_contact, 1.0)
+        self.assertAlmostEqual(world.state.momentum, 1.0)
 
     def test_clip_state_clamps_values_below_zero(self) -> None:
         world = SpiderWorld(seed=1, lizard_move_interval=999999)
@@ -267,11 +348,13 @@ class PhysiologyModuleTest(unittest.TestCase):
         world.state.fatigue = -1.0
         world.state.sleep_debt = -0.2
         world.state.health = -0.1
+        world.state.momentum = -0.1
         clip_state(world)
         self.assertAlmostEqual(world.state.hunger, 0.0)
         self.assertAlmostEqual(world.state.fatigue, 0.0)
         self.assertAlmostEqual(world.state.sleep_debt, 0.0)
         self.assertAlmostEqual(world.state.health, 0.0)
+        self.assertAlmostEqual(world.state.momentum, 0.0)
 
     def test_sleep_phase_from_streak_zero_returns_awake(self) -> None:
         self.assertEqual(sleep_phase_from_streak(0, night=True, shelter_role="deep"), "AWAKE")
@@ -458,7 +541,42 @@ class PhysiologyModuleTest(unittest.TestCase):
         self.assertIn("rest_streak", event.payload)
         self.assertIn("sleep_drive", event.payload)
         self.assertIn("shelter_role", event.payload)
+        self.assertIn("momentum_before", event.payload)
+        self.assertIn("momentum_after", event.payload)
+        self.assertIn("momentum_reset", event.payload)
         self.assertEqual(event.stage, "autonomic")
+
+    def test_resolve_autonomic_behaviors_rest_phase_reports_momentum_reset(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        deep_cells = list(world.shelter_deep_cells)
+        if not deep_cells:
+            self.skipTest("No deep shelter cells available")
+        world.state.x, world.state.y = sorted(deep_cells)[0]
+        world.state.fatigue = 0.6
+        world.state.sleep_debt = 0.5
+        world.state.hunger = 0.1
+        world.state.momentum = 0.7
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+        ctx = self._make_tick_context(world)
+
+        resolve_autonomic_behaviors(
+            world,
+            action_name="STAY",
+            predator_threat=False,
+            night=True,
+            reward_components=reward_components,
+            info=info,
+            tick_context=ctx,
+        )
+
+        event = next(e for e in ctx.event_log if e.name == "rest_phase")
+        self.assertAlmostEqual(world.state.momentum, 0.0)
+        self.assertAlmostEqual(event.payload["momentum_before"], 0.7)
+        self.assertAlmostEqual(event.payload["momentum_after"], 0.0)
+        self.assertTrue(event.payload["momentum_reset"])
+        self.assertTrue(info["restoration"]["momentum_reset"])
 
     def test_resolve_autonomic_behaviors_rest_blocked_records_event(self) -> None:
         world = SpiderWorld(seed=3, lizard_move_interval=999999)

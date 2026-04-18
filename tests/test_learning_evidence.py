@@ -1,5 +1,10 @@
 import unittest
 
+from spider_cortex_sim.comparison import (
+    build_learning_evidence_summary,
+    compare_learning_evidence,
+    compare_training_regimes,
+)
 from spider_cortex_sim.learning_evidence import (
     LearningEvidenceConditionSpec,
     canonical_learning_evidence_condition_names,
@@ -121,7 +126,7 @@ class CanonicalLearningEvidenceConditionsTest(unittest.TestCase):
         """
         Verifies that when 'trained_without_reflex_support' is used as the reference, the learning-evidence summary selects it as the primary condition and indicates no learning evidence.
         
-        Constructs a set of four condition summaries with differing performance metrics, calls SpiderSimulation._build_learning_evidence_summary with reference_condition="trained_without_reflex_support", and asserts:
+        Constructs a set of four condition summaries with differing performance metrics, calls build_learning_evidence_summary with reference_condition="trained_without_reflex_support", and asserts:
         - the summary's "reference_condition" equals "trained_without_reflex_support",
         - the summary's "primary_condition" matches the entry for "trained_without_reflex_support",
         - the summary's "has_learning_evidence" is False.
@@ -157,7 +162,7 @@ class CanonicalLearningEvidenceConditionsTest(unittest.TestCase):
             },
         }
 
-        summary = SpiderSimulation._build_learning_evidence_summary(
+        summary = build_learning_evidence_summary(
             conditions,
             reference_condition="trained_without_reflex_support",
         )
@@ -268,7 +273,7 @@ class ResolveLearningEvidenceConditionsTest(unittest.TestCase):
 
 class LearningEvidenceRegimeConditionIntegrationTest(unittest.TestCase):
     def test_regime_condition_trains_with_named_regime(self) -> None:
-        payload, rows = SpiderSimulation.compare_learning_evidence(
+        payload, rows = compare_learning_evidence(
             budget_profile="smoke",
             episodes=1,
             evaluation_episodes=0,
@@ -299,7 +304,7 @@ class LearningEvidenceRegimeConditionIntegrationTest(unittest.TestCase):
         )
 
     def test_default_eval_scale_records_runtime_scale(self) -> None:
-        payload, rows = SpiderSimulation.compare_learning_evidence(
+        payload, rows = compare_learning_evidence(
             budget_profile="smoke",
             episodes=1,
             evaluation_episodes=0,
@@ -346,7 +351,7 @@ class LearningEvidenceRegimeConditionIntegrationTest(unittest.TestCase):
 
 class TrainingRegimeComparisonPayloadTest(unittest.TestCase):
     def test_compare_training_regimes_returns_structured_payload(self) -> None:
-        payload, rows = SpiderSimulation.compare_training_regimes(
+        payload, rows = compare_training_regimes(
             regime_names=["reflex_annealed"],
             budget_profile="smoke",
             episodes=1,

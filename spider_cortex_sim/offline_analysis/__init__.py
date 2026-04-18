@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+# Importing private helpers here is intentional for migration compatibility:
+# the former monolithic offline_analysis module exposed these names at module
+# scope. __all__ still excludes underscore-prefixed helpers from wildcard imports.
+from .cli import build_parser, main, run_offline_analysis
+from .constants import (
+    BOOTSTRAP_RANDOM_SEED,
+    CANONICAL_NOISE_CONDITIONS,
+    DEFAULT_BOOTSTRAP_RESAMPLES,
+    DEFAULT_CONFIDENCE_LEVEL,
+    DEFAULT_MINIMAL_SHAPING_SURVIVAL_THRESHOLD,
+    DEFAULT_MODULE_NAMES,
+    REFLEX_DOMINANCE_WARNING_THRESHOLD,
+    REFLEX_OVERRIDE_WARNING_THRESHOLD,
+    SHAPING_DEPENDENCE_WARNING_THRESHOLD,
+)
+from .extractors import (
+    _ablation_deltas_vs_reference,
+    _aggregate_representation_from_scenarios,
+    _aggregate_specialization_from_scenarios,
+    _build_representation_specialization_result,
+    _canonicalize_inferred_noise_conditions,
+    _component_disposition_rows,
+    _component_disposition_summary,
+    _extract_first_present_float,
+    _extract_first_present_float_map,
+    _extract_reward_from_episode,
+    _fallback_group_summary,
+    _format_failure_indicator,
+    _noise_robustness_cell_summary,
+    _noise_robustness_marginal,
+    _noise_robustness_mean,
+    _noise_robustness_metrics,
+    _noise_robustness_rate,
+    _normalize_behavior_survival,
+    _normalize_float_map,
+    _normalize_module_response_by_predator_type,
+    _normalize_noise_marginals,
+    _observed_noise_robustness_metrics,
+    _ordered_noise_conditions,
+    _profile_disposition_weights,
+    _representation_interpretation,
+    _representation_payload,
+    _rows_with_minimal_reflex_support,
+    _scenario_delta,
+    _scenario_suite_from_rows,
+    _suite_from_summary,
+    _summary_delta,
+    _variant_with_minimal_reflex_support,
+    build_primary_benchmark,
+    build_reflex_dependence_indicators,
+    extract_ablations,
+    extract_comparisons,
+    extract_noise_robustness,
+    extract_predator_type_specialization,
+    extract_reflex_frequency,
+    extract_representation_specialization,
+    extract_scenario_success,
+    extract_shaping_audit,
+    extract_training_eval_series,
+)
+from .ingestion import (
+    load_behavior_csv,
+    load_summary,
+    load_trace,
+    normalize_behavior_rows,
+)
+from .renderers import (
+    _chart_bounds,
+    render_bar_chart,
+    render_line_chart,
+    render_matrix_heatmap,
+    render_placeholder_svg,
+)
+from .report import build_report_data, write_report
+from .tables import (
+    _claim_uncertainty_for_condition,
+    build_aggregate_benchmark_tables,
+    build_claim_test_tables,
+    build_diagnostics,
+    build_effect_size_tables,
+    build_reward_component_rows,
+    build_scenario_checks_rows,
+)
+from .uncertainty import (
+    _bootstrap_distribution_fields,
+    _ci_row_fields,
+    _cohens_d_row,
+    _cohens_d_uncertainty_from_seed_values,
+    _delta_uncertainty_from_seed_values,
+    _is_zero_reflex_scale,
+    _mean_or_none,
+    _payload_has_zero_reflex_scale,
+    _payload_metric_seed_items,
+    _payload_metric_seed_values,
+    _payload_uncertainty,
+    _percentile,
+    _primary_benchmark_scenario_success,
+    _primary_benchmark_source_payload,
+    _sample_std,
+    _seed_key,
+    _seed_value_items,
+    _uncertainty_or_empty,
+    _uncertainty_or_seed_delta,
+    _unpaired_delta_uncertainty_from_seed_items,
+    _values_from_seed_items,
+)
+from .utils import (
+    _coerce_bool,
+    _coerce_float,
+    _coerce_optional_float,
+    _dominant_module_by_score,
+    _format_optional_metric,
+    _mapping_or_empty,
+    _mean,
+    _safe_divide,
+)
+from .writers import (
+    _markdown_table,
+    _markdown_value,
+    _table,
+    _table_rows,
+    _write_csv,
+    _write_svg,
+)
+
+__all__ = [name for name in globals() if not name.startswith("_")]

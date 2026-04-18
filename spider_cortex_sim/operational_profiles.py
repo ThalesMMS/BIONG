@@ -6,8 +6,9 @@ from typing import Mapping
 
 
 OPTIONAL_PERCEPTION_DEFAULTS: dict[str, float] = {
-    "fov_half_angle": 60.0,
-    "peripheral_half_angle": 90.0,
+    "fov_half_angle": 45.0,
+    "peripheral_half_angle": 70.0,
+    "max_scan_age": 10.0,
     "peripheral_certainty_penalty": 0.35,
     "perceptual_delay_ticks": 1.0,
     "perceptual_delay_noise": 0.5,
@@ -290,8 +291,9 @@ DEFAULT_OPERATIONAL_PROFILE = OperationalProfile(
         "predator_motion_bonus": 0.10,
         "percept_trace_ttl": 4.0,
         "percept_trace_decay": 0.65,
-        "fov_half_angle": 60.0,
-        "peripheral_half_angle": 90.0,
+        "fov_half_angle": 45.0,
+        "peripheral_half_angle": 70.0,
+        "max_scan_age": 10.0,
         "peripheral_certainty_penalty": 0.35,
         "perceptual_delay_ticks": 1.0,
         "perceptual_delay_noise": 0.5,
@@ -358,3 +360,19 @@ def resolve_operational_profile(
         raise ValueError(
             f"Invalid operational profile: {profile!r}. Available: {available}"
         ) from exc
+
+
+def runtime_operational_profile(
+    profile: str | OperationalProfile | None,
+) -> OperationalProfile:
+    """
+    Resolve a profile for mutable runtime use.
+
+    Registered profiles are copied so per-world or per-brain tuning does not
+    mutate global defaults. Explicit ``OperationalProfile`` instances are passed
+    through unchanged so callers can deliberately share a custom profile object.
+    """
+    resolved = resolve_operational_profile(profile)
+    if isinstance(profile, OperationalProfile):
+        return resolved
+    return OperationalProfile.from_summary(resolved.to_summary())

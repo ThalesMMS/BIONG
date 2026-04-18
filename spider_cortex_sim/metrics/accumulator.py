@@ -1,145 +1,97 @@
+"""Episode metric accumulation and representation-specialization helpers."""
+
 from __future__ import annotations
 
-from collections import Counter
+import math
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from statistics import mean
-from typing import Any, Callable, Dict, List, Sequence
+from typing import Dict, List, Sequence
 
-from .ablations import PROPOSAL_SOURCE_NAMES, REFLEX_MODULE_NAMES
+from ..ablations import PROPOSAL_SOURCE_NAMES, REFLEX_MODULE_NAMES
+from .types import (
+    EpisodeStats,
+    PREDATOR_RESPONSE_END_THRESHOLD,
+    PREDATOR_TYPE_NAMES,
+    PRIMARY_REPRESENTATION_READOUT_MODULES,
+    PROPOSER_REPRESENTATION_LOGIT_FIELD,
+    SHELTER_ROLES,
+)
 
-SHELTER_ROLES: Sequence[str] = ("outside", "entrance", "inside", "deep")
-PREDATOR_TYPE_NAMES: Sequence[str] = ("visual", "olfactory")
-# Threats at or below this level are treated as resolved for predator-response timing.
-PREDATOR_RESPONSE_END_THRESHOLD: float = 0.05
-COMPETENCE_LABELS: Sequence[str] = ("self_sufficient", "scaffolded", "mixed")
-
-
-def normalize_competence_label(label: str) -> str:
+def _clamp_unit_interval(value: float) -> float:
     """
-    Validate and normalize a competence label to one of the allowed competence categories.
-    
-    Converts the input to a string and verifies it is one of COMPETENCE_LABELS; if not, raises ValueError listing the available labels.
-    
-    Parameters:
-        label (str): The competence label to validate.
+    Clamp a numeric value to the closed interval [0.0, 1.0].
     
     Returns:
-        str: The normalized competence label (one of COMPETENCE_LABELS).
+        float: The input coerced to float and clamped to the range 0.0 through 1.0.
+    """
+    return float(max(0.0, min(1.0, float(value))))
+
+
+def _softmax_probabilities(logits: Sequence[float]) -> List[float]:
+    """Convert logits into a probability distribution with a stable softmax."""
+    values = [float(value) for value in logits]
+    if not values:
+        return []
+    max_logit = max(values)
+    exp_values = [math.exp(value - max_logit) for value in values]
+    total = sum(exp_values)
+    if total <= 0.0:
+        return [0.0 for _ in values]
+    return [float(value / total) for value in exp_values]
+
+
+def jensen_shannon_divergence(
+    left: Sequence[float],
+    right: Sequence[float],
+) -> float:
+    """
+    Compute the base-2 Jensen-Shannon divergence between two numeric vectors.
+    
+    Inputs may be raw counts or already-normalized probabilities; each input must be a sequence of non-negative numbers of equal length. The inputs are normalized to probability distributions before computing the divergence. If either input is empty or sums to a value <= 0.0, the function returns 0.0.
+    
+    Parameters:
+        left: Sequence[float] — Non-negative numeric values for the first distribution.
+        right: Sequence[float] — Non-negative numeric values for the second distribution (must have the same length as `left`).
+    
+    Returns:
+        float: Divergence clamped to the interval [0.0, 1.0]; `0.0` when distributions are identical, `1.0` when they are maximally different on the shared support.
     
     Raises:
-        ValueError: If the normalized label is not one of the allowed COMPETENCE_LABELS.
+        ValueError: If the sequences have different lengths or contain negative values.
     """
-    normalized = str(label)
-    if normalized not in COMPETENCE_LABELS:
-        available = ", ".join(repr(item) for item in COMPETENCE_LABELS)
-        raise ValueError(f"Invalid competence_label. Available labels: {available}.")
-    return normalized
+    left_values = [float(value) for value in left]
+    right_values = [float(value) for value in right]
+    if len(left_values) != len(right_values):
+        raise ValueError("Probability distributions must have the same length.")
+    if any(value < 0.0 for value in left_values + right_values):
+        raise ValueError("Probability distributions cannot contain negative values.")
+    if not left_values:
+        return 0.0
+    left_total = sum(left_values)
+    right_total = sum(right_values)
+    if left_total <= 0.0 or right_total <= 0.0:
+        return 0.0
+    left_probs = [value / left_total for value in left_values]
+    right_probs = [value / right_total for value in right_values]
+    midpoint = [
+        0.5 * (left_value + right_value)
+        for left_value, right_value in zip(left_probs, right_probs, strict=True)
+    ]
 
+    def _kl_divergence(source: Sequence[float], target: Sequence[float]) -> float:
+        total = 0.0
+        for source_value, target_value in zip(source, target, strict=True):
+            if source_value <= 0.0 or target_value <= 0.0:
+                continue
+            total += source_value * math.log2(source_value / target_value)
+        return float(total)
 
-def competence_label_from_eval_reflex_scale(
-    eval_reflex_scale: float | None,
-) -> str:
-    """
-    Map an evaluation reflex scale to one of the competence labels.
-    
-    Parameters:
-        eval_reflex_scale (float | None): Optional numeric scale indicating evaluation reflex strength.
-    
-    Returns:
-        str: `"mixed"` if `eval_reflex_scale` is `None`, `"self_sufficient"` if the value equals `0.0`, otherwise `"scaffolded"`.
-    """
-    if eval_reflex_scale is None:
-        return "mixed"
-    return "self_sufficient" if float(eval_reflex_scale) == 0.0 else "scaffolded"
-
-
-@dataclass(frozen=True)
-class BehaviorCheckSpec:
-    name: str
-    description: str
-    expected: str
-
-
-@dataclass(frozen=True)
-class BehaviorCheckResult:
-    name: str
-    description: str
-    expected: str
-    passed: bool
-    value: Any
-
-
-@dataclass
-class BehavioralEpisodeScore:
-    episode: int
-    seed: int
-    scenario: str
-    objective: str
-    success: bool
-    checks: Dict[str, BehaviorCheckResult]
-    behavior_metrics: Dict[str, Any]
-    failures: List[str]
-
-
-@dataclass
-class EpisodeStats:
-    episode: int
-    seed: int
-    training: bool
-    scenario: str | None
-    total_reward: float
-    steps: int
-    food_eaten: int
-    sleep_events: int
-    shelter_entries: int
-    alert_events: int
-    predator_contacts: int
-    predator_sightings: int
-    predator_escapes: int
-    night_ticks: int
-    night_shelter_ticks: int
-    night_still_ticks: int
-    night_role_ticks: Dict[str, int]
-    night_shelter_occupancy_rate: float
-    night_stillness_rate: float
-    night_role_distribution: Dict[str, float]
-    predator_response_events: int
-    mean_predator_response_latency: float
-    mean_sleep_debt: float
-    food_distance_delta: float
-    shelter_distance_delta: float
-    final_hunger: float
-    final_fatigue: float
-    final_sleep_debt: float
-    final_health: float
-    alive: bool
-    reward_component_totals: Dict[str, float]
-    predator_state_ticks: Dict[str, int]
-    predator_mode_transitions: int
-    dominant_predator_state: str
-    predator_contacts_by_type: Dict[str, int] = field(default_factory=dict)
-    predator_escapes_by_type: Dict[str, int] = field(default_factory=dict)
-    predator_response_latency_by_type: Dict[str, float] = field(default_factory=dict)
-    module_response_by_predator_type: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    reflex_usage_rate: float = 0.0
-    final_reflex_override_rate: float = 0.0
-    mean_reflex_dominance: float = 0.0
-    module_reflex_usage_rates: Dict[str, float] = field(default_factory=dict)
-    module_reflex_override_rates: Dict[str, float] = field(default_factory=dict)
-    module_reflex_dominance: Dict[str, float] = field(default_factory=dict)
-    module_contribution_share: Dict[str, float] = field(default_factory=dict)
-    dominant_module: str = ""
-    dominant_module_share: float = 0.0
-    effective_module_count: float = 0.0
-    module_agreement_rate: float = 0.0
-    module_disagreement_rate: float = 0.0
-    mean_module_credit_weights: Dict[str, float] = field(default_factory=dict)
-    module_gradient_norm_means: Dict[str, float] = field(default_factory=dict)
-    motor_slip_rate: float = 0.0
-    mean_orientation_alignment: float = 0.0
-    mean_terrain_difficulty: float = 0.0
-    terrain_slip_rates: Dict[str, float] = field(default_factory=dict)
+    divergence = 0.5 * _kl_divergence(left_probs, midpoint) + 0.5 * _kl_divergence(
+        right_probs,
+        midpoint,
+    )
+    return _clamp_unit_interval(divergence)
 
 
 @dataclass
@@ -172,8 +124,33 @@ class EpisodeMetricAccumulator:
     module_reflex_dominance_sums: Dict[str, float] = field(default_factory=dict)
     module_contribution_share_sums: Dict[str, float] = field(default_factory=dict)
     module_response_by_predator_type_counts: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    proposer_logits_by_predator_type: Dict[str, Dict[str, List[float]]] = field(
+        default_factory=dict
+    )
+    proposer_probs_by_predator_type: Dict[str, Dict[str, List[float]]] = field(
+        default_factory=dict
+    )
+    proposer_steps_by_predator_type: Dict[str, Dict[str, int]] = field(
+        default_factory=dict
+    )
+    action_center_gate_sums_by_predator_type: Dict[str, Dict[str, float]] = field(
+        default_factory=dict
+    )
+    action_center_gate_counts_by_predator_type: Dict[str, Dict[str, int]] = field(
+        default_factory=dict
+    )
+    action_center_contribution_sums_by_predator_type: Dict[str, Dict[str, float]] = field(
+        default_factory=dict
+    )
+    action_center_contribution_counts_by_predator_type: Dict[str, Dict[str, int]] = field(
+        default_factory=dict
+    )
     dominant_module_counts: Dict[str, int] = field(default_factory=dict)
     current_dominant_module: str = ""
+    current_proposer_post_reflex_logits: Dict[str, List[float]] = field(default_factory=dict)
+    current_proposer_probs: Dict[str, List[float]] = field(default_factory=dict)
+    current_action_center_gates: Dict[str, float] = field(default_factory=dict)
+    current_action_center_contribution_share: Dict[str, float] = field(default_factory=dict)
     dominant_module_share_sum: float = 0.0
     effective_module_count_sum: float = 0.0
     module_agreement_rate_sum: float = 0.0
@@ -220,6 +197,25 @@ class EpisodeMetricAccumulator:
                 predator_type,
                 {name: 0 for name in PROPOSAL_SOURCE_NAMES},
             )
+            self.proposer_logits_by_predator_type.setdefault(predator_type, {})
+            self.proposer_probs_by_predator_type.setdefault(predator_type, {})
+            self.proposer_steps_by_predator_type.setdefault(predator_type, {})
+            self.action_center_gate_sums_by_predator_type.setdefault(
+                predator_type,
+                {name: 0.0 for name in PROPOSAL_SOURCE_NAMES},
+            )
+            self.action_center_gate_counts_by_predator_type.setdefault(
+                predator_type,
+                {name: 0 for name in PROPOSAL_SOURCE_NAMES},
+            )
+            self.action_center_contribution_sums_by_predator_type.setdefault(
+                predator_type,
+                {name: 0.0 for name in PROPOSAL_SOURCE_NAMES},
+            )
+            self.action_center_contribution_counts_by_predator_type.setdefault(
+                predator_type,
+                {name: 0 for name in PROPOSAL_SOURCE_NAMES},
+            )
         for name in REFLEX_MODULE_NAMES:
             self.module_reflex_usage_steps.setdefault(name, 0)
             self.module_reflex_override_steps.setdefault(name, 0)
@@ -234,6 +230,117 @@ class EpisodeMetricAccumulator:
                     name,
                     0,
                 )
+                self.proposer_steps_by_predator_type[predator_type].setdefault(name, 0)
+                self.action_center_gate_sums_by_predator_type[predator_type].setdefault(
+                    name,
+                    0.0,
+                )
+                self.action_center_gate_counts_by_predator_type[predator_type].setdefault(
+                    name,
+                    0,
+                )
+                self.action_center_contribution_sums_by_predator_type[predator_type].setdefault(
+                    name,
+                    0.0,
+                )
+                self.action_center_contribution_counts_by_predator_type[predator_type].setdefault(
+                    name,
+                    0,
+                )
+
+    @staticmethod
+    def _coerce_vector(values: object) -> List[float]:
+        """Best-effort conversion of an array-like object into a float list."""
+        if values is None:
+            return []
+        try:
+            return [float(value) for value in values]
+        except (TypeError, ValueError):
+            return []
+
+    @staticmethod
+    def _accumulate_vector_sum(
+        target: Dict[str, List[float]],
+        *,
+        name: str,
+        values: Sequence[float],
+    ) -> None:
+        """Accumulate a vector into a named running sum."""
+        vector = [float(value) for value in values]
+        if not vector:
+            return
+        existing = target.get(name)
+        if existing is None or len(existing) != len(vector):
+            target[name] = [0.0 for _ in vector]
+            existing = target[name]
+        for index, value in enumerate(vector):
+            existing[index] += value
+
+    def _clear_current_representation_readouts(self) -> None:
+        """Drop cached per-step representation readouts after transition accounting."""
+        self.current_proposer_post_reflex_logits = {}
+        self.current_proposer_probs = {}
+        self.current_action_center_gates = {}
+        self.current_action_center_contribution_share = {}
+
+    def _record_representation_readouts_for_type(self, predator_type: str) -> None:
+        """Accumulate proposer and action-center readouts for one predator type."""
+        proposer_logit_sums = self.proposer_logits_by_predator_type.setdefault(
+            predator_type,
+            {},
+        )
+        proposer_prob_sums = self.proposer_probs_by_predator_type.setdefault(
+            predator_type,
+            {},
+        )
+        proposer_counts = self.proposer_steps_by_predator_type.setdefault(
+            predator_type,
+            {},
+        )
+        for module_name, logits in self.current_proposer_post_reflex_logits.items():
+            probabilities = self.current_proposer_probs.get(
+                module_name,
+                _softmax_probabilities(logits),
+            )
+            self._accumulate_vector_sum(
+                proposer_logit_sums,
+                name=module_name,
+                values=logits,
+            )
+            self._accumulate_vector_sum(
+                proposer_prob_sums,
+                name=module_name,
+                values=probabilities,
+            )
+            proposer_counts[module_name] = int(proposer_counts.get(module_name, 0)) + 1
+
+        gate_sums = self.action_center_gate_sums_by_predator_type.setdefault(
+            predator_type,
+            {},
+        )
+        gate_counts = self.action_center_gate_counts_by_predator_type.setdefault(
+            predator_type,
+            {},
+        )
+        for module_name, value in self.current_action_center_gates.items():
+            gate_sums[module_name] = float(gate_sums.get(module_name, 0.0) + float(value))
+            gate_counts[module_name] = int(gate_counts.get(module_name, 0)) + 1
+
+        contribution_sums = self.action_center_contribution_sums_by_predator_type.setdefault(
+            predator_type,
+            {},
+        )
+        contribution_counts = self.action_center_contribution_counts_by_predator_type.setdefault(
+            predator_type,
+            {},
+        )
+        for module_name, value in self.current_action_center_contribution_share.items():
+            contribution_sums[module_name] = float(
+                contribution_sums.get(module_name, 0.0) + float(value)
+            )
+            contribution_counts[module_name] = int(
+                contribution_counts.get(module_name, 0) + 1
+            )
 
     def record_decision(self, decision: object) -> None:
         """
@@ -248,9 +355,22 @@ class EpisodeMetricAccumulator:
         """
         self.decision_steps += 1
         module_results = list(getattr(decision, "module_results", []))
+        self.current_proposer_post_reflex_logits = {}
+        self.current_proposer_probs = {}
         any_reflex = False
         for result in module_results:
             module_name = str(getattr(result, "name", ""))
+            if module_name:
+                post_reflex_logits = self._coerce_vector(
+                    getattr(result, PROPOSER_REPRESENTATION_LOGIT_FIELD, None)
+                )
+                if post_reflex_logits:
+                    self.current_proposer_post_reflex_logits[module_name] = (
+                        post_reflex_logits
+                    )
+                    self.current_proposer_probs[module_name] = _softmax_probabilities(
+                        post_reflex_logits
+                    )
             if module_name not in self.module_reflex_usage_steps:
                 continue
             reflex_applied = bool(getattr(result, "reflex_applied", False))
@@ -267,11 +387,23 @@ class EpisodeMetricAccumulator:
         if bool(getattr(decision, "final_reflex_override", False)):
             self.final_reflex_override_steps += 1
         arbitration = getattr(decision, "arbitration_decision", None)
+        self.current_action_center_gates = {}
+        self.current_action_center_contribution_share = {}
         if arbitration is None:
             self.current_dominant_module = ""
             return
+        module_gates = getattr(arbitration, "module_gates", {})
+        if isinstance(module_gates, Mapping):
+            self.current_action_center_gates = {
+                str(module_name): float(value)
+                for module_name, value in module_gates.items()
+            }
         contribution_share = getattr(arbitration, "module_contribution_share", {})
-        if isinstance(contribution_share, dict):
+        if isinstance(contribution_share, Mapping):
+            self.current_action_center_contribution_share = {
+                str(module_name): float(value)
+                for module_name, value in contribution_share.items()
+            }
             for module_name in self.module_contribution_share_sums:
                 self.module_contribution_share_sums[module_name] += float(
                     contribution_share.get(module_name, 0.0)
@@ -386,6 +518,15 @@ class EpisodeMetricAccumulator:
             self.initial_shelter_dist = int(observation_meta["shelter_dist"])
         self.final_food_dist = int(next_meta["food_dist"])
         self.final_shelter_dist = int(next_meta["shelter_dist"])
+        representation_predator_type = _dominant_predator_type(observation_meta)
+        representation_threat = _predator_type_threat(
+            observation_meta,
+            representation_predator_type,
+        )
+        if representation_predator_type and (
+            representation_threat > 0.0 or bool(info.get("predator_contact"))
+        ):
+            self._record_representation_readouts_for_type(representation_predator_type)
         dominant_predator_type = _dominant_predator_type(next_meta)
         if dominant_predator_type and self.current_dominant_module in PROPOSAL_SOURCE_NAMES:
             threat_before = _predator_type_threat(observation_meta, dominant_predator_type)
@@ -489,6 +630,7 @@ class EpisodeMetricAccumulator:
             )
             if escape_type:
                 self.predator_escapes_by_type[escape_type] += 1
+        self._clear_current_representation_readouts()
 
     def snapshot(self) -> Dict[str, object]:
         """
@@ -520,7 +662,7 @@ class EpisodeMetricAccumulator:
         )
         dominant_predator_state = (
             max(self.predator_state_ticks, key=self.predator_state_ticks.get)
-            if self.predator_state_ticks
+            if any(count > 0 for count in self.predator_state_ticks.values())
             else "PATROL"
         )
         decision_total = max(1, int(self.decision_steps))
@@ -555,7 +697,7 @@ class EpisodeMetricAccumulator:
         }
         dominant_module = (
             max(self.dominant_module_counts, key=self.dominant_module_counts.get)
-            if self.dominant_module_counts
+            if any(count > 0 for count in self.dominant_module_counts.values())
             else ""
         )
         terrain_slip_rates = {
@@ -580,6 +722,107 @@ class EpisodeMetricAccumulator:
             )
             for predator_type in PREDATOR_TYPE_NAMES
         }
+        mean_proposer_probs_by_predator_type: Dict[str, Dict[str, List[float]]] = {}
+        for predator_type in PREDATOR_TYPE_NAMES:
+            module_probs: Dict[str, List[float]] = {}
+            prob_sums = self.proposer_probs_by_predator_type.get(predator_type, {})
+            counts = self.proposer_steps_by_predator_type.get(predator_type, {})
+            for module_name, summed_probs in prob_sums.items():
+                step_count = int(counts.get(module_name, 0))
+                if step_count <= 0:
+                    continue
+                module_probs[str(module_name)] = [
+                    float(value / step_count) for value in summed_probs
+                ]
+            if module_probs:
+                mean_proposer_probs_by_predator_type[predator_type] = module_probs
+
+        proposer_divergence_by_module: Dict[str, float] = {}
+        visual_probs_by_module = mean_proposer_probs_by_predator_type.get("visual", {})
+        olfactory_probs_by_module = mean_proposer_probs_by_predator_type.get(
+            "olfactory",
+            {},
+        )
+        if visual_probs_by_module and olfactory_probs_by_module:
+            for module_name in PRIMARY_REPRESENTATION_READOUT_MODULES:
+                visual_probs = visual_probs_by_module.get(module_name)
+                olfactory_probs = olfactory_probs_by_module.get(module_name)
+                if visual_probs and olfactory_probs:
+                    proposer_divergence_by_module[module_name] = (
+                        jensen_shannon_divergence(
+                            visual_probs,
+                            olfactory_probs,
+                        )
+                    )
+                else:
+                    proposer_divergence_by_module[module_name] = 0.0
+
+        action_center_gate_differential: Dict[str, float] = {}
+        action_center_contribution_differential: Dict[str, float] = {}
+        visual_gate_counts = self.action_center_gate_counts_by_predator_type.get(
+            "visual",
+            {},
+        )
+        olfactory_gate_counts = self.action_center_gate_counts_by_predator_type.get(
+            "olfactory",
+            {},
+        )
+        visual_contribution_counts = self.action_center_contribution_counts_by_predator_type.get(
+            "visual",
+            {},
+        )
+        olfactory_contribution_counts = self.action_center_contribution_counts_by_predator_type.get(
+            "olfactory",
+            {},
+        )
+        for module_name in PROPOSAL_SOURCE_NAMES:
+            visual_gate_count = int(visual_gate_counts.get(module_name, 0))
+            olfactory_gate_count = int(olfactory_gate_counts.get(module_name, 0))
+            if visual_gate_count > 0 and olfactory_gate_count > 0:
+                visual_mean_gate = (
+                    self.action_center_gate_sums_by_predator_type["visual"].get(
+                        module_name,
+                        0.0,
+                    )
+                    / visual_gate_count
+                )
+                olfactory_mean_gate = (
+                    self.action_center_gate_sums_by_predator_type["olfactory"].get(
+                        module_name,
+                        0.0,
+                    )
+                    / olfactory_gate_count
+                )
+                action_center_gate_differential[module_name] = float(
+                    visual_mean_gate - olfactory_mean_gate
+                )
+            visual_contribution_count = int(visual_contribution_counts.get(module_name, 0))
+            olfactory_contribution_count = int(
+                olfactory_contribution_counts.get(module_name, 0)
+            )
+            if visual_contribution_count > 0 and olfactory_contribution_count > 0:
+                visual_mean_contribution = (
+                    self.action_center_contribution_sums_by_predator_type["visual"].get(
+                        module_name,
+                        0.0,
+                    )
+                    / visual_contribution_count
+                )
+                olfactory_mean_contribution = (
+                    self.action_center_contribution_sums_by_predator_type["olfactory"].get(
+                        module_name,
+                        0.0,
+                    )
+                    / olfactory_contribution_count
+                )
+                action_center_contribution_differential[module_name] = float(
+                    visual_mean_contribution - olfactory_mean_contribution
+                )
+        representation_specialization_score = _clamp_unit_interval(
+            mean(proposer_divergence_by_module.values())
+            if proposer_divergence_by_module
+            else 0.0
+        )
         return {
             "night_ticks": int(self.night_ticks),
             "night_shelter_ticks": int(self.night_shelter_ticks),
@@ -606,6 +849,13 @@ class EpisodeMetricAccumulator:
             },
             "predator_response_latency_by_type": predator_response_latency_by_type,
             "module_response_by_predator_type": module_response_by_predator_type,
+            "proposer_divergence_by_module": proposer_divergence_by_module,
+            "action_center_gate_differential": action_center_gate_differential,
+            "action_center_contribution_differential": (
+                action_center_contribution_differential
+            ),
+            "representation_specialization_score": representation_specialization_score,
+            "mean_proposer_probs_by_predator_type": mean_proposer_probs_by_predator_type,
             "food_distance_delta": float(
                 (self.initial_food_dist or 0) - (self.final_food_dist or 0)
             ),
@@ -776,6 +1026,35 @@ class EpisodeMetricAccumulator:
                 }
                 for predator_type in PREDATOR_TYPE_NAMES
             },
+            proposer_divergence_by_module={
+                str(name): float(value)
+                for name, value in snapshot["proposer_divergence_by_module"].items()
+            },
+            action_center_gate_differential={
+                str(name): float(value)
+                for name, value in snapshot["action_center_gate_differential"].items()
+            },
+            action_center_contribution_differential={
+                str(name): float(value)
+                for name, value in snapshot[
+                    "action_center_contribution_differential"
+                ].items()
+            },
+            representation_specialization_score=float(
+                snapshot["representation_specialization_score"]
+            ),
+            mean_proposer_probs_by_predator_type={
+                predator_type: {
+                    str(module_name): [float(value) for value in probs]
+                    for module_name, probs in (
+                        snapshot["mean_proposer_probs_by_predator_type"]
+                        .get(predator_type, {})
+                        .items()
+                    )
+                }
+                for predator_type in PREDATOR_TYPE_NAMES
+                if snapshot["mean_proposer_probs_by_predator_type"].get(predator_type)
+            },
             reflex_usage_rate=float(snapshot["reflex_usage_rate"]),
             final_reflex_override_rate=float(snapshot["final_reflex_override_rate"]),
             mean_reflex_dominance=float(snapshot["mean_reflex_dominance"]),
@@ -912,7 +1191,16 @@ def _diagnostic_predator_distance(meta: Mapping[str, object]) -> int:
     diagnostic = meta.get("diagnostic", {})
     if not isinstance(diagnostic, Mapping):
         return 0
-    return int(float(diagnostic.get("diagnostic_predator_dist", 0) or 0))
+    value = diagnostic.get("diagnostic_predator_dist", 0)
+    if value in (None, ""):
+        return 0
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(numeric_value):
+        return 0
+    return int(numeric_value)
 
 
 def _diagnostic_predator_distance_for_type(
@@ -965,26 +1253,36 @@ def _first_active_predator_type(active: Mapping[str, object]) -> str:
     return ""
 
 
+def _coerce_grid_coordinate(value: object) -> int | None:
+    """Return an integer grid coordinate, or None when the value is malformed."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _contact_predator_types(
     meta: Mapping[str, object],
     *,
     state: object,
 ) -> list[str]:
     """
-    Determine which predator type(s) are in contact with the agent at its current grid coordinates.
+    Identify predator detection styles present at the agent's integer grid location.
+    
+    Scans meta["predators"] for predators whose integer (x, y) coordinates match the agent state's x and y and returns the unique detection-style labels (normalized to lowercase) that are members of PREDATOR_TYPE_NAMES. If the state does not expose x/y, or no predators occupy the agent's cell, falls back to the dominant predator type from meta; returns a single-element list with that type when available, otherwise returns an empty list.
     
     Parameters:
-        meta (Mapping[str, object]): Metadata that may contain a "predators" list of mappings, and fields used by the dominant-predator heuristic.
-        state (object): Agent state object expected to expose numeric attributes `x` and `y` for current grid coordinates.
+        meta (Mapping[str, object]): Metadata potentially containing a "predators" list and fields used to determine the dominant predator type.
+        state (object): Agent state expected to expose numeric attributes `x` and `y`.
     
     Returns:
-        list[str]: A list of predator type labels (from PREDATOR_TYPE_NAMES) whose predators occupy the same integer grid cell as the agent.
-                   If no predators are found at the agent's coordinates, returns a single-element list containing the dominant predator type when available;
-                   returns an empty list if no dominant type can be determined.
+        list[str]: List of predator type labels present at the agent's integer grid cell, or a single-element list containing the dominant predator type, or an empty list if no type can be determined.
     """
     spider_x = getattr(state, "x", None)
     spider_y = getattr(state, "y", None)
-    if spider_x is None or spider_y is None:
+    spider_grid_x = _coerce_grid_coordinate(spider_x)
+    spider_grid_y = _coerce_grid_coordinate(spider_y)
+    if spider_grid_x is None or spider_grid_y is None:
         dominant_type = _dominant_predator_type(meta)
         return [dominant_type] if dominant_type else []
     contact_types: list[str] = []
@@ -993,7 +1291,11 @@ def _contact_predator_types(
         for predator in predators:
             if not isinstance(predator, Mapping):
                 continue
-            if int(predator.get("x", -1)) != int(spider_x) or int(predator.get("y", -1)) != int(spider_y):
+            predator_x = _coerce_grid_coordinate(predator.get("x"))
+            predator_y = _coerce_grid_coordinate(predator.get("y"))
+            if predator_x is None or predator_y is None:
+                continue
+            if predator_x != spider_grid_x or predator_y != spider_grid_y:
                 continue
             profile = predator.get("profile", {})
             if not isinstance(profile, Mapping):
@@ -1005,656 +1307,3 @@ def _contact_predator_types(
         return contact_types
     dominant_type = _dominant_predator_type(meta)
     return [dominant_type] if dominant_type else []
-
-
-def _mean_map(
-    history: List[EpisodeStats],
-    names: Sequence[str],
-    getter: "Callable[[EpisodeStats, str], float]",
-) -> Dict[str, float]:
-    """
-    Compute per-name means over a history of EpisodeStats using a caller-supplied getter.
-
-    Parameters:
-        history: Episodes to aggregate over.
-        names: Keys to include in the result.
-        getter: Function receiving (stats, name) and returning a float value for that name.
-
-    Returns:
-        Dict mapping each name to its mean across history, or 0.0 when history is empty.
-    """
-    if not history:
-        return {name: 0.0 for name in names}
-    return {name: mean(getter(stats, name) for stats in history) for name in names}
-
-
-def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
-    """
-    Aggregate suite-level statistics from a sequence of EpisodeStats.
-    
-    Returns:
-        dict: Mapping of aggregate metrics computed across the provided episodes. Keys include:
-            - counts: "episodes"
-            - overall means: "mean_reward", "mean_food", "mean_sleep", survival and event means
-            - predator metrics: aggregate contacts, escapes, response event counts and latencies (including per-type)
-            - night metrics: mean occupancy/stillness rates, per-role ticks and distributions
-            - per-reward-component means ("mean_reward_components")
-            - predator-state summaries: mean ticks, occupancy rates, mode transitions, and dominant state
-            - reflex and module metrics: overall and per-module usage/override/dominance rates, contribution shares,
-              mean module response distributions by predator type, dominant-module stats, credit-weight and gradient means
-            - motor/terrain metrics: motor slip rate, orientation alignment, terrain difficulty, per-terrain slip rates
-            - distance/sleep deltas and mean sleep debt
-            - "episodes_detail": list of per-episode dicts produced by asdict(stats)
-    """
-    reward_component_names = (
-        list(history[0].reward_component_totals.keys())
-        if history
-        else []
-    )
-    predator_states = (
-        list(history[0].predator_state_ticks.keys())
-        if history
-        else []
-    )
-    reward_component_means = _mean_map(
-        history, reward_component_names,
-        lambda s, n: s.reward_component_totals[n],
-    )
-    predator_state_means = _mean_map(
-        history, predator_states,
-        lambda s, n: s.predator_state_ticks[n],
-    )
-    night_role_tick_means = _mean_map(
-        history, SHELTER_ROLES,
-        lambda s, n: s.night_role_ticks[n],
-    )
-    night_role_distribution = _mean_map(
-        history, SHELTER_ROLES,
-        lambda s, n: s.night_role_distribution[n],
-    )
-    steps_mean = mean(stats.steps for stats in history) if history else 1.0
-    predator_state_rates = {
-        name: (predator_state_means[name] / steps_mean if steps_mean else 0.0)
-        for name in predator_state_means
-    }
-    module_reflex_usage_rate_means = _mean_map(
-        history, REFLEX_MODULE_NAMES,
-        lambda s, n: s.module_reflex_usage_rates.get(n, 0.0),
-    )
-    module_reflex_override_rate_means = _mean_map(
-        history, REFLEX_MODULE_NAMES,
-        lambda s, n: s.module_reflex_override_rates.get(n, 0.0),
-    )
-    module_reflex_dominance_means = _mean_map(
-        history, REFLEX_MODULE_NAMES,
-        lambda s, n: s.module_reflex_dominance.get(n, 0.0),
-    )
-    module_contribution_share_means = _mean_map(
-        history, PROPOSAL_SOURCE_NAMES,
-        lambda s, n: s.module_contribution_share.get(n, 0.0),
-    )
-    def _extra_module_names(attr: str) -> List[str]:
-        return sorted(
-            {name for stats in history for name in getattr(stats, attr) if name not in PROPOSAL_SOURCE_NAMES}
-        )
-
-    module_credit_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names("mean_module_credit_weights") if history else [])
-    module_gradient_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names("module_gradient_norm_means") if history else [])
-    module_credit_weight_means = _mean_map(
-        history, module_credit_names,
-        lambda s, n: s.mean_module_credit_weights.get(n, 0.0),
-    )
-    module_gradient_norm_means = _mean_map(
-        history, module_gradient_names,
-        lambda s, n: s.module_gradient_norm_means.get(n, 0.0),
-    )
-    terrain_slip_names = sorted(
-        {
-            terrain
-            for stats in history
-            for terrain in stats.terrain_slip_rates
-        }
-    )
-    terrain_slip_rate_means = _mean_map(
-        history, terrain_slip_names,
-        lambda s, n: s.terrain_slip_rates.get(n, 0.0),
-    )
-    predator_type_names = sorted(
-        {
-            *PREDATOR_TYPE_NAMES,
-            *(
-                predator_type
-                for stats in history
-                for predator_type in (
-                    set(stats.predator_contacts_by_type)
-                    | set(stats.predator_escapes_by_type)
-                    | set(stats.predator_response_latency_by_type)
-                    | set(stats.module_response_by_predator_type)
-                )
-            ),
-        }
-    )
-    mean_predator_contacts_by_type = _mean_map(
-        history, predator_type_names,
-        lambda s, n: s.predator_contacts_by_type.get(n, 0),
-    )
-    mean_predator_escapes_by_type = _mean_map(
-        history, predator_type_names,
-        lambda s, n: s.predator_escapes_by_type.get(n, 0),
-    )
-    mean_predator_response_latency_by_type = _mean_map(
-        history, predator_type_names,
-        lambda s, n: s.predator_response_latency_by_type.get(n, 0.0),
-    )
-    mean_module_response_by_predator_type = {
-        pt: _mean_map(
-            history,
-            PROPOSAL_SOURCE_NAMES,
-            lambda s, n, _pt=pt: s.module_response_by_predator_type.get(_pt, {}).get(n, 0.0),
-        )
-        for pt in predator_type_names
-    }
-    dominant_module_counter = Counter(
-        stats.dominant_module
-        for stats in history
-        if stats.dominant_module in PROPOSAL_SOURCE_NAMES
-    )
-    dominant_module_distribution = {
-        name: (
-            float(dominant_module_counter.get(name, 0) / len(history))
-            if history
-            else 0.0
-        )
-        for name in PROPOSAL_SOURCE_NAMES
-    }
-    dominant_module = (
-        max(dominant_module_counter, key=dominant_module_counter.get)
-        if dominant_module_counter
-        else ""
-    )
-    dominant_predator_state = (
-        max(predator_state_means, key=predator_state_means.get)
-        if predator_state_means
-        else "PATROL"
-    )
-    return {
-        "episodes": len(history),
-        "mean_reward": mean(stats.total_reward for stats in history) if history else 0.0,
-        "mean_food": mean(stats.food_eaten for stats in history) if history else 0.0,
-        "mean_sleep": mean(stats.sleep_events for stats in history) if history else 0.0,
-        "mean_predator_contacts": (
-            mean(stats.predator_contacts for stats in history) if history else 0.0
-        ),
-        "mean_predator_contacts_by_type": mean_predator_contacts_by_type,
-        "mean_predator_escapes": (
-            mean(stats.predator_escapes for stats in history) if history else 0.0
-        ),
-        "mean_predator_escapes_by_type": mean_predator_escapes_by_type,
-        "mean_night_shelter_occupancy_rate": (
-            mean(stats.night_shelter_occupancy_rate for stats in history) if history else 0.0
-        ),
-        "mean_night_stillness_rate": (
-            mean(stats.night_stillness_rate for stats in history) if history else 0.0
-        ),
-        "mean_night_role_ticks": night_role_tick_means,
-        "mean_night_role_distribution": night_role_distribution,
-        "mean_predator_response_events": (
-            mean(stats.predator_response_events for stats in history) if history else 0.0
-        ),
-        "mean_predator_response_latency": (
-            mean(stats.mean_predator_response_latency for stats in history) if history else 0.0
-        ),
-        "mean_predator_response_latency_by_type": (
-            mean_predator_response_latency_by_type
-        ),
-        "mean_sleep_debt": mean(stats.mean_sleep_debt for stats in history) if history else 0.0,
-        "mean_food_distance_delta": (
-            mean(stats.food_distance_delta for stats in history) if history else 0.0
-        ),
-        "mean_shelter_distance_delta": (
-            mean(stats.shelter_distance_delta for stats in history) if history else 0.0
-        ),
-        "survival_rate": mean(1.0 if stats.alive else 0.0 for stats in history) if history else 0.0,
-        "mean_reward_components": reward_component_means,
-        "mean_predator_state_ticks": predator_state_means,
-        "mean_predator_state_occupancy": predator_state_rates,
-        "mean_predator_mode_transitions": (
-            mean(stats.predator_mode_transitions for stats in history) if history else 0.0
-        ),
-        "dominant_predator_state": dominant_predator_state,
-        "mean_reflex_usage_rate": (
-            mean(stats.reflex_usage_rate for stats in history) if history else 0.0
-        ),
-        "mean_final_reflex_override_rate": (
-            mean(stats.final_reflex_override_rate for stats in history) if history else 0.0
-        ),
-        "mean_reflex_dominance": (
-            mean(stats.mean_reflex_dominance for stats in history) if history else 0.0
-        ),
-        "mean_module_reflex_usage_rate": module_reflex_usage_rate_means,
-        "mean_module_reflex_override_rate": module_reflex_override_rate_means,
-        "mean_module_reflex_dominance": module_reflex_dominance_means,
-        "mean_module_contribution_share": module_contribution_share_means,
-        "mean_module_response_by_predator_type": mean_module_response_by_predator_type,
-        "mean_module_credit_weights": module_credit_weight_means,
-        "module_gradient_norm_means": module_gradient_norm_means,
-        "mean_motor_slip_rate": (
-            mean(stats.motor_slip_rate for stats in history) if history else 0.0
-        ),
-        "mean_orientation_alignment": (
-            mean(stats.mean_orientation_alignment for stats in history) if history else 0.0
-        ),
-        "mean_terrain_difficulty": (
-            mean(stats.mean_terrain_difficulty for stats in history) if history else 0.0
-        ),
-        "mean_terrain_slip_rates": terrain_slip_rate_means,
-        "dominant_module": dominant_module,
-        "dominant_module_distribution": dominant_module_distribution,
-        "mean_dominant_module_share": (
-            mean(stats.dominant_module_share for stats in history) if history else 0.0
-        ),
-        "mean_effective_module_count": (
-            mean(stats.effective_module_count for stats in history) if history else 0.0
-        ),
-        "mean_module_agreement_rate": (
-            mean(stats.module_agreement_rate for stats in history) if history else 0.0
-        ),
-        "mean_module_disagreement_rate": (
-            mean(stats.module_disagreement_rate for stats in history) if history else 0.0
-        ),
-        "episodes_detail": [asdict(stats) for stats in history],
-    }
-
-
-def build_behavior_check(spec: BehaviorCheckSpec, *, passed: bool, value: Any) -> BehaviorCheckResult:
-    """
-    Create a BehaviorCheckResult from a BehaviorCheckSpec and an observed outcome.
-    
-    Parameters:
-        spec (BehaviorCheckSpec): Specification of the check (name, description, expected outcome).
-        passed (bool): Whether the observed outcome satisfies the spec; will be stored as `bool`.
-        value (Any): Observed value associated with the check result.
-    
-    Returns:
-        BehaviorCheckResult: Result populated with `name`, `description`, and `expected` from `spec`,
-        and with `passed` coerced to `bool` and `value` set to the provided observation.
-    """
-    return BehaviorCheckResult(
-        name=spec.name,
-        description=spec.description,
-        expected=spec.expected,
-        passed=bool(passed),
-        value=value,
-    )
-
-
-def build_behavior_score(
-    *,
-    stats: EpisodeStats,
-    objective: str,
-    checks: Sequence[BehaviorCheckResult],
-    behavior_metrics: Mapping[str, Any],
-) -> BehavioralEpisodeScore:
-    """
-    Builds a BehavioralEpisodeScore for an episode from episode stats, check results, and behavior metrics.
-    
-    Parameters:
-        stats (EpisodeStats): Source of episode identifier, seed, and scenario (used for the score's episode/seed/scenario).
-        objective (str): The objective name associated with this behavior score.
-        checks (Sequence[BehaviorCheckResult]): Sequence of check results; they are indexed by `name` into the score's `checks` map.
-        behavior_metrics (Mapping[str, Any]): Arbitrary per-episode behavior metrics copied into the score.
-    
-    Returns:
-        BehavioralEpisodeScore: Score populated with:
-            - `episode` and `seed` from `stats`
-            - `scenario` from `stats.scenario` or `"default"` if falsy
-            - `objective` as provided
-            - `success` set to `true` if there are no failed checks, `false` otherwise
-            - `checks` as a mapping of check name → BehaviorCheckResult
-            - `behavior_metrics` as a plain dict copy of the provided mapping
-            - `failures` as a list of names for checks that did not pass
-    """
-    check_map = {
-        check.name: check
-        for check in checks
-    }
-    failures = [
-        name
-        for name, check in check_map.items()
-        if not check.passed
-    ]
-    return BehavioralEpisodeScore(
-        episode=stats.episode,
-        seed=stats.seed,
-        scenario=stats.scenario or "default",
-        objective=objective,
-        success=not failures,
-        checks=check_map,
-        behavior_metrics=dict(behavior_metrics),
-        failures=failures,
-    )
-
-
-def aggregate_behavior_scores(
-    scores: Sequence[BehavioralEpisodeScore],
-    *,
-    scenario: str,
-    description: str,
-    objective: str,
-    check_specs: Sequence[BehaviorCheckSpec],
-    diagnostic_focus: str | None = None,
-    success_interpretation: str | None = None,
-    failure_interpretation: str | None = None,
-    budget_note: str | None = None,
-    legacy_metrics: Mapping[str, Any] | None = None,
-) -> Dict[str, object]:
-    """
-    Aggregate episode-level behavioral scores into a scenario-level summary dictionary.
-    
-    Produces a mapping with per-check pass rates and mean values, aggregated behavior metrics (numeric mean or most-common), diagnostic summaries (primary outcome, outcome distribution, optional failure-mode diagnostics, partial progress and died-without-contact aggregates), the episode success rate, sorted unique failure names, per-episode detail records, and a plain-copy of any provided legacy metrics.
-    
-    Parameters:
-        scores (Sequence[BehavioralEpisodeScore]): Episode-level behavioral scores to aggregate.
-        scenario (str): Scenario identifier for the aggregation.
-        description (str): Human-readable description of the scenario.
-        objective (str): Objective name associated with the aggregated scores.
-        check_specs (Sequence[BehaviorCheckSpec]): Specifications for checks to include; used to supply each check's description and expected value.
-        diagnostic_focus (str | None): Optional diagnostic focus label to include in the output (empty string when None).
-        success_interpretation (str | None): Optional textual interpretation of success included in the output (empty string when None).
-        failure_interpretation (str | None): Optional textual interpretation of failures included in the output (empty string when None).
-        budget_note (str | None): Optional budget/note string to include in the output (empty string when None).
-        legacy_metrics (Mapping[str, Any] | None): Optional additional metrics preserved unchanged under the `legacy_metrics` key.
-    
-    Returns:
-        Dict[str, object]: Aggregated summary containing at least the keys:
-            - "scenario", "description", "objective": echoed input metadata.
-            - "diagnostic_focus", "success_interpretation", "failure_interpretation", "budget_note": optional metadata strings.
-            - "episodes" (int): number of episodes aggregated.
-            - "success_rate" (float): mean of per-episode success indicators (`1.0` for success, `0.0` otherwise).
-            - "checks" (dict): mapping check name -> { "description", "expected", "pass_rate", "mean_value" }.
-            - "behavior_metrics" (dict): aggregated metrics (numeric mean or most-common value).
-            - "diagnostics" (dict): includes "primary_outcome", "outcome_distribution", optional "primary_failure_mode" and "failure_mode_distribution", and aggregated diagnostic rates for "partial_progress" and "died_without_contact" when present.
-            - "failures" (list[str]): sorted unique failure names observed across episodes.
-            - "episodes_detail" (list[dict]): per-episode records converted to plain dicts.
-            - "legacy_metrics" (dict): plain dict copy of `legacy_metrics` or an empty dict.
-    """
-    score_list = list(scores)
-    check_index = {
-        spec.name: spec
-        for spec in check_specs
-    }
-    aggregated_checks: Dict[str, object] = {}
-    for name, spec in check_index.items():
-        results = [
-            score.checks[name]
-            for score in score_list
-            if name in score.checks
-        ]
-        values = [result.value for result in results]
-        aggregated_checks[name] = {
-            "description": spec.description,
-            "expected": spec.expected,
-            "pass_rate": (
-                mean(1.0 if result.passed else 0.0 for result in results)
-                if results
-                else 0.0
-            ),
-            "mean_value": _mean_like(values),
-        }
-
-    metric_names = sorted(
-        {
-            metric_name
-            for score in score_list
-            for metric_name in score.behavior_metrics
-        }
-    )
-    behavior_metrics = {
-        name: _aggregate_values(
-            [score.behavior_metrics[name] for score in score_list if name in score.behavior_metrics]
-        )
-        for name in metric_names
-    }
-    outcome_labels = [
-        str(score.behavior_metrics["outcome_band"])
-        for score in score_list
-        if "outcome_band" in score.behavior_metrics
-    ]
-    outcome_counter = Counter(outcome_labels)
-    outcome_total = max(1, len(outcome_labels))
-    failure_mode_labels = [
-        str(score.behavior_metrics["failure_mode"])
-        for score in score_list
-        if "failure_mode" in score.behavior_metrics
-    ]
-    failure_mode_counter = Counter(failure_mode_labels)
-    failure_mode_total = max(1, len(failure_mode_labels))
-    partial_progress_values = [
-        score.behavior_metrics["partial_progress"]
-        for score in score_list
-        if "partial_progress" in score.behavior_metrics
-    ]
-    died_without_contact_values = [
-        score.behavior_metrics["died_without_contact"]
-        for score in score_list
-        if "died_without_contact" in score.behavior_metrics
-    ]
-    diagnostics = {
-        "primary_outcome": (
-            outcome_counter.most_common(1)[0][0]
-            if outcome_counter
-            else "not_available"
-        ),
-        "outcome_distribution": {
-            label: float(count / outcome_total)
-            for label, count in sorted(outcome_counter.items())
-        },
-        "partial_progress_rate": (
-            _aggregate_values(partial_progress_values)
-            if partial_progress_values
-            else None
-        ),
-        "died_without_contact_rate": (
-            _aggregate_values(died_without_contact_values)
-            if died_without_contact_values
-            else None
-        ),
-    }
-    if failure_mode_counter:
-        diagnostics["primary_failure_mode"] = failure_mode_counter.most_common(1)[0][0]
-        diagnostics["failure_mode_distribution"] = {
-            label: float(count / failure_mode_total)
-            for label, count in sorted(failure_mode_counter.items())
-        }
-    failures = sorted(
-        {
-            failure
-            for score in score_list
-            for failure in score.failures
-        }
-    )
-    return {
-        "scenario": scenario,
-        "description": description,
-        "objective": objective,
-        "diagnostic_focus": diagnostic_focus or "",
-        "success_interpretation": success_interpretation or "",
-        "failure_interpretation": failure_interpretation or "",
-        "budget_note": budget_note or "",
-        "episodes": len(score_list),
-        "success_rate": (
-            mean(1.0 if score.success else 0.0 for score in score_list)
-            if score_list
-            else 0.0
-        ),
-        "checks": aggregated_checks,
-        "behavior_metrics": behavior_metrics,
-        "diagnostics": diagnostics,
-        "failures": failures,
-        "episodes_detail": [asdict(score) for score in score_list],
-        "legacy_metrics": dict(legacy_metrics or {}),
-    }
-
-
-def summarize_behavior_suite(
-    suite: Mapping[str, Mapping[str, Any]],
-    *,
-    competence_label: str = "mixed",
-) -> Dict[str, object]:
-    """
-    Summarizes per-scenario behavior aggregation results into suite-level counts and rates.
-    
-    Parameters:
-        suite (Mapping[str, Mapping[str, Any]]): Mapping from scenario name to its aggregated data. Each scenario mapping is expected to include numeric "episodes" and "success_rate" keys and may include a "failures" iterable.
-        competence_label (str): Competence context for this evaluation; one of "self_sufficient", "scaffolded", or "mixed".
-    
-    Returns:
-        Dict[str, object]: Summary dictionary with keys:
-            - "scenario_count": number of scenarios in the suite.
-            - "episode_count": total number of episodes across all scenarios.
-            - "scenario_success_rate": mean of per-scenario indicators where a scenario's `success_rate` is at least 1.0 (1.0 if fully successful, 0.0 otherwise).
-            - "episode_success_rate": overall fraction of episodes considered successful (episodes-weighted success rate).
-            - "regressions": list of regression entries (one per scenario that reported failures), each of the form {"scenario": <name>, "failures": [<failure names>]}.
-            - "competence_type": the validated competence label.
-    """
-    competence_type = normalize_competence_label(competence_label)
-    scenario_items = list(suite.items())
-    total_episodes = sum(int(data.get("episodes", 0)) for _, data in scenario_items)
-    successful_episodes = sum(
-        float(data.get("success_rate", 0.0)) * int(data.get("episodes", 0))
-        for _, data in scenario_items
-    )
-    regressions = [
-        {
-            "scenario": name,
-            "failures": list(data.get("failures", [])),
-        }
-        for name, data in scenario_items
-        if data.get("failures")
-    ]
-    return {
-        "scenario_count": len(scenario_items),
-        "episode_count": total_episodes,
-        "scenario_success_rate": (
-            mean(1.0 if float(data.get("success_rate", 0.0)) >= 1.0 else 0.0 for _, data in scenario_items)
-            if scenario_items
-            else 0.0
-        ),
-        "episode_success_rate": (
-            float(successful_episodes / total_episodes)
-            if total_episodes
-            else 0.0
-        ),
-        "competence_type": competence_type,
-        "regressions": regressions,
-    }
-
-
-def flatten_behavior_rows(
-    scores: Sequence[BehavioralEpisodeScore],
-    *,
-    reward_profile: str,
-    scenario_map: str,
-    simulation_seed: int,
-    scenario_description: str,
-    scenario_objective: str,
-    scenario_focus: str,
-    evaluation_map: str | None = None,
-    eval_reflex_scale: float | None = None,
-    competence_label: str | None = None,
-) -> List[Dict[str, object]]:
-    """
-    Flatten BehavioralEpisodeScore records into tabular row dictionaries.
-    
-    Each row contains fixed metadata columns (reward_profile, scenario_map, evaluation_map,
-    competence_type, is_primary_benchmark, eval_reflex_scale, simulation_seed, episode_seed,
-    scenario, scenario_description, scenario_objective, scenario_focus, episode, success,
-    failure_count, failures), plus one `metric_{name}` entry per behavior metric and for each
-    check three columns: `check_{name}_passed`, `check_{name}_value`, and `check_{name}_expected`.
-    
-    Parameters:
-        scores (Sequence[BehavioralEpisodeScore]): Episode-level behavioral scores to flatten.
-        reward_profile (str): Identifier for the reward configuration applied to all rows.
-        scenario_map (str): Map template used by the scenario.
-        simulation_seed (int): Global simulation seed applied to all rows.
-        scenario_description (str): Human-readable scenario description to include in each row.
-        scenario_objective (str): Scenario objective string to include in each row.
-        scenario_focus (str): Scenario focus/category to include in each row.
-        evaluation_map (str | None): Optional outer sweep or default map context for the run.
-        eval_reflex_scale (float | None): Optional evaluation-time reflex scale used to derive competence when `competence_label` is not provided.
-        competence_label (str | None): Optional explicit competence label override; when omitted, competence is derived from `eval_reflex_scale` and validated.
-    
-    Returns:
-        List[Dict[str, object]]: A list of per-episode row dictionaries ready for tabular export. Each row includes the computed `competence_type` and `is_primary_benchmark` fields.
-    """
-    rows: List[Dict[str, object]] = []
-    competence_type = normalize_competence_label(
-        competence_label
-        if competence_label is not None
-        else competence_label_from_eval_reflex_scale(eval_reflex_scale)
-    )
-    for score in scores:
-        row: Dict[str, object] = {
-            "reward_profile": reward_profile,
-            "scenario_map": scenario_map,
-            "evaluation_map": evaluation_map,
-            "competence_type": competence_type,
-            "is_primary_benchmark": competence_type == "self_sufficient",
-            "eval_reflex_scale": eval_reflex_scale,
-            "simulation_seed": simulation_seed,
-            "episode_seed": score.seed,
-            "scenario": score.scenario,
-            "scenario_description": scenario_description,
-            "scenario_objective": scenario_objective,
-            "scenario_focus": scenario_focus,
-            "episode": score.episode,
-            "success": bool(score.success),
-            "failure_count": len(score.failures),
-            "failures": ",".join(score.failures),
-        }
-        for metric_name, value in sorted(score.behavior_metrics.items()):
-            row[f"metric_{metric_name}"] = value
-        for check_name, result in sorted(score.checks.items()):
-            row[f"check_{check_name}_passed"] = bool(result.passed)
-            row[f"check_{check_name}_value"] = result.value
-            row[f"check_{check_name}_expected"] = result.expected
-        rows.append(row)
-    return rows
-
-
-def _aggregate_values(values: Sequence[Any]) -> Any:
-    """
-    Aggregate a sequence of values into a single representative value.
-    
-    For an empty sequence returns 0.0. If all values are numeric-like (ints, floats, or bools),
-    returns their arithmetic mean as a float. Otherwise returns the most common string
-    representation of the values.
-    
-    Parameters:
-        values (Sequence[Any]): Sequence of values to aggregate.
-    
-    Returns:
-        Any: The aggregated value: `0.0` for empty input, a `float` mean when numeric-like,
-        or the most common stringified value otherwise.
-    """
-    if not values:
-        return 0.0
-    mean_value = _mean_like(values)
-    if mean_value is not None:
-        return mean_value
-    counter = Counter(str(value) for value in values)
-    return counter.most_common(1)[0][0]
-
-
-def _mean_like(values: Sequence[Any]) -> float | None:
-    """
-    Compute the mean of the input sequence when every element is numeric-like.
-    
-    Returns:
-        float mean of the values when all elements are instances of int, float, or bool; `0.0` if `values` is empty; `None` if any element is not numeric-like.
-    """
-    if not values:
-        return 0.0
-    if all(isinstance(value, (int, float, bool)) for value in values):
-        return float(mean(float(value) for value in values))
-    return None

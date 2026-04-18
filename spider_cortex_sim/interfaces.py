@@ -7,9 +7,6 @@ from typing import ClassVar, Dict, Mapping, Sequence, Tuple, TypeVar
 
 import numpy as np
 
-from .noise import NONE_NOISE_PROFILE
-from .operational_profiles import DEFAULT_OPERATIONAL_PROFILE
-
 LOCOMOTION_ACTIONS: Sequence[str] = (
     "MOVE_UP",
     "MOVE_DOWN",
@@ -155,9 +152,16 @@ class VisualObservation(ObservationView):
     predator_dy: float
     heading_dx: float
     heading_dy: float
+    foveal_scan_age: float
     food_trace_strength: float
+    food_trace_heading_dx: float
+    food_trace_heading_dy: float
     shelter_trace_strength: float
+    shelter_trace_heading_dx: float
+    shelter_trace_heading_dy: float
     predator_trace_strength: float
+    predator_trace_heading_dx: float
+    predator_trace_heading_dy: float
     predator_motion_salience: float
     visual_predator_threat: float
     olfactory_predator_threat: float
@@ -200,6 +204,8 @@ class HungerObservation(ObservationView):
     food_trace_dx: float
     food_trace_dy: float
     food_trace_strength: float
+    food_trace_heading_dx: float
+    food_trace_heading_dy: float
     food_memory_dx: float
     food_memory_dy: float
     food_memory_age: float
@@ -222,6 +228,8 @@ class SleepObservation(ObservationView):
     shelter_trace_dx: float
     shelter_trace_dy: float
     shelter_trace_strength: float
+    shelter_trace_heading_dx: float
+    shelter_trace_heading_dy: float
     shelter_memory_dx: float
     shelter_memory_dy: float
     shelter_memory_age: float
@@ -250,6 +258,8 @@ class AlertObservation(ObservationView):
     predator_trace_dx: float
     predator_trace_dy: float
     predator_trace_strength: float
+    predator_trace_heading_dx: float
+    predator_trace_heading_dy: float
     predator_memory_dx: float
     predator_memory_dy: float
     predator_memory_age: float
@@ -281,6 +291,15 @@ class ActionContextObservation(ObservationView):
 
 @dataclass(frozen=True)
 class MotorContextObservation(ObservationView):
+    """
+    Execution-relevant context for motor correction.
+
+    `momentum` is field #14 and is a bounded body-state scalar in [0, 1].
+    It belongs to motor execution context, not action-center priority context.
+    Runtime momentum dynamics are defined by the embodiment design and are
+    wired by the world execution implementation.
+    """
+
     observation_key: ClassVar[str] = "motor_context"
 
     on_food: float
@@ -296,6 +315,7 @@ class MotorContextObservation(ObservationView):
     heading_dy: float
     terrain_difficulty: float
     fatigue: float
+    momentum: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -411,7 +431,7 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
         name="visual_cortex",
         observation_key="visual",
         role="proposal",
-        version=5,
+        version=7,
         description="Visual proposer driven by food, shelter, and predator cues inside the local visual field.",
         inputs=(
             SignalSpec("food_visible", "1 when food is detected with sufficient confidence in the visual field."),
@@ -431,9 +451,16 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
             SignalSpec("predator_dy", "Relative vertical offset of the detected predator."),
             SignalSpec("heading_dx", "Current horizontal body or gaze orientation."),
             SignalSpec("heading_dy", "Current vertical body or gaze orientation."),
+            SignalSpec("foveal_scan_age", "Normalized ticks since the current foveal heading was actively scanned; 0 is fresh and 1 is stale or never scanned.", 0.0, 1.0),
             SignalSpec("food_trace_strength", "Decayed strength of the short food trace.", 0.0, 1.0),
+            SignalSpec("food_trace_heading_dx", "Horizontal heading active when the short food trace was refreshed."),
+            SignalSpec("food_trace_heading_dy", "Vertical heading active when the short food trace was refreshed."),
             SignalSpec("shelter_trace_strength", "Decayed strength of the short shelter trace.", 0.0, 1.0),
+            SignalSpec("shelter_trace_heading_dx", "Horizontal heading active when the short shelter trace was refreshed."),
+            SignalSpec("shelter_trace_heading_dy", "Vertical heading active when the short shelter trace was refreshed."),
             SignalSpec("predator_trace_strength", "Decayed strength of the short predator trace.", 0.0, 1.0),
+            SignalSpec("predator_trace_heading_dx", "Horizontal heading active when the short predator trace was refreshed."),
+            SignalSpec("predator_trace_heading_dy", "Vertical heading active when the short predator trace was refreshed."),
             SignalSpec("predator_motion_salience", "Explicit motion salience of the predator.", 0.0, 1.0),
             SignalSpec("visual_predator_threat", "Aggregated threat from visually oriented predators.", 0.0, 1.0),
             SignalSpec("olfactory_predator_threat", "Aggregated threat from olfactory predators.", 0.0, 1.0),
@@ -465,7 +492,7 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
         name="hunger_center",
         observation_key="hunger",
         role="proposal",
-        version=3,
+        version=4,
         description="Homeostatic proposer aimed at foraging and returning to the last perceived food.",
         inputs=(
             SignalSpec("hunger", "Internal hunger state.", 0.0, 1.0),
@@ -481,6 +508,8 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
             SignalSpec("food_trace_dx", "Horizontal direction of the short food trace."),
             SignalSpec("food_trace_dy", "Vertical direction of the short food trace."),
             SignalSpec("food_trace_strength", "Decayed strength of the short food trace.", 0.0, 1.0),
+            SignalSpec("food_trace_heading_dx", "Horizontal heading active when the short food trace was refreshed."),
+            SignalSpec("food_trace_heading_dy", "Vertical heading active when the short food trace was refreshed."),
             SignalSpec("food_memory_dx", "Horizontal direction of the last seen food."),
             SignalSpec("food_memory_dy", "Vertical direction of the last seen food."),
             SignalSpec("food_memory_age", "Normalized age of the food memory.", 0.0, 1.0),
@@ -490,7 +519,7 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
         name="sleep_center",
         observation_key="sleep",
         role="proposal",
-        version=4,
+        version=5,
         description="Homeostatic proposer aimed at returning to shelter, resting, and seeking safe depth.",
         inputs=(
             SignalSpec("fatigue", "Internal fatigue state.", 0.0, 1.0),
@@ -506,6 +535,8 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
             SignalSpec("shelter_trace_dx", "Horizontal direction of the short shelter trace."),
             SignalSpec("shelter_trace_dy", "Vertical direction of the short shelter trace."),
             SignalSpec("shelter_trace_strength", "Decayed strength of the short shelter trace.", 0.0, 1.0),
+            SignalSpec("shelter_trace_heading_dx", "Horizontal heading active when the short shelter trace was refreshed."),
+            SignalSpec("shelter_trace_heading_dy", "Vertical heading active when the short shelter trace was refreshed."),
             SignalSpec("shelter_memory_dx", "Horizontal direction of the nearest visible shelter cell."),
             SignalSpec("shelter_memory_dy", "Vertical direction of the nearest visible shelter cell."),
             SignalSpec("shelter_memory_age", "Normalized age of the nearest visible shelter cell memory.", 0.0, 1.0),
@@ -515,7 +546,7 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
         name="alert_center",
         observation_key="alert",
         role="proposal",
-        version=7,
+        version=8,
         description="Defensive proposer aimed at threat response, escape, and shelter prioritization under risk.",
         inputs=(
             SignalSpec("predator_visible", "1 when the predator is visible.", 0.0, 1.0),
@@ -537,6 +568,8 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
             SignalSpec("predator_trace_dx", "Horizontal direction of the short predator trace."),
             SignalSpec("predator_trace_dy", "Vertical direction of the short predator trace."),
             SignalSpec("predator_trace_strength", "Decayed strength of the short predator trace.", 0.0, 1.0),
+            SignalSpec("predator_trace_heading_dx", "Horizontal heading active when the short predator trace was refreshed."),
+            SignalSpec("predator_trace_heading_dy", "Vertical heading active when the short predator trace was refreshed."),
             SignalSpec("predator_memory_dx", "Horizontal direction of the predator position perceived during visual detection or inferred from contact event."),
             SignalSpec("predator_memory_dy", "Vertical direction of the predator position perceived during visual detection or inferred from contact event."),
             SignalSpec("predator_memory_age", "Normalized age of the predator position perceived during visual detection or inferred from contact event.", 0.0, 1.0),
@@ -578,7 +611,7 @@ MOTOR_CONTEXT_INTERFACE = ModuleInterface(
     name="motor_cortex_context",
     observation_key="motor_context",
     role="context",
-    version=4,
+    version=5,
     description="Raw context used by the motor_cortex to execute locomotion intent within local embodiment constraints.",
     inputs=(
         SignalSpec("on_food", "1 when standing on food.", 0.0, 1.0),
@@ -594,6 +627,7 @@ MOTOR_CONTEXT_INTERFACE = ModuleInterface(
         SignalSpec("heading_dy", "Current vertical body orientation."),
         SignalSpec("terrain_difficulty", "Local movement cost from the terrain under the spider.", 0.0, 1.0),
         SignalSpec("fatigue", "Body fatigue affecting execution reliability.", 0.0, 1.0),
+        SignalSpec("momentum", "Bounded execution momentum state; motor-only body state, not decision-priority context.", 0.0, 1.0),
     ),
 )
 
@@ -693,118 +727,14 @@ def interface_registry() -> dict[str, object]:
 
 def interface_registry_fingerprint() -> str:
     """
-    Return a stable fingerprint for the current interface registry.
-    """
-    return _fingerprint_payload(interface_registry())
-
-
-def render_interfaces_markdown() -> str:
-    """
-    Render the interface registry as a Markdown document.
+    Compute a stable fingerprint of the current interface registry.
     
-    The document includes schema version and registry fingerprint, lists of proposal and context interfaces, compatibility and perception/action notes (including explicit memory signals), and one section per interface containing metadata and a table of its input signals (index, min, max, description).
+    The fingerprint is the SHA-256 hex digest of a deterministic JSON serialization of the registry produced by interface_registry().
     
     Returns:
-        markdown (str): The rendered Markdown string; ends with a single trailing newline.
+        fingerprint (str): Hexadecimal SHA-256 digest representing the current interface registry.
     """
-    registry = interface_registry()
-    perception_defaults = DEFAULT_OPERATIONAL_PROFILE.perception
-    delay_noise_defaults = NONE_NOISE_PROFILE.delay
-    movement_action_names = tuple(ACTION_DELTAS)
-    orient_action_names = tuple(ORIENT_HEADINGS)
-    movement_action_count = len(movement_action_names)
-    total_action_count = len(LOCOMOTION_ACTIONS)
-    movement_action_indices = ", ".join(
-        f"`{name}`={ACTION_TO_INDEX[name]}" for name in movement_action_names
-    )
-    orient_action_index_items = [
-        f"`{name}`={ACTION_TO_INDEX[name]}" for name in orient_action_names
-    ]
-    orient_action_indices = ", ".join(
-        (*orient_action_index_items[:-1], f"and {orient_action_index_items[-1]}")
-    )
-    lines: list[str] = [
-        "# Standardized Interfaces",
-        "",
-        "<!-- Generated from spider_cortex_sim.interfaces.render_interfaces_markdown(); do not edit manually. -->",
-        "",
-        f"- Schema version: `{registry['schema_version']}`",
-        f"- Registry fingerprint: `{interface_registry_fingerprint()}`",
-        f"- Proposal interfaces: `{', '.join(registry['proposal_interfaces'])}`",
-        f"- Context interfaces: `{', '.join(registry['context_interfaces'])}`",
-        "",
-        "## Compatibility",
-        "",
-        "- The current policy is `exact_match_required` for save/load.",
-        "- Changes to the name, `observation_key`, signal order, outputs, or version require explicit incompatibility handling.",
-        "- There is no automatic migration for older checkpoints.",
-        "",
-        "## Perception And Active Sensing",
-        "",
-        "### Breaking Change: Action Space",
-        "",
-        f"- The locomotion action space expanded from {movement_action_count} to {total_action_count} actions.",
-        f"- Existing indices are unchanged: {movement_action_indices}.",
-        f"- New active-sensing actions are {orient_action_indices}.",
-        "",
-        "### Foveal And Peripheral Vision",
-        "",
-        "- Visual targets are classified relative to the spider heading as `foveal`, `peripheral`, or `outside`.",
-        f"- `fov_half_angle` defaults to `{perception_defaults['fov_half_angle']}` degrees and defines the foveal cone.",
-        f"- The `peripheral_half_angle` defaults to `{perception_defaults['peripheral_half_angle']}` degrees and defines the outer visual cone.",
-        f"- A default `peripheral_certainty_penalty` of `{perception_defaults['peripheral_certainty_penalty']}` reduces peripheral visual certainty.",
-        "- Targets beyond `peripheral_half_angle` are outside the visual field (`visible=0`).",
-        "- Heading zones are not exposed as observation fields; agents receive the resulting `visible`, `certainty`, occlusion, and direction signals.",
-        "- Smell and olfactory gradients remain omnidirectional and are not gated by heading zones.",
-        "",
-        "### ORIENT Actions",
-        "",
-        "- `ORIENT_*` actions update `heading_dx` and `heading_dy` without displacement.",
-        "- Orientation targets live in `ORIENT_HEADINGS`; they are not movement translations in `ACTION_DELTAS`.",
-        "- They do not trigger motor slip.",
-        "- They still consume a tick, so hunger, fatigue, predators, and perceptual buffers advance normally.",
-        "",
-        "### Perceptual Delay",
-        "",
-        f"- `perceptual_delay_ticks` defaults to `{perception_defaults['perceptual_delay_ticks']}` and returns observations from the previous tick when buffered.",
-        f"- `perceptual_delay_noise` defaults to `{perception_defaults['perceptual_delay_noise']}` and scales delay-noise effects.",
-        f"- `NoiseConfig.delay.certainty_decay_per_tick` defaults to `{delay_noise_defaults['certainty_decay_per_tick']}` and decays certainty as observations age.",
-        f"- `NoiseConfig.delay.direction_jitter_per_tick` defaults to `{delay_noise_defaults['direction_jitter_per_tick']}` and adds age-proportional jitter to delayed direction signals.",
-        "- Delay noise uses a dedicated RNG stream to preserve reproducibility.",
-        "- Trace signals such as `food_trace_strength` reflect the delayed percept state, not the current world state.",
-        "",
-        "### Explicit Memory Signals",
-        "",
-        "- `food_memory_dx`/`food_memory_dy`/`food_memory_age`, `shelter_memory_*`, `predator_memory_*`, and `escape_memory_*` are derived from perception-grounded memory slots.",
-        "- The environment pipeline maintains mechanical timing only: refresh cycles age slots, enforce TTLs, and clear expired targets.",
-        "- Data sources are limited to local visual perception, contact events, and movement history; the pipeline cannot inject information the spider has not perceived.",
-        "- `spider_cortex_sim.memory.MEMORY_LEAKAGE_AUDIT` is the authoritative classification source for explicit memory ownership and leakage risk.",
-        "",
-    ]
-    for spec in ALL_INTERFACES:
-        summary = spec.to_summary()
-        compatibility = summary["compatibility"]
-        lines.extend(
-            [
-                f"## `{spec.name}`",
-                "",
-                f"- Observation key: `{spec.observation_key}`",
-                f"- Role: `{spec.role}`",
-                f"- Version: `{spec.version}`",
-                f"- Description: {spec.description}",
-                f"- Outputs: `{', '.join(spec.outputs)}`",
-                f"- Save policy: `{compatibility['save_policy']}`",
-                "",
-                "| # | Signal | Min | Max | Description |",
-                "| --- | --- | ---: | ---: | --- |",
-            ]
-        )
-        for index, signal in enumerate(spec.inputs, start=1):
-            lines.append(
-                f"| {index} | `{signal.name}` | {signal.minimum:.1f} | {signal.maximum:.1f} | {signal.description} |"
-            )
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
+    return _fingerprint_payload(interface_registry())
 
 
 def architecture_signature(
@@ -973,3 +903,6 @@ def architecture_signature(
     }
     payload["fingerprint"] = _fingerprint_payload(payload)
     return payload
+
+
+from .interface_docs import render_interfaces_markdown

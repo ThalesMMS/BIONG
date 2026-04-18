@@ -7,6 +7,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from unittest import mock
 
+from spider_cortex_sim.comparison import (
+    compare_noise_robustness,
+    matrix_cell_success_rate,
+    robustness_aggregate_metrics,
+    robustness_matrix_metadata,
+)
 from spider_cortex_sim.noise import RobustnessMatrixSpec
 from spider_cortex_sim.simulation import SpiderSimulation
 
@@ -15,11 +21,11 @@ class NoiseRobustnessWorkflowTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         """
-        Prepare class-level test fixtures for noise-robustness tests.
+        Prepare class-level fixtures for noise-robustness tests.
         
-        Calls SpiderSimulation.compare_noise_robustness with a fixed smoke/classic central_burrow configuration and stores its returned (payload, rows) tuple on the class as `payload` and `rows`, for use by the test methods.
+        Calls compare_noise_robustness with a fixed smoke/classic + central_burrow configuration and stores the returned payload and rows on the class as `cls.payload` and `cls.rows` for use by test methods.
         """
-        cls.payload, cls.rows = SpiderSimulation.compare_noise_robustness(
+        cls.payload, cls.rows = compare_noise_robustness(
             budget_profile="smoke",
             reward_profile="classic",
             map_template="central_burrow",
@@ -283,13 +289,23 @@ class CheckpointRunFingerprintTest(unittest.TestCase):
 
 
 class RobustnessAggregateMetricsTest(unittest.TestCase):
-    """Tests for SpiderSimulation._robustness_aggregate_metrics (new in this PR)."""
+    """Tests for comparison.robustness_aggregate_metrics (new in this PR)."""
 
     def _make_spec(
         self,
         trains: Sequence[str],
         evals: Sequence[str],
     ) -> RobustnessMatrixSpec:
+        """
+        Create a RobustnessMatrixSpec from sequences of train and evaluation condition names.
+        
+        Parameters:
+            trains (Sequence[str]): Iterable of training condition names.
+            evals (Sequence[str]): Iterable of evaluation condition names.
+        
+        Returns:
+            RobustnessMatrixSpec: Spec with `train_conditions` and `eval_conditions` set to the provided values as tuples.
+        """
         return RobustnessMatrixSpec(
             train_conditions=tuple(trains),
             eval_conditions=tuple(evals),
@@ -306,7 +322,7 @@ class RobustnessAggregateMetricsTest(unittest.TestCase):
             "none": {"none": self._make_cell(1.0), "high": self._make_cell(0.5)},
             "low": {"none": self._make_cell(0.8), "high": self._make_cell(0.2)},
         }
-        result = SpiderSimulation._robustness_aggregate_metrics(
+        result = robustness_aggregate_metrics(
             payloads, robustness_matrix=spec
         )
         expected = (1.0 + 0.5 + 0.8 + 0.2) / 4
@@ -318,7 +334,7 @@ class RobustnessAggregateMetricsTest(unittest.TestCase):
             "none": {"none": self._make_cell(0.9), "low": self._make_cell(0.4)},
             "low": {"none": self._make_cell(0.3), "low": self._make_cell(0.7)},
         }
-        result = SpiderSimulation._robustness_aggregate_metrics(
+        result = robustness_aggregate_metrics(
             payloads, robustness_matrix=spec
         )
         self.assertAlmostEqual(result["diagonal_score"], 0.8)
@@ -329,7 +345,7 @@ class RobustnessAggregateMetricsTest(unittest.TestCase):
             "none": {"none": self._make_cell(0.9), "low": self._make_cell(0.4)},
             "low": {"none": self._make_cell(0.3), "low": self._make_cell(0.7)},
         }
-        result = SpiderSimulation._robustness_aggregate_metrics(
+        result = robustness_aggregate_metrics(
             payloads, robustness_matrix=spec
         )
         self.assertAlmostEqual(result["off_diagonal_score"], 0.35)
@@ -339,7 +355,7 @@ class RobustnessAggregateMetricsTest(unittest.TestCase):
         payloads = {
             "none": {"none": self._make_cell(1.0), "high": self._make_cell(0.4)},
         }
-        result = SpiderSimulation._robustness_aggregate_metrics(
+        result = robustness_aggregate_metrics(
             payloads, robustness_matrix=spec
         )
         self.assertAlmostEqual(result["train_marginals"]["none"], 0.7)
@@ -350,14 +366,14 @@ class RobustnessAggregateMetricsTest(unittest.TestCase):
             "none": {"none": self._make_cell(0.8)},
             "low": {"none": self._make_cell(0.6)},
         }
-        result = SpiderSimulation._robustness_aggregate_metrics(
+        result = robustness_aggregate_metrics(
             payloads, robustness_matrix=spec
         )
         self.assertAlmostEqual(result["eval_marginals"]["none"], 0.7)
 
     def test_empty_payloads_return_zero_scores(self) -> None:
         spec = self._make_spec(["none"], ["low"])
-        result = SpiderSimulation._robustness_aggregate_metrics(
+        result = robustness_aggregate_metrics(
             {}, robustness_matrix=spec
         )
         self.assertAlmostEqual(result["robustness_score"], 0.0)
@@ -370,22 +386,54 @@ class RobustnessAggregateMetricsTest(unittest.TestCase):
             "none": {"none": self._make_cell(1.0)},
             # "low" train condition missing entirely
         }
-        result = SpiderSimulation._robustness_aggregate_metrics(
+        result = robustness_aggregate_metrics(
             payloads, robustness_matrix=spec
         )
         # (none,none)=1.0, (low,none)=0.0 (missing → 0.0)
         self.assertAlmostEqual(result["robustness_score"], 0.5)
 
+    def test_uncertainty_reported_for_matrix_scores(self) -> None:
+        spec = self._make_spec(["none"], ["none", "low"])
+        payloads = {
+            "none": {
+                "none": {
+                    "summary": {"scenario_success_rate": 0.7},
+                    "seed_level": [
+                        {"metric_name": "scenario_success_rate", "seed": 1, "value": 0.6, "condition": "none->none", "scenario": None},
+                        {"metric_name": "scenario_success_rate", "seed": 2, "value": 0.8, "condition": "none->none", "scenario": None},
+                    ],
+                },
+                "low": {
+                    "summary": {"scenario_success_rate": 0.3},
+                    "seed_level": [
+                        {"metric_name": "scenario_success_rate", "seed": 1, "value": 0.2, "condition": "none->low", "scenario": None},
+                        {"metric_name": "scenario_success_rate", "seed": 2, "value": 0.4, "condition": "none->low", "scenario": None},
+                    ],
+                },
+            },
+        }
+        result = robustness_aggregate_metrics(
+            payloads, robustness_matrix=spec
+        )
+        self.assertIn("uncertainty", result)
+        self.assertIn("diagonal_minus_off_diagonal_score", result)
+        self.assertEqual(result["uncertainty"]["robustness_score"]["n_seeds"], 2)
+        self.assertAlmostEqual(result["uncertainty"]["robustness_score"]["mean"], 0.5)
+        self.assertEqual(
+            result["uncertainty"]["diagonal_minus_off_diagonal_score"]["n_seeds"],
+            2,
+        )
+
 
 class RobustnessMatrixMetadataTest(unittest.TestCase):
-    """Tests for SpiderSimulation._robustness_matrix_metadata (new in this PR)."""
+    """Tests for comparison.robustness_matrix_metadata (new in this PR)."""
 
     def test_returns_dict_with_matrix_spec_key(self) -> None:
         spec = RobustnessMatrixSpec(
             train_conditions=("none", "low"),
             eval_conditions=("none",),
         )
-        result = SpiderSimulation._robustness_matrix_metadata(spec)
+        result = robustness_matrix_metadata(spec)
         self.assertIn("matrix_spec", result)
 
     def test_matrix_spec_contains_train_and_eval_conditions(self) -> None:
@@ -393,7 +441,7 @@ class RobustnessMatrixMetadataTest(unittest.TestCase):
             train_conditions=("none", "low"),
             eval_conditions=("high",),
         )
-        result = SpiderSimulation._robustness_matrix_metadata(spec)
+        result = robustness_matrix_metadata(spec)
         self.assertEqual(result["matrix_spec"]["train_conditions"], ["none", "low"])
         self.assertEqual(result["matrix_spec"]["eval_conditions"], ["high"])
 
@@ -402,30 +450,30 @@ class RobustnessMatrixMetadataTest(unittest.TestCase):
             train_conditions=("none", "low", "medium"),
             eval_conditions=("none", "high"),
         )
-        result = SpiderSimulation._robustness_matrix_metadata(spec)
+        result = robustness_matrix_metadata(spec)
         self.assertEqual(result["matrix_spec"]["cell_count"], 6)
 
 
 class MatrixCellSuccessRateTest(unittest.TestCase):
-    """Tests for SpiderSimulation._matrix_cell_success_rate (new in this PR)."""
+    """Tests for comparison.matrix_cell_success_rate (new in this PR)."""
 
     def test_returns_scenario_success_rate_from_payload(self) -> None:
         # _matrix_cell_success_rate delegates to _condition_compact_summary which
         # looks for a nested "summary" key to find the metrics
         payload = {"summary": {"scenario_success_rate": 0.75}}
-        result = SpiderSimulation._matrix_cell_success_rate(payload)
+        result = matrix_cell_success_rate(payload)
         self.assertAlmostEqual(result, 0.75)
 
     def test_returns_zero_when_payload_is_none(self) -> None:
-        result = SpiderSimulation._matrix_cell_success_rate(None)
+        result = matrix_cell_success_rate(None)
         self.assertAlmostEqual(result, 0.0)
 
     def test_returns_zero_when_field_missing(self) -> None:
-        result = SpiderSimulation._matrix_cell_success_rate({})
+        result = matrix_cell_success_rate({})
         self.assertAlmostEqual(result, 0.0)
 
     def test_returns_float_type(self) -> None:
-        result = SpiderSimulation._matrix_cell_success_rate(
+        result = matrix_cell_success_rate(
             {"summary": {"scenario_success_rate": 1}}
         )
         self.assertIsInstance(result, float)
@@ -455,7 +503,7 @@ class SwapEvalNoiseProfileTest(unittest.TestCase):
 class CompareNoiseRobustnessValidationTest(unittest.TestCase):
     def test_compare_noise_robustness_rejects_invalid_checkpoint_selection(self) -> None:
         with self.assertRaises(ValueError):
-            SpiderSimulation.compare_noise_robustness(
+            compare_noise_robustness(
                 max_steps=10,
                 episodes=0,
                 evaluation_episodes=0,
@@ -471,8 +519,14 @@ class CompareNoiseRobustnessValidationTest(unittest.TestCase):
             )
 
     def test_compare_noise_robustness_rejects_invalid_checkpoint_metric(self) -> None:
+        """
+        Verifies that compare_noise_robustness raises a ValueError when given an invalid checkpoint_metric.
+        
+        Asserts that calling compare_noise_robustness with checkpoint_selection set to "best" and
+        checkpoint_metric set to an unrecognized value causes a ValueError to be raised.
+        """
         with self.assertRaises(ValueError):
-            SpiderSimulation.compare_noise_robustness(
+            compare_noise_robustness(
                 max_steps=10,
                 episodes=0,
                 evaluation_episodes=0,
@@ -495,7 +549,7 @@ class CompareNoiseRobustnessValidationTest(unittest.TestCase):
             save_dir = root / "saved_runs"
             SpiderSimulation(seed=7, max_steps=10).brain.save(load_dir)
 
-            SpiderSimulation.compare_noise_robustness(
+            compare_noise_robustness(
                 max_steps=10,
                 episodes=0,
                 evaluation_episodes=0,
@@ -520,7 +574,7 @@ class CompareNoiseRobustnessValidationTest(unittest.TestCase):
             load_dir = Path(tmpdir) / "load_source"
             SpiderSimulation(seed=7, max_steps=10).brain.save(load_dir)
 
-            _, rows = SpiderSimulation.compare_noise_robustness(
+            _, rows = compare_noise_robustness(
                 max_steps=10,
                 episodes=0,
                 evaluation_episodes=0,
@@ -566,7 +620,7 @@ class CompareNoiseRobustnessValidationTest(unittest.TestCase):
             autospec=True,
             side_effect=fake_execute_behavior_suite,
         ):
-            SpiderSimulation.compare_noise_robustness(
+            compare_noise_robustness(
                 max_steps=10,
                 episodes=0,
                 evaluation_episodes=0,

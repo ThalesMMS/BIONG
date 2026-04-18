@@ -1,9 +1,9 @@
 # Standardized Interfaces
 
-<!-- Generated from spider_cortex_sim.interfaces.render_interfaces_markdown(); do not edit manually. -->
+<!-- Generated from spider_cortex_sim.interface_docs.render_interfaces_markdown(); do not edit manually. -->
 
 - Schema version: `1`
-- Registry fingerprint: `177abe8cc5bd584e0995d6855f54f22a96cad8948145411fc877538c830ada10`
+- Registry fingerprint: `b5bff4986a57404d4c3c2d3c075b3f8e4c283cf5355c36591588197859807ef7`
 - Proposal interfaces: `visual_cortex, sensory_cortex, hunger_center, sleep_center, alert_center`
 - Context interfaces: `action_center_context, motor_cortex_context`
 
@@ -24,19 +24,34 @@
 ### Foveal And Peripheral Vision
 
 - Visual targets are classified relative to the spider heading as `foveal`, `peripheral`, or `outside`.
-- `fov_half_angle` defaults to `60.0` degrees and defines the foveal cone.
-- The `peripheral_half_angle` defaults to `90.0` degrees and defines the outer visual cone.
+- `fov_half_angle` defaults to `45.0` degrees and defines the foveal cone.
+- The `peripheral_half_angle` defaults to `70.0` degrees and defines the outer visual cone.
 - A default `peripheral_certainty_penalty` of `0.35` reduces peripheral visual certainty.
 - Targets beyond `peripheral_half_angle` are outside the visual field (`visible=0`).
 - Heading zones are not exposed as observation fields; agents receive the resulting `visible`, `certainty`, occlusion, and direction signals.
 - Smell and olfactory gradients remain omnidirectional and are not gated by heading zones.
 
+### Scan Recency
+
+- `foveal_scan_age` reports how recently the current heading was actively scanned.
+- `max_scan_age` defaults to `10.0` ticks for normalizing scan age into `[0, 1]`.
+- A value of `0.0` means the current foveal heading was scanned this tick; `1.0` means stale or never scanned.
+- `PerceptTrace.heading_dx` and `PerceptTrace.heading_dy` record the body or gaze heading active when a food, shelter, or predator trace was refreshed.
+- Trace headings surface as `food_trace_heading_*`, `shelter_trace_heading_*`, and `predator_trace_heading_*` signals.
+- Scan recency is self-knowledge derived from the spider's own heading changes, not hidden world-state access.
+
 ### ORIENT Actions
 
-- `ORIENT_*` actions update `heading_dx` and `heading_dy` without displacement.
-- Orientation targets live in `ORIENT_HEADINGS`; they are not movement translations in `ACTION_DELTAS`.
-- They do not trigger motor slip.
-- They still consume a tick, so hunger, fatigue, predators, and perceptual buffers advance normally.
+- `ORIENT_*` actions update `heading_dx` and `heading_dy` from `ORIENT_HEADINGS`; they are not movement translations in `ACTION_DELTAS`.
+- After the heading update, the world refreshes the current tick's perception buffer immediately, before the normal end-of-step tick commit.
+- The refresh itself does not advance the tick or run hunger, fatigue, predator, memory, or perceptual-delay stages.
+- `ORIENT_*` actions still consume the step: after the refresh, the normal commit advances the tick and applies hunger, fatigue, predator, and perceptual-buffer progression.
+- `ORIENT_*` actions do not cause displacement and do not trigger motor slip.
+
+### Percept Traces
+
+- Trace signals carry target direction, decayed strength, and the heading active when the trace was refreshed.
+- `*_trace_heading_dx` and `*_trace_heading_dy` are scan context for the trace; they are not target directions.
 
 ### Perceptual Delay
 
@@ -46,6 +61,14 @@
 - `NoiseConfig.delay.direction_jitter_per_tick` defaults to `0.0` and adds age-proportional jitter to delayed direction signals.
 - Delay noise uses a dedicated RNG stream to preserve reproducibility.
 - Trace signals such as `food_trace_strength` reflect the delayed percept state, not the current world state.
+
+### Perception Categories
+
+- Direct sight means visual certainty is above the debug threshold and the current scan is fresh.
+- Trace means a decayed percept trace is active after direct sight has gone stale or disappeared.
+- Delayed means perceptual delay is active and the current payload was not refreshed by an active scan.
+- Uncertain means no direct, trace, or delayed classification applies.
+- These categories are debug and audit labels from `_perception_category()`; they are not observation signals.
 
 ### Explicit Memory Signals
 
@@ -58,7 +81,7 @@
 
 - Observation key: `visual`
 - Role: `proposal`
-- Version: `5`
+- Version: `7`
 - Description: Visual proposer driven by food, shelter, and predator cues inside the local visual field.
 - Outputs: `MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY, ORIENT_UP, ORIENT_DOWN, ORIENT_LEFT, ORIENT_RIGHT`
 - Save policy: `exact_match_required`
@@ -82,14 +105,21 @@
 | 15 | `predator_dy` | -1.0 | 1.0 | Relative vertical offset of the detected predator. |
 | 16 | `heading_dx` | -1.0 | 1.0 | Current horizontal body or gaze orientation. |
 | 17 | `heading_dy` | -1.0 | 1.0 | Current vertical body or gaze orientation. |
-| 18 | `food_trace_strength` | 0.0 | 1.0 | Decayed strength of the short food trace. |
-| 19 | `shelter_trace_strength` | 0.0 | 1.0 | Decayed strength of the short shelter trace. |
-| 20 | `predator_trace_strength` | 0.0 | 1.0 | Decayed strength of the short predator trace. |
-| 21 | `predator_motion_salience` | 0.0 | 1.0 | Explicit motion salience of the predator. |
-| 22 | `visual_predator_threat` | 0.0 | 1.0 | Aggregated threat from visually oriented predators. |
-| 23 | `olfactory_predator_threat` | 0.0 | 1.0 | Aggregated threat from olfactory predators. |
-| 24 | `day` | -1.0 | 1.0 | 1 during daytime. |
-| 25 | `night` | -1.0 | 1.0 | 1 during nighttime. |
+| 18 | `foveal_scan_age` | 0.0 | 1.0 | Normalized ticks since the current foveal heading was actively scanned; 0 is fresh and 1 is stale or never scanned. |
+| 19 | `food_trace_strength` | 0.0 | 1.0 | Decayed strength of the short food trace. |
+| 20 | `food_trace_heading_dx` | -1.0 | 1.0 | Horizontal heading active when the short food trace was refreshed. |
+| 21 | `food_trace_heading_dy` | -1.0 | 1.0 | Vertical heading active when the short food trace was refreshed. |
+| 22 | `shelter_trace_strength` | 0.0 | 1.0 | Decayed strength of the short shelter trace. |
+| 23 | `shelter_trace_heading_dx` | -1.0 | 1.0 | Horizontal heading active when the short shelter trace was refreshed. |
+| 24 | `shelter_trace_heading_dy` | -1.0 | 1.0 | Vertical heading active when the short shelter trace was refreshed. |
+| 25 | `predator_trace_strength` | 0.0 | 1.0 | Decayed strength of the short predator trace. |
+| 26 | `predator_trace_heading_dx` | -1.0 | 1.0 | Horizontal heading active when the short predator trace was refreshed. |
+| 27 | `predator_trace_heading_dy` | -1.0 | 1.0 | Vertical heading active when the short predator trace was refreshed. |
+| 28 | `predator_motion_salience` | 0.0 | 1.0 | Explicit motion salience of the predator. |
+| 29 | `visual_predator_threat` | 0.0 | 1.0 | Aggregated threat from visually oriented predators. |
+| 30 | `olfactory_predator_threat` | 0.0 | 1.0 | Aggregated threat from olfactory predators. |
+| 31 | `day` | -1.0 | 1.0 | 1 during daytime. |
+| 32 | `night` | -1.0 | 1.0 | 1 during nighttime. |
 
 ## `sensory_cortex`
 
@@ -119,7 +149,7 @@
 
 - Observation key: `hunger`
 - Role: `proposal`
-- Version: `3`
+- Version: `4`
 - Description: Homeostatic proposer aimed at foraging and returning to the last perceived food.
 - Outputs: `MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY, ORIENT_UP, ORIENT_DOWN, ORIENT_LEFT, ORIENT_RIGHT`
 - Save policy: `exact_match_required`
@@ -139,15 +169,17 @@
 | 11 | `food_trace_dx` | -1.0 | 1.0 | Horizontal direction of the short food trace. |
 | 12 | `food_trace_dy` | -1.0 | 1.0 | Vertical direction of the short food trace. |
 | 13 | `food_trace_strength` | 0.0 | 1.0 | Decayed strength of the short food trace. |
-| 14 | `food_memory_dx` | -1.0 | 1.0 | Horizontal direction of the last seen food. |
-| 15 | `food_memory_dy` | -1.0 | 1.0 | Vertical direction of the last seen food. |
-| 16 | `food_memory_age` | 0.0 | 1.0 | Normalized age of the food memory. |
+| 14 | `food_trace_heading_dx` | -1.0 | 1.0 | Horizontal heading active when the short food trace was refreshed. |
+| 15 | `food_trace_heading_dy` | -1.0 | 1.0 | Vertical heading active when the short food trace was refreshed. |
+| 16 | `food_memory_dx` | -1.0 | 1.0 | Horizontal direction of the last seen food. |
+| 17 | `food_memory_dy` | -1.0 | 1.0 | Vertical direction of the last seen food. |
+| 18 | `food_memory_age` | 0.0 | 1.0 | Normalized age of the food memory. |
 
 ## `sleep_center`
 
 - Observation key: `sleep`
 - Role: `proposal`
-- Version: `4`
+- Version: `5`
 - Description: Homeostatic proposer aimed at returning to shelter, resting, and seeking safe depth.
 - Outputs: `MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY, ORIENT_UP, ORIENT_DOWN, ORIENT_LEFT, ORIENT_RIGHT`
 - Save policy: `exact_match_required`
@@ -167,15 +199,17 @@
 | 11 | `shelter_trace_dx` | -1.0 | 1.0 | Horizontal direction of the short shelter trace. |
 | 12 | `shelter_trace_dy` | -1.0 | 1.0 | Vertical direction of the short shelter trace. |
 | 13 | `shelter_trace_strength` | 0.0 | 1.0 | Decayed strength of the short shelter trace. |
-| 14 | `shelter_memory_dx` | -1.0 | 1.0 | Horizontal direction of the nearest visible shelter cell. |
-| 15 | `shelter_memory_dy` | -1.0 | 1.0 | Vertical direction of the nearest visible shelter cell. |
-| 16 | `shelter_memory_age` | 0.0 | 1.0 | Normalized age of the nearest visible shelter cell memory. |
+| 14 | `shelter_trace_heading_dx` | -1.0 | 1.0 | Horizontal heading active when the short shelter trace was refreshed. |
+| 15 | `shelter_trace_heading_dy` | -1.0 | 1.0 | Vertical heading active when the short shelter trace was refreshed. |
+| 16 | `shelter_memory_dx` | -1.0 | 1.0 | Horizontal direction of the nearest visible shelter cell. |
+| 17 | `shelter_memory_dy` | -1.0 | 1.0 | Vertical direction of the nearest visible shelter cell. |
+| 18 | `shelter_memory_age` | 0.0 | 1.0 | Normalized age of the nearest visible shelter cell memory. |
 
 ## `alert_center`
 
 - Observation key: `alert`
 - Role: `proposal`
-- Version: `7`
+- Version: `8`
 - Description: Defensive proposer aimed at threat response, escape, and shelter prioritization under risk.
 - Outputs: `MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY, ORIENT_UP, ORIENT_DOWN, ORIENT_LEFT, ORIENT_RIGHT`
 - Save policy: `exact_match_required`
@@ -201,12 +235,14 @@
 | 17 | `predator_trace_dx` | -1.0 | 1.0 | Horizontal direction of the short predator trace. |
 | 18 | `predator_trace_dy` | -1.0 | 1.0 | Vertical direction of the short predator trace. |
 | 19 | `predator_trace_strength` | 0.0 | 1.0 | Decayed strength of the short predator trace. |
-| 20 | `predator_memory_dx` | -1.0 | 1.0 | Horizontal direction of the predator position perceived during visual detection or inferred from contact event. |
-| 21 | `predator_memory_dy` | -1.0 | 1.0 | Vertical direction of the predator position perceived during visual detection or inferred from contact event. |
-| 22 | `predator_memory_age` | 0.0 | 1.0 | Normalized age of the predator position perceived during visual detection or inferred from contact event. |
-| 23 | `escape_memory_dx` | -1.0 | 1.0 | Horizontal direction of the recent escape target derived from movement history without walkability assumptions. |
-| 24 | `escape_memory_dy` | -1.0 | 1.0 | Vertical direction of the recent escape target derived from movement history without walkability assumptions. |
-| 25 | `escape_memory_age` | 0.0 | 1.0 | Normalized age of the escape memory derived from movement history without walkability assumptions. |
+| 20 | `predator_trace_heading_dx` | -1.0 | 1.0 | Horizontal heading active when the short predator trace was refreshed. |
+| 21 | `predator_trace_heading_dy` | -1.0 | 1.0 | Vertical heading active when the short predator trace was refreshed. |
+| 22 | `predator_memory_dx` | -1.0 | 1.0 | Horizontal direction of the predator position perceived during visual detection or inferred from contact event. |
+| 23 | `predator_memory_dy` | -1.0 | 1.0 | Vertical direction of the predator position perceived during visual detection or inferred from contact event. |
+| 24 | `predator_memory_age` | 0.0 | 1.0 | Normalized age of the predator position perceived during visual detection or inferred from contact event. |
+| 25 | `escape_memory_dx` | -1.0 | 1.0 | Horizontal direction of the recent escape target derived from movement history without walkability assumptions. |
+| 26 | `escape_memory_dy` | -1.0 | 1.0 | Vertical direction of the recent escape target derived from movement history without walkability assumptions. |
+| 27 | `escape_memory_age` | 0.0 | 1.0 | Normalized age of the escape memory derived from movement history without walkability assumptions. |
 
 ## `action_center_context`
 
@@ -239,7 +275,7 @@
 
 - Observation key: `motor_context`
 - Role: `context`
-- Version: `4`
+- Version: `5`
 - Description: Raw context used by the motor_cortex to execute locomotion intent within local embodiment constraints.
 - Outputs: `MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY, ORIENT_UP, ORIENT_DOWN, ORIENT_LEFT, ORIENT_RIGHT`
 - Save policy: `exact_match_required`
@@ -259,3 +295,4 @@
 | 11 | `heading_dy` | -1.0 | 1.0 | Current vertical body orientation. |
 | 12 | `terrain_difficulty` | 0.0 | 1.0 | Local movement cost from the terrain under the spider. |
 | 13 | `fatigue` | 0.0 | 1.0 | Body fatigue affecting execution reliability. |
+| 14 | `momentum` | 0.0 | 1.0 | Bounded execution momentum state; motor-only body state, not decision-priority context. |

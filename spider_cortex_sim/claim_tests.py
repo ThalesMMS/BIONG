@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from enum import Enum
 from typing import Dict, Sequence
+
+
+WARM_START_MINIMAL_THRESHOLD = 0.25
 
 
 _LEARNING_WITHOUT_PRIVILEGED_SIGNAL_SCENARIOS: tuple[str, ...] = (
@@ -40,6 +45,44 @@ _SPECIALIZATION_EMERGENCE_SCENARIOS: tuple[str, ...] = (
 )
 
 
+class ScaffoldSupportLevel(str, Enum):
+    MINIMAL_MANUAL = "minimal_manual"
+    STANDARD_CONSTRAINED = "standard_constrained"
+    SCAFFOLDED_RUNTIME = "scaffolded_runtime"
+
+
+@dataclass(frozen=True)
+class ScaffoldAssessment:
+    support_level: ScaffoldSupportLevel
+    findings: tuple[str, ...]
+    benchmark_of_record_eligible: bool
+
+    def __post_init__(self) -> None:
+        level = (
+            self.support_level
+            if isinstance(self.support_level, ScaffoldSupportLevel)
+            else ScaffoldSupportLevel(self.support_level)
+        )
+        object.__setattr__(self, "support_level", level)
+        object.__setattr__(
+            self,
+            "findings",
+            tuple(str(finding) for finding in self.findings),
+        )
+        object.__setattr__(
+            self,
+            "benchmark_of_record_eligible",
+            bool(self.benchmark_of_record_eligible),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "support_level": self.support_level.value,
+            "findings": list(self.findings),
+            "benchmark_of_record_eligible": self.benchmark_of_record_eligible,
+        }
+
+
 @dataclass(frozen=True)
 class ClaimTestSpec:
     name: str
@@ -53,6 +96,7 @@ class ClaimTestSpec:
     effect_size_metric: str
     scenarios: tuple[str, ...]
     primary: bool = False
+    austere_survival_required: bool = False
 
     def __post_init__(self) -> None:
         """
@@ -82,8 +126,20 @@ class ClaimTestSpec:
             tuple(str(name) for name in self.scenarios),
         )
         object.__setattr__(self, "primary", bool(self.primary))
+        object.__setattr__(
+            self,
+            "austere_survival_required",
+            bool(self.austere_survival_required),
+        )
 
 
+# Claim tests encode emergence hypotheses: learned behavior without privileged
+# support, shelter memory improvements, noise stability, and predator-type
+# specialization. Capability probes are different: they map capability
+# boundaries and calibration outcomes inside the full benchmark. The following
+# scenarios are intentionally excluded from claim-test specs and are framed
+# canonically in scenarios.py: open_field_foraging, corridor_gauntlet,
+# exposed_day_foraging, and food_deprivation.
 _CLAIM_TEST_REGISTRY: Dict[str, ClaimTestSpec] = {
     "learning_without_privileged_signals": ClaimTestSpec(
         name="learning_without_privileged_signals",
@@ -112,6 +168,7 @@ _CLAIM_TEST_REGISTRY: Dict[str, ClaimTestSpec] = {
         effect_size_metric="scenario_success_rate_delta",
         scenarios=_LEARNING_WITHOUT_PRIVILEGED_SIGNAL_SCENARIOS,
         primary=True,
+        austere_survival_required=True,
     ),
     "escape_without_reflex_support": ClaimTestSpec(
         name="escape_without_reflex_support",
@@ -139,6 +196,7 @@ _CLAIM_TEST_REGISTRY: Dict[str, ClaimTestSpec] = {
         effect_size_metric="predator_response_scenario_success_rate_delta",
         scenarios=_ESCAPE_WITHOUT_REFLEX_SUPPORT_SCENARIOS,
         primary=True,
+        austere_survival_required=True,
     ),
     "memory_improves_shelter_return": ClaimTestSpec(
         name="memory_improves_shelter_return",
@@ -200,7 +258,8 @@ _CLAIM_TEST_REGISTRY: Dict[str, ClaimTestSpec] = {
         ),
         description=(
             "Multi-predator claim test that reads specialization through "
-            "ablation differentials and type-specific cortex engagement."
+            "ablation differentials, type-specific cortex engagement, and "
+            "representation-level proposer/action-center evidence."
         ),
         protocol=(
             "Compose the predator-type ablation comparison with "
@@ -208,7 +267,8 @@ _CLAIM_TEST_REGISTRY: Dict[str, ClaimTestSpec] = {
             "('drop_visual_cortex', 'drop_sensory_cortex') over "
             "visual_olfactory_pincer, olfactory_ambush, and "
             "visual_hunter_open_field, while also checking type-specific cortex "
-            "engagement in the reference traces."
+            "engagement in the reference traces and reading representation-level "
+            "evidence from the reference payload."
         ),
         reference_condition="modular_full",
         comparison_conditions=("drop_visual_cortex", "drop_sensory_cortex"),
@@ -218,13 +278,127 @@ _CLAIM_TEST_REGISTRY: Dict[str, ClaimTestSpec] = {
             "visual_minus_olfactory_success_rate <= -0.10, "
             "drop_sensory_cortex has visual_minus_olfactory_success_rate >= 0.10, "
             "and modular_full shows type-specific cortex engagement in at least "
-            "2 of the 3 specialization scenarios."
+            "2 of the 3 specialization scenarios while "
+            "representation_specialization_score >= 0.10."
         ),
         effect_size_metric="visual_minus_olfactory_success_rate_delta",
         scenarios=_SPECIALIZATION_EMERGENCE_SCENARIOS,
         primary=True,
+        austere_survival_required=True,
     ),
 }
+
+
+def _summary_flag(
+    config_summary: dict[str, object],
+    key: str,
+    *,
+    default: bool,
+) -> bool:
+    raw_value = config_summary.get(key, default)
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+        return default
+    return bool(raw_value)
+
+
+def _safe_support_float(
+    raw_value: object,
+    *,
+    default: float | None,
+) -> float | None:
+    if raw_value is None:
+        return default
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value):
+        return default
+    return value
+
+
+def assess_scaffold_support(
+    config_summary: dict[str, object],
+    eval_reflex_scale: float | None,
+) -> ScaffoldAssessment:
+    """
+    Classify claim-test scaffold support from the architecture summary and eval reflex scale.
+
+    Parameters:
+        config_summary: JSON-friendly architecture summary, typically from
+            `BrainAblationConfig.to_summary()`.
+        eval_reflex_scale: Reflex support scale observed at evaluation time.
+
+    Returns:
+        A normalized scaffold assessment with a support tier, findings, and
+        benchmark-of-record eligibility.
+    """
+    findings: list[str] = []
+    enable_deterministic_guards = _summary_flag(
+        config_summary,
+        "enable_deterministic_guards",
+        default=False,
+    )
+    enable_food_direction_bias = _summary_flag(
+        config_summary,
+        "enable_food_direction_bias",
+        default=False,
+    )
+    use_learned_arbitration = _summary_flag(
+        config_summary,
+        "use_learned_arbitration",
+        default=True,
+    )
+    raw_warm_start_scale = config_summary.get("warm_start_scale", 0.0)
+    warm_start_scale = _safe_support_float(
+        raw_warm_start_scale,
+        default=0.0,
+    )
+    effective_eval_reflex_scale = _safe_support_float(
+        eval_reflex_scale,
+        default=None,
+    )
+
+    if enable_deterministic_guards:
+        findings.append("deterministic_guards_enabled")
+    if enable_food_direction_bias:
+        findings.append("food_direction_bias_enabled")
+    if warm_start_scale > WARM_START_MINIMAL_THRESHOLD:
+        findings.append("warm_start_prior_active")
+    if not use_learned_arbitration:
+        findings.append("fixed_arbitration_runtime")
+    if (
+        effective_eval_reflex_scale is not None
+        and effective_eval_reflex_scale > 0.0
+    ):
+        findings.append("reflex_support_at_eval")
+
+    if (
+        enable_deterministic_guards
+        or enable_food_direction_bias
+        or (
+            effective_eval_reflex_scale is not None
+            and effective_eval_reflex_scale > 0.0
+        )
+    ):
+        support_level = ScaffoldSupportLevel.SCAFFOLDED_RUNTIME
+    elif warm_start_scale > WARM_START_MINIMAL_THRESHOLD or not use_learned_arbitration:
+        support_level = ScaffoldSupportLevel.STANDARD_CONSTRAINED
+    else:
+        support_level = ScaffoldSupportLevel.MINIMAL_MANUAL
+
+    return ScaffoldAssessment(
+        support_level=support_level,
+        findings=findings,
+        benchmark_of_record_eligible=(
+            support_level is ScaffoldSupportLevel.MINIMAL_MANUAL
+        ),
+    )
 
 
 def canonical_claim_tests() -> list[ClaimTestSpec]:
@@ -274,6 +448,10 @@ def resolve_claim_tests(names: Sequence[str] | None) -> list[ClaimTestSpec]:
 
 __all__ = [
     "ClaimTestSpec",
+    "ScaffoldAssessment",
+    "ScaffoldSupportLevel",
+    "WARM_START_MINIMAL_THRESHOLD",
+    "assess_scaffold_support",
     "canonical_claim_tests",
     "claim_test_names",
     "primary_claim_test_names",

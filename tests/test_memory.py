@@ -9,14 +9,34 @@ from spider_cortex_sim.memory import (
     escape_memory_target,
     memory_leakage_audit,
     memory_vector,
+    refresh_all_memory,
     refresh_memory,
+    refresh_perceptual_state,
     set_memory,
 )
+from spider_cortex_sim.perception import trace_strength
 from spider_cortex_sim.world import SpiderWorld
 from spider_cortex_sim.world_types import MemorySlot
 
 
 class MemoryModuleTest(unittest.TestCase):
+    def _place_spider_facing_adjacent_food(self, world: SpiderWorld) -> tuple[int, int]:
+        pair = None
+        for x in range(world.width - 1):
+            for y in range(world.height):
+                if world.is_walkable((x, y)) and world.is_walkable((x + 1, y)):
+                    pair = ((x, y), (x + 1, y))
+                    break
+            if pair is not None:
+                break
+        self.assertIsNotNone(pair)
+        current, food = pair
+        world.state.x, world.state.y = current
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        world.food_positions = [food]
+        return food
+
     def test_empty_memory_slot_starts_cleared(self) -> None:
         slot = empty_memory_slot()
         self.assertIsNone(slot.target)
@@ -44,6 +64,28 @@ class MemoryModuleTest(unittest.TestCase):
         world.state.last_move_dx = 1
         world.state.last_move_dy = 0
         self.assertEqual(escape_memory_target(world), (3, 2))
+
+    def test_refresh_perceptual_state_updates_visible_food_trace(self) -> None:
+        world = SpiderWorld(seed=4, lizard_move_interval=999999)
+        world.reset(seed=4)
+        food = self._place_spider_facing_adjacent_food(world)
+
+        refresh_perceptual_state(world)
+
+        self.assertEqual(world.state.food_trace.target, food)
+        self.assertGreater(trace_strength(world, world.state.food_trace), 0.0)
+        self.assertEqual((world.state.food_trace.heading_dx, world.state.food_trace.heading_dy), (1, 0))
+
+    def test_refresh_all_memory_updates_slots_and_percept_traces(self) -> None:
+        world = SpiderWorld(seed=5, lizard_move_interval=999999)
+        world.reset(seed=5)
+        food = self._place_spider_facing_adjacent_food(world)
+
+        refresh_all_memory(world, initial=True)
+
+        self.assertEqual(world.state.food_memory.target, food)
+        self.assertEqual(world.state.food_trace.target, food)
+        self.assertEqual((world.state.food_trace.heading_dx, world.state.food_trace.heading_dy), (1, 0))
 
     def test_escape_memory_target_does_not_check_walkability(self) -> None:
         cases = (
@@ -102,6 +144,8 @@ class MemoryModuleTest(unittest.TestCase):
         world = SpiderWorld(seed=5, lizard_move_interval=999999)
         world.reset(seed=5)
         world.state.x, world.state.y = 2, 2
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
         visible_shelter_cell = (world.state.x + 1, world.state.y)
         far_edge_cell = (world.width - 1, world.height - 1)
         world.lizard.x, world.lizard.y = far_edge_cell
@@ -246,9 +290,21 @@ class MemoryModuleTest(unittest.TestCase):
             self.assertEqual(audit[slot_name]["classification"], "plausible_memory")
             self.assertEqual(audit[slot_name]["risk"], "low")
 
-    def test_memory_leakage_audit_returns_all_four_expected_keys(self) -> None:
+    def test_memory_leakage_audit_returns_expected_keys(self) -> None:
         audit = memory_leakage_audit()
-        expected_keys = {"food_memory", "predator_memory", "shelter_memory", "escape_memory"}
+        expected_keys = {
+            "food_memory",
+            "predator_memory",
+            "shelter_memory",
+            "escape_memory",
+            "foveal_scan_age",
+            "food_trace_heading_dx",
+            "food_trace_heading_dy",
+            "shelter_trace_heading_dx",
+            "shelter_trace_heading_dy",
+            "predator_trace_heading_dx",
+            "predator_trace_heading_dy",
+        }
         self.assertEqual(set(audit.keys()), expected_keys)
 
     def test_memory_leakage_audit_returns_deep_copy_not_reference(self) -> None:
@@ -304,6 +360,28 @@ class MemoryModuleTest(unittest.TestCase):
         self.assertEqual(audit["escape_memory"]["classification"], "plausible_memory")
         self.assertEqual(audit["escape_memory"]["risk"], "low")
 
+    def test_memory_leakage_audit_active_sensing_signals_are_self_knowledge(self) -> None:
+        audit = memory_leakage_audit()
+        signal_names = (
+            "foveal_scan_age",
+            "food_trace_heading_dx",
+            "food_trace_heading_dy",
+            "shelter_trace_heading_dx",
+            "shelter_trace_heading_dy",
+            "predator_trace_heading_dx",
+            "predator_trace_heading_dy",
+        )
+        for signal_name in signal_names:
+            self.assertEqual(audit[signal_name]["classification"], "self-knowledge")
+            self.assertEqual(audit[signal_name]["risk"], "low")
+
+    def test_memory_leakage_audit_active_sensing_notes_reject_privileged_state(self) -> None:
+        audit = memory_leakage_audit()
+        self.assertIn("inspection history", audit["foveal_scan_age"]["notes"])
+        self.assertIn("not privileged world state", audit["foveal_scan_age"]["notes"])
+        self.assertIn("not a target direction", audit["food_trace_heading_dx"]["notes"])
+        self.assertIn("hidden location", audit["predator_trace_heading_dy"]["notes"])
+
     def test_memory_leakage_audit_risk_values_are_valid(self) -> None:
         audit = memory_leakage_audit()
         valid_risk_levels = {"low", "medium", "high"}
@@ -316,7 +394,7 @@ class MemoryModuleTest(unittest.TestCase):
 
     def test_memory_leakage_audit_world_owned_slots_count(self) -> None:
         """
-        Perception-grounded explicit memory should leave no world-owned slots.
+        Perception-grounded explicit memory should have zero slots classified as world_owned_memory.
         """
         audit = memory_leakage_audit()
         world_owned = [

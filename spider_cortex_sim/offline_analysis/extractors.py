@@ -1,238 +1,28 @@
 from __future__ import annotations
 
-import argparse
-import csv
-import json
 import math
 from collections import Counter, defaultdict
-from html import escape
-from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
-from .ablations import compare_predator_type_ablation_performance
-from .noise import canonical_noise_profile_names
-
-DEFAULT_MODULE_NAMES: tuple[str, ...] = (
-    "visual_cortex",
-    "sensory_cortex",
-    "hunger_center",
-    "sleep_center",
-    "alert_center",
-    "monolithic_policy",
+from ..ablations import compare_predator_type_ablation_performance
+from .constants import (
+    CANONICAL_NOISE_CONDITIONS,
+    DEFAULT_MINIMAL_SHAPING_SURVIVAL_THRESHOLD,
+    DEFAULT_MODULE_NAMES,
+    REFLEX_DOMINANCE_WARNING_THRESHOLD,
+    REFLEX_OVERRIDE_WARNING_THRESHOLD,
+    SHAPING_DEPENDENCE_WARNING_THRESHOLD,
 )
-
-REFLEX_OVERRIDE_WARNING_THRESHOLD = 0.10
-REFLEX_DOMINANCE_WARNING_THRESHOLD = 0.25
-SHAPING_DEPENDENCE_WARNING_THRESHOLD = 0.20
-DEFAULT_MINIMAL_SHAPING_SURVIVAL_THRESHOLD = 0.50
-CANONICAL_NOISE_CONDITIONS: tuple[str, ...] = canonical_noise_profile_names()
-
-
-def _coerce_float(value: object, default: float = 0.0) -> float:
-    """
-    Convert a value to a finite float, with a safe fallback.
-    
-    Attempts to coerce `value` to a `float`. Booleans are converted as numeric (`True` -> `1.0`, `False` -> `0.0`). Returns `default` when `value` is `None`, cannot be converted to a float, or converts to a non-finite value (`NaN`, `inf`).
-    
-    Parameters:
-        value (object): The input to convert.
-        default (float): The value to return when conversion is not possible or yields a non-finite result.
-    
-    Returns:
-        float: The finite float representation of `value`, or `default` if conversion fails or yields a non-finite value.
-    """
-    if isinstance(value, bool):
-        return float(value)
-    if value is None:
-        return default
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(result):
-        return default
-    return result
-
-
-def _coerce_optional_float(value: object) -> float | None:
-    if value is None:
-        return None
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(result):
-        return None
-    return result
-
-
-def _coerce_bool(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    text = str(value).strip().lower()
-    return text in {"1", "true", "yes", "y", "on"}
-
-
-def _safe_divide(numerator: float, denominator: float) -> float:
-    if denominator <= 0.0:
-        return 0.0
-    return float(numerator / denominator)
-
-
-def _mean(values: Iterable[float]) -> float:
-    """
-    Compute the arithmetic mean of an iterable of numbers.
-    
-    Returns:
-        The mean of the input values as a float, or 0.0 if the iterable is empty.
-    """
-    items = list(values)
-    if not items:
-        return 0.0
-    return float(sum(items) / len(items))
-
-
-def _dominant_module_by_score(modules: Mapping[str, float]) -> str:
-    """
-    Return the module name with the largest numeric value from a mapping of module -> score.
-
-    Parameters:
-        modules (Mapping[str, float]): Mapping from module name to a numeric score.
-
-    Returns:
-        str: The module name with the highest score, or an empty string if `modules` is empty.
-    """
-    if not modules:
-        return ""
-    return max(modules.items(), key=lambda item: _coerce_float(item[1]))[0]
-
-
-def _mapping_or_empty(value: object) -> Mapping[str, object]:
-    """
-    Normalize a value to a mapping, yielding an empty mapping when the input is not a mapping.
-
-    Parameters:
-        value (object): The value to normalize; if it is a Mapping it is returned unchanged.
-
-    Returns:
-        Mapping[str, object]: The original mapping when `value` is a Mapping, otherwise an empty mapping.
-    """
-    if isinstance(value, Mapping):
-        return value
-    return {}
-
-
-def _format_optional_metric(value: float | None) -> str:
-    return "—" if value is None else f"{value:.2f}"
-
-
-def load_summary(path: str | Path | None) -> dict[str, object]:
-    """
-    Load and parse a JSON summary file into a dictionary.
-    
-    Parameters:
-        path (str | Path | None): Path to a JSON file. If `None`, no file is read.
-    
-    Returns:
-        dict[str, object]: Parsed JSON object from the file, or an empty dict when `path` is `None`.
-    """
-    if path is None:
-        return {}
-    return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
-def load_trace(path: str | Path | None) -> list[dict[str, object]]:
-    if path is None:
-        return []
-    items: list[dict[str, object]] = []
-    with Path(path).open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            payload = json.loads(line)
-            if isinstance(payload, dict):
-                items.append(payload)
-    return items
-
-
-def load_behavior_csv(path: str | Path | None) -> list[dict[str, object]]:
-    if path is None:
-        return []
-    with Path(path).open(encoding="utf-8", newline="") as fh:
-        return list(csv.DictReader(fh))
-
-
-def normalize_behavior_rows(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """
-    Normalize and canonicalize behavior CSV rows for downstream analysis.
-    
-    Converts each input mapping into a dictionary with standardized string keys and coerced/typed fields suitable for the rest of the pipeline. Normalized fields include canonical map/profile names and numeric/bool conversions for common metrics.
-    
-    Parameters:
-        rows (Sequence[Mapping[str, object]]): Iterable of raw behavior rows (e.g., csv.DictReader rows or similar mappings).
-    
-    Returns:
-        list[dict[str, object]]: A list of normalized row dictionaries. Each row will contain canonical keys and coerced values, notably:
-            - evaluation_map, map_template, scenario_map (str)
-            - reward_profile, ablation_variant, ablation_architecture, operational_profile, budget_profile (str)
-            - train_noise_profile, eval_noise_profile (str)
-            - scenario (str)
-            - success (bool)
-            - failure_count, simulation_seed, episode_seed, episode (int)
-            - reflex_scale, reflex_anneal_final_scale, eval_reflex_scale (float)
-    """
-    normalized: list[dict[str, object]] = []
-    for row in rows:
-        item = {str(key): value for key, value in dict(row).items()}
-        evaluation_map = str(
-            item.get("evaluation_map")
-            or item.get("map_template")
-            or item.get("scenario_map")
-            or ""
-        )
-        scenario_map = str(item.get("scenario_map") or evaluation_map)
-        reward_profile = str(item.get("reward_profile") or "")
-        ablation_variant = str(item.get("ablation_variant") or "")
-        ablation_architecture = str(item.get("ablation_architecture") or "")
-        operational_profile = str(item.get("operational_profile") or "")
-        budget_profile = str(item.get("budget_profile") or "")
-        train_noise_profile = str(item.get("train_noise_profile") or "")
-        eval_noise_profile = str(
-            item.get("eval_noise_profile")
-            or item.get("noise_profile")
-            or ""
-        )
-        item["evaluation_map"] = evaluation_map
-        item["map_template"] = evaluation_map
-        item["scenario_map"] = scenario_map
-        item["reward_profile"] = reward_profile
-        item["ablation_variant"] = ablation_variant
-        item["ablation_architecture"] = ablation_architecture
-        item["operational_profile"] = operational_profile
-        item["budget_profile"] = budget_profile
-        item["train_noise_profile"] = train_noise_profile
-        item["eval_noise_profile"] = eval_noise_profile
-        item["scenario"] = str(item.get("scenario") or "")
-        item["success"] = _coerce_bool(item.get("success"))
-        item["failure_count"] = int(_coerce_float(item.get("failure_count"), 0.0))
-        item["simulation_seed"] = int(_coerce_float(item.get("simulation_seed"), 0.0))
-        item["episode_seed"] = int(_coerce_float(item.get("episode_seed"), 0.0))
-        item["episode"] = int(_coerce_float(item.get("episode"), 0.0))
-        item["reflex_scale"] = _coerce_float(item.get("reflex_scale"), 0.0)
-        item["reflex_anneal_final_scale"] = _coerce_float(
-            item.get("reflex_anneal_final_scale"),
-            item["reflex_scale"],
-        )
-        item["eval_reflex_scale"] = _coerce_float(
-            item.get("eval_reflex_scale"),
-            item["reflex_scale"],
-        )
-        normalized.append(item)
-    return normalized
-
+from .uncertainty import _payload_has_zero_reflex_scale, _payload_uncertainty
+from .utils import (
+    _coerce_bool,
+    _coerce_float,
+    _coerce_optional_float,
+    _dominant_module_by_score,
+    _mapping_or_empty,
+    _mean,
+    _safe_divide,
+)
 
 def _extract_reward_from_episode(detail: Mapping[str, object]) -> float:
     if "total_reward" in detail:
@@ -900,7 +690,7 @@ def _variant_with_minimal_reflex_support(
     without_reflex = payload.get("without_reflex_support")
     if not isinstance(without_reflex, Mapping):
         return result
-    for key in ("summary", "suite", "legacy_scenarios"):
+    for key in ("summary", "suite", "legacy_scenarios", "seed_level", "uncertainty"):
         if key in without_reflex:
             value = without_reflex[key]
             result[key] = dict(value) if isinstance(value, Mapping) else value
@@ -1084,6 +874,9 @@ def build_primary_benchmark(
                     "label": label,
                     "metric": metric_name,
                     "scenario_success_rate": _coerce_float(summary_payload.get(metric_name)),
+                    "uncertainty": dict(
+                        _payload_uncertainty(reference_payload, metric_name)
+                    ),
                     "eval_reflex_scale": _coerce_float(
                         summary_payload.get(
                             "eval_reflex_scale",
@@ -1108,6 +901,7 @@ def build_primary_benchmark(
                 "label": label,
                 "metric": metric_name,
                 "scenario_success_rate": _coerce_float(no_reflex_summary.get(metric_name)),
+                "uncertainty": dict(_payload_uncertainty(no_reflex_eval, metric_name)),
                 "eval_reflex_scale": _coerce_float(
                     no_reflex_summary.get(
                         "eval_reflex_scale",
@@ -1118,6 +912,37 @@ def build_primary_benchmark(
                 "reference_variant": "",
                 "source": "summary.evaluation_without_reflex_support.summary",
                 "interpretation": "Higher is better; this benchmark is evaluated with reflex support disabled.",
+            }
+
+    behavior_evaluation = summary.get("behavior_evaluation", {})
+    if isinstance(behavior_evaluation, Mapping):
+        behavior_summary = behavior_evaluation.get("summary", {})
+        if (
+            isinstance(behavior_summary, Mapping)
+            and metric_name in behavior_summary
+            and _payload_has_zero_reflex_scale(behavior_evaluation)
+        ):
+            return {
+                "available": True,
+                "primary": True,
+                "label": label,
+                "metric": metric_name,
+                "scenario_success_rate": _coerce_float(
+                    behavior_summary.get(metric_name)
+                ),
+                "uncertainty": dict(
+                    _payload_uncertainty(behavior_evaluation, metric_name)
+                ),
+                "eval_reflex_scale": _coerce_float(
+                    behavior_summary.get(
+                        "eval_reflex_scale",
+                        behavior_evaluation.get("eval_reflex_scale"),
+                    ),
+                    0.0,
+                ),
+                "reference_variant": "",
+                "source": "summary.behavior_evaluation.summary",
+                "interpretation": "Higher is better; this benchmark is evaluated with reflex support disabled when eval_reflex_scale is 0.0.",
             }
 
     evaluation = summary.get("evaluation", {})
@@ -1132,6 +957,7 @@ def build_primary_benchmark(
                     "label": label,
                     "metric": metric_name,
                     "scenario_success_rate": _coerce_float(evaluation.get(metric_name)),
+                    "uncertainty": dict(_payload_uncertainty(evaluation, metric_name)),
                     "eval_reflex_scale": eval_reflex_scale,
                     "reference_variant": "",
                     "source": "summary.evaluation",
@@ -1152,6 +978,7 @@ def build_primary_benchmark(
                 "label": label,
                 "metric": metric_name,
                 "scenario_success_rate": _mean(values),
+                "uncertainty": {},
                 "eval_reflex_scale": None,
                 "reference_variant": "",
                 "source": str(scenario_success.get("source") or ""),
@@ -1164,6 +991,7 @@ def build_primary_benchmark(
         "label": label,
         "metric": metric_name,
         "scenario_success_rate": 0.0,
+        "uncertainty": {},
         "eval_reflex_scale": None,
         "reference_variant": "",
         "source": "none",
@@ -1996,6 +1824,195 @@ def _normalize_module_response_by_predator_type(
     return normalized
 
 
+def _normalize_float_map(value: object) -> dict[str, float]:
+    """Normalize a mapping of string-like keys to finite floats."""
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(name): _coerce_float(item_value)
+        for name, item_value in value.items()
+    }
+
+
+def _extract_first_present_float_map(
+    payload: Mapping[str, object],
+    keys: Sequence[str],
+) -> tuple[dict[str, float], bool]:
+    """Return the first alias that yields at least one coercible float value."""
+    for key in keys:
+        value = payload.get(key)
+        if not isinstance(value, Mapping) or len(value) == 0:
+            continue
+        normalized: dict[str, float] = {}
+        for name, item_value in value.items():
+            coerced = _coerce_optional_float(item_value)
+            if coerced is None:
+                continue
+            normalized[str(name)] = coerced
+        if normalized:
+            return normalized, True
+    return {}, False
+
+
+def _extract_first_present_float(
+    payload: Mapping[str, object],
+    keys: Sequence[str],
+) -> tuple[float, bool]:
+    """Return the first alias that can be coerced into a finite float."""
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        coerced = _coerce_optional_float(value)
+        if coerced is None:
+            continue
+        return coerced, True
+    return 0.0, False
+
+
+def _representation_interpretation(
+    score: float,
+    *,
+    insufficient_data: bool = False,
+) -> str:
+    """Bucket a specialization score into the canonical interpretation labels."""
+    if insufficient_data:
+        return "insufficient_data"
+    if score >= 0.50:
+        return "high"
+    if score >= 0.20:
+        return "moderate"
+    return "low"
+
+
+def _representation_payload(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Normalize representation-specialization fields from a summary payload."""
+    proposer_divergence, has_proposer_divergence = _extract_first_present_float_map(
+        payload,
+        (
+            "mean_proposer_divergence_by_module",
+            "proposer_divergence_by_module",
+        ),
+    )
+    action_center_gate_differential, has_gate = _extract_first_present_float_map(
+        payload,
+        (
+            "mean_action_center_gate_differential",
+            "action_center_gate_differential",
+        ),
+    )
+    action_center_contribution_differential, has_contribution = (
+        _extract_first_present_float_map(
+            payload,
+            (
+                "mean_action_center_contribution_differential",
+                "action_center_contribution_differential",
+            ),
+        )
+    )
+    representation_specialization_score, has_score = _extract_first_present_float(
+        payload,
+        (
+            "mean_representation_specialization_score",
+            "representation_specialization_score",
+        ),
+    )
+    score_value: float | None = None
+    if has_score:
+        score_value = representation_specialization_score
+    elif proposer_divergence:
+        score_value = _mean(proposer_divergence.values())
+    if score_value is not None:
+        score_value = max(
+            0.0,
+            min(1.0, score_value),
+        )
+    return {
+        "proposer_divergence": proposer_divergence,
+        "action_center_gate_differential": action_center_gate_differential,
+        "action_center_contribution_differential": (
+            action_center_contribution_differential
+        ),
+        "representation_specialization_score": score_value,
+        "has_any_field": any(
+            (
+                has_proposer_divergence,
+                has_gate,
+                has_contribution,
+                has_score,
+            )
+        ),
+    }
+
+
+def _aggregate_representation_from_scenarios(
+    scenarios: Mapping[str, object],
+) -> dict[str, object]:
+    """Aggregate representation-specialization means across scenario payloads."""
+    proposer_divergence_values: dict[str, list[float]] = defaultdict(list)
+    gate_differential_values: dict[str, list[float]] = defaultdict(list)
+    contribution_differential_values: dict[str, list[float]] = defaultdict(list)
+    scores: list[float] = []
+    has_any_field = False
+
+    for payload in scenarios.values():
+        if not isinstance(payload, Mapping):
+            continue
+        representation = _representation_payload(payload)
+        if not bool(representation.get("has_any_field")):
+            legacy_metrics = payload.get("legacy_metrics", {})
+            if isinstance(legacy_metrics, Mapping):
+                representation = _representation_payload(legacy_metrics)
+        if not bool(representation.get("has_any_field")):
+            continue
+        has_any_field = True
+        for module_name, value in _normalize_float_map(
+            representation.get("proposer_divergence")
+        ).items():
+            proposer_divergence_values[module_name].append(value)
+        for module_name, value in _normalize_float_map(
+            representation.get("action_center_gate_differential")
+        ).items():
+            gate_differential_values[module_name].append(value)
+        for module_name, value in _normalize_float_map(
+            representation.get("action_center_contribution_differential")
+        ).items():
+            contribution_differential_values[module_name].append(value)
+        score_value = representation.get("representation_specialization_score")
+        if score_value is not None:
+            scores.append(_coerce_float(score_value))
+
+    proposer_divergence = {
+        module_name: _mean(values)
+        for module_name, values in sorted(proposer_divergence_values.items())
+    }
+    action_center_gate_differential = {
+        module_name: _mean(values)
+        for module_name, values in sorted(gate_differential_values.items())
+    }
+    action_center_contribution_differential = {
+        module_name: _mean(values)
+        for module_name, values in sorted(contribution_differential_values.items())
+    }
+    representation_specialization_score = _mean(scores)
+    if not scores and proposer_divergence:
+        representation_specialization_score = _mean(proposer_divergence.values())
+    return {
+        "proposer_divergence": proposer_divergence,
+        "action_center_gate_differential": action_center_gate_differential,
+        "action_center_contribution_differential": (
+            action_center_contribution_differential
+        ),
+        "representation_specialization_score": max(
+            0.0,
+            min(1.0, representation_specialization_score),
+        ),
+        "has_any_field": has_any_field,
+    }
+
+
 def _aggregate_specialization_from_scenarios(
     scenarios: Mapping[str, object],
 ) -> dict[str, dict[str, float]]:
@@ -2234,6 +2251,100 @@ def extract_predator_type_specialization(
     }
 
 
+def _build_representation_specialization_result(
+    payload: Mapping[str, object],
+    source: str,
+) -> dict[str, object]:
+    """Build the public representation-specialization result from normalized metrics."""
+    proposer_divergence = _normalize_float_map(payload.get("proposer_divergence"))
+    score = _coerce_float(payload.get("representation_specialization_score"))
+    insufficient_data = not proposer_divergence and score <= 0.0
+    limitations: list[str] = []
+
+    if source == "summary.behavior_evaluation.suite":
+        limitations.append(
+            "Representation specialization was aggregated from suite-level scenario summaries because summary.evaluation did not expose these metrics."
+        )
+        if insufficient_data:
+            limitations.append(
+                "Suite-level representation specialization did not include paired proposer divergence evidence."
+            )
+    elif insufficient_data:
+        limitations.append(
+            "Representation specialization metrics were present but did not include paired proposer divergence evidence."
+        )
+
+    return {
+        "available": True,
+        "source": source,
+        "proposer_divergence": proposer_divergence,
+        "action_center_gate_differential": _normalize_float_map(
+            payload.get("action_center_gate_differential")
+        ),
+        "action_center_contribution_differential": _normalize_float_map(
+            payload.get("action_center_contribution_differential")
+        ),
+        "representation_specialization_score": score,
+        "interpretation": _representation_interpretation(
+            score,
+            insufficient_data=insufficient_data,
+        ),
+        "limitations": limitations,
+    }
+
+
+def extract_representation_specialization(
+    summary: Mapping[str, object],
+    behavior_rows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """
+    Extract representation-specialization aggregates from evaluation or suite payloads.
+
+    The preferred source is `summary.evaluation`. When that is absent, this
+    falls back to the arithmetic mean across `summary.behavior_evaluation.suite`
+    scenario aggregates.
+
+    Cross-tier interpretation matters when behavior and representation disagree:
+    high behavioral specialization with low representation separation points to
+    downstream gating or scenario asymmetry rather than clean proposer
+    separation, while low behavioral specialization with emerging
+    representation-level separation suggests internal differentiation that has
+    not yet matured into stable policy behavior.
+    """
+    del behavior_rows
+
+    evaluation = _mapping_or_empty(summary.get("evaluation"))
+    evaluation_payload = _representation_payload(evaluation)
+    if bool(evaluation_payload.get("has_any_field")):
+        return _build_representation_specialization_result(
+            evaluation_payload,
+            "summary.evaluation",
+        )
+
+    behavior_evaluation = _mapping_or_empty(summary.get("behavior_evaluation"))
+    suite_payload = _aggregate_representation_from_scenarios(
+        _mapping_or_empty(behavior_evaluation.get("suite"))
+    )
+    if bool(suite_payload.get("has_any_field")):
+        return _build_representation_specialization_result(
+            suite_payload,
+            "summary.behavior_evaluation.suite",
+        )
+
+    return {
+        "available": False,
+        "source": "none",
+        "proposer_divergence": {},
+        "action_center_gate_differential": {},
+        "action_center_contribution_differential": {},
+        "representation_specialization_score": 0.0,
+        "interpretation": "insufficient_data",
+        "limitations": [
+            "No representation-specialization aggregates were available in summary.evaluation or summary.behavior_evaluation.suite.",
+        ],
+    }
+
+
 def extract_ablations(
     summary: Mapping[str, object],
     behavior_rows: Sequence[Mapping[str, object]],
@@ -2460,1296 +2571,3 @@ def extract_reflex_frequency(trace: Sequence[Mapping[str, object]]) -> dict[str,
         "uses_debug_reflexes": uses_debug_reflexes,
         "limitations": limitations,
     }
-
-
-def build_scenario_checks_rows(
-    scenario_success: Mapping[str, object],
-) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for scenario in scenario_success.get("scenarios", []) if isinstance(scenario_success.get("scenarios"), list) else []:
-        if not isinstance(scenario, Mapping):
-            continue
-        checks = scenario.get("checks", {})
-        if not isinstance(checks, Mapping):
-            continue
-        for check_name, payload in sorted(checks.items()):
-            if not isinstance(payload, Mapping):
-                continue
-            rows.append(
-                {
-                    "scenario": str(scenario.get("scenario") or ""),
-                    "check_name": str(check_name),
-                    "pass_rate": round(_coerce_float(payload.get("pass_rate")), 6),
-                    "mean_value": round(_coerce_float(payload.get("mean_value")), 6),
-                    "expected": str(payload.get("expected") or ""),
-                    "description": str(payload.get("description") or ""),
-                    "source": str(scenario_success.get("source") or ""),
-                }
-            )
-    return rows
-
-
-def build_reward_component_rows(
-    summary: Mapping[str, object],
-    scenario_success: Mapping[str, object],
-    trace: Sequence[Mapping[str, object]],
-) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-
-    def add_components(source: str, scope: str, components: object) -> None:
-        if not isinstance(components, Mapping):
-            return
-        for component, value in sorted(components.items()):
-            rows.append(
-                {
-                    "source": source,
-                    "scope": scope,
-                    "component": str(component),
-                    "value": round(_coerce_float(value), 6),
-                }
-            )
-
-    for aggregate_name in ("training", "training_last_window", "evaluation"):
-        aggregate = summary.get(aggregate_name, {})
-        if isinstance(aggregate, Mapping):
-            add_components(
-                "summary",
-                aggregate_name,
-                aggregate.get("mean_reward_components"),
-            )
-
-    for scenario in scenario_success.get("scenarios", []) if isinstance(scenario_success.get("scenarios"), list) else []:
-        if not isinstance(scenario, Mapping):
-            continue
-        legacy_metrics = scenario.get("legacy_metrics")
-        if isinstance(legacy_metrics, Mapping):
-            add_components(
-                "behavior_evaluation.suite",
-                f"scenario:{scenario.get('scenario')}",
-                legacy_metrics.get("mean_reward_components"),
-            )
-
-    trace_totals: defaultdict[str, float] = defaultdict(float)
-    for item in trace:
-        components = item.get("reward_components")
-        if not isinstance(components, Mapping):
-            continue
-        for component, value in components.items():
-            trace_totals[str(component)] += _coerce_float(value)
-    if trace_totals:
-        add_components("trace", "trace_total", trace_totals)
-    return rows
-
-
-def build_diagnostics(
-    summary: Mapping[str, object],
-    scenario_success: Mapping[str, object],
-    ablations: Mapping[str, object],
-    reflex_frequency: Mapping[str, object],
-) -> list[dict[str, object]]:
-    """
-    Builds a list of diagnostic metric entries summarizing evaluation metrics, reflex-dependence indicators, weakest scenario, best ablation variant, and most frequent reflex source.
-    
-    Parameters:
-        summary (Mapping[str, object]): Parsed evaluation/training summary data used to extract aggregate evaluation metrics and evaluation-derived reflex indicators.
-        scenario_success (Mapping[str, object]): Normalized scenario success payload containing a `scenarios` list used to identify the weakest scenario.
-        ablations (Mapping[str, object]): Ablation variants payload used to rank variants by minimal-reflex `scenario_success_rate`.
-        reflex_frequency (Mapping[str, object]): Trace-derived reflex frequency payload containing `modules` used to identify the most frequent reflex source.
-    
-    Returns:
-        list[dict[str, object]]: A list of diagnostic rows. Each entry contains at least:
-            - `label` (str): Human-readable metric name.
-            - `value` (str|number): Display value for the metric.
-          Failure-indicator entries (for reflex dependence) additionally include:
-            - `status` (str), `warning_threshold` (float), `failure_indicator` (bool), and `source` (str).
-    """
-    diagnostics: list[dict[str, object]] = []
-    evaluation = summary.get("evaluation", {})
-    if isinstance(evaluation, Mapping):
-        diagnostics.extend(
-            [
-                {
-                    "label": "Evaluation mean reward",
-                    "value": round(_coerce_float(evaluation.get("mean_reward")), 6),
-                },
-                {
-                    "label": "Evaluation mean food distance delta",
-                    "value": round(
-                        _coerce_float(evaluation.get("mean_food_distance_delta")),
-                        6,
-                    ),
-                },
-                {
-                    "label": "Evaluation mean shelter distance delta",
-                    "value": round(
-                        _coerce_float(evaluation.get("mean_shelter_distance_delta")),
-                        6,
-                    ),
-                },
-                {
-                    "label": "Evaluation predator mode transitions",
-                    "value": round(
-                        _coerce_float(evaluation.get("mean_predator_mode_transitions")),
-                        6,
-                    ),
-                },
-                {
-                    "label": "Evaluation dominant predator state",
-                    "value": str(evaluation.get("dominant_predator_state") or ""),
-                },
-            ]
-        )
-
-    reflex_dependence = build_reflex_dependence_indicators(summary, reflex_frequency)
-    indicators = reflex_dependence.get("failure_indicators", {})
-    if reflex_dependence.get("available") and isinstance(indicators, Mapping):
-        override = indicators.get("override_rate", {})
-        if isinstance(override, Mapping):
-            diagnostics.append(
-                {
-                    "label": "Reflex Dependence: override rate",
-                    "value": _format_failure_indicator(
-                        _coerce_float(override.get("value")),
-                        _coerce_float(override.get("warning_threshold")),
-                        str(override.get("status") or "ok"),
-                    ),
-                    "status": str(override.get("status") or "ok"),
-                    "warning_threshold": _coerce_float(
-                        override.get("warning_threshold")
-                    ),
-                    "failure_indicator": True,
-                    "source": str(reflex_dependence.get("source") or ""),
-                }
-            )
-        dominance = indicators.get("dominance", {})
-        if isinstance(dominance, Mapping):
-            diagnostics.append(
-                {
-                    "label": "Reflex Dependence: dominance",
-                    "value": _format_failure_indicator(
-                        _coerce_float(dominance.get("value")),
-                        _coerce_float(dominance.get("warning_threshold")),
-                        str(dominance.get("status") or "ok"),
-                    ),
-                    "status": str(dominance.get("status") or "ok"),
-                    "warning_threshold": _coerce_float(
-                        dominance.get("warning_threshold")
-                    ),
-                    "failure_indicator": True,
-                    "source": str(reflex_dependence.get("source") or ""),
-                }
-            )
-
-    scenarios = scenario_success.get("scenarios", [])
-    if isinstance(scenarios, list) and scenarios:
-        weakest = min(
-            (
-                scenario
-                for scenario in scenarios
-                if isinstance(scenario, Mapping)
-            ),
-            key=lambda item: _coerce_float(item.get("success_rate"), 0.0),
-        )
-        diagnostics.append(
-            {
-                "label": "Weakest scenario",
-                "value": f"{weakest.get('scenario')} ({_coerce_float(weakest.get('success_rate')):.2f})",
-            }
-        )
-
-    variants = ablations.get("variants", {})
-    if isinstance(variants, Mapping) and variants:
-        sortable = []
-        for variant_name, payload in variants.items():
-            if not isinstance(payload, Mapping):
-                continue
-            minimal_payload = _variant_with_minimal_reflex_support(payload)
-            summary_payload = minimal_payload.get("summary", {})
-            if not isinstance(summary_payload, Mapping):
-                continue
-            sortable.append(
-                (
-                    _coerce_float(
-                        summary_payload.get("scenario_success_rate"),
-                        0.0,
-                    ),
-                    str(variant_name),
-                )
-            )
-        if sortable:
-            best_score, best_variant = max(sortable)
-            diagnostics.append(
-                {
-                    "label": "Best ablation variant",
-                    "value": f"{best_variant} ({best_score:.2f})",
-                }
-            )
-
-    modules = reflex_frequency.get("modules", [])
-    if isinstance(modules, list) and modules:
-        highest = max(
-            (
-                module for module in modules
-                if isinstance(module, Mapping)
-            ),
-            key=lambda item: _coerce_float(item.get("reflex_events"), 0.0),
-        )
-        diagnostics.append(
-            {
-                "label": "Most frequent reflex source",
-                "value": f"{highest.get('module')} ({int(_coerce_float(highest.get('reflex_events'), 0.0))} events)",
-            }
-        )
-    return diagnostics
-
-
-def _chart_bounds(values: Sequence[float]) -> tuple[float, float]:
-    if not values:
-        return 0.0, 1.0
-    minimum = min(values)
-    maximum = max(values)
-    if math.isclose(minimum, maximum):
-        pad = 1.0 if minimum == 0.0 else abs(minimum) * 0.15
-        return minimum - pad, maximum + pad
-    pad = (maximum - minimum) * 0.1
-    return minimum - pad, maximum + pad
-
-
-def render_placeholder_svg(title: str, message: str) -> str:
-    return (
-        '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="260" viewBox="0 0 900 260">'
-        '<rect x="0" y="0" width="900" height="260" fill="#f8fafc" />'
-        f'<text x="40" y="54" font-size="24" font-family="monospace" fill="#0f172a">{escape(title)}</text>'
-        f'<text x="40" y="120" font-size="16" font-family="monospace" fill="#475569">{escape(message)}</text>'
-        "</svg>"
-    )
-
-
-def render_line_chart(
-    title: str,
-    series: Sequence[dict[str, object]],
-    *,
-    x_key: str = "index",
-    y_key: str = "reward",
-) -> str:
-    if not series:
-        return render_placeholder_svg(title, "No data available.")
-    width = 900
-    height = 320
-    left = 70
-    right = 30
-    top = 55
-    bottom = 45
-    plot_width = width - left - right
-    plot_height = height - top - bottom
-    all_y = [_coerce_float(point.get(y_key)) for point in series]
-    min_y, max_y = _chart_bounds(all_y)
-    max_x = max(_coerce_float(point.get(x_key), 1.0) for point in series)
-    max_x = max(max_x, 1.0)
-
-    def x_coord(value: float) -> float:
-        return left + (value / max_x) * plot_width
-
-    def y_coord(value: float) -> float:
-        if math.isclose(max_y, min_y):
-            return top + plot_height / 2.0
-        normalized = (value - min_y) / (max_y - min_y)
-        return top + (1.0 - normalized) * plot_height
-
-    points_attr = " ".join(
-        f"{x_coord(_coerce_float(point.get(x_key), 0.0)):.2f},{y_coord(_coerce_float(point.get(y_key), 0.0)):.2f}"
-        for point in series
-    )
-    lines = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
-        '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" />',
-        f'<text x="{left}" y="32" font-size="22" font-family="monospace" fill="#0f172a">{escape(title)}</text>',
-        f'<line x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}" stroke="#94a3b8" stroke-width="1"/>',
-        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" stroke="#94a3b8" stroke-width="1"/>',
-        f'<polyline fill="none" stroke="#2563eb" stroke-width="2.5" points="{points_attr}" />',
-    ]
-    for point in series:
-        px = x_coord(_coerce_float(point.get(x_key), 0.0))
-        py = y_coord(_coerce_float(point.get(y_key), 0.0))
-        lines.append(
-            f'<circle cx="{px:.2f}" cy="{py:.2f}" r="3.5" fill="#1d4ed8" />'
-        )
-    for idx, label in enumerate((min_y, (min_y + max_y) / 2.0, max_y)):
-        y = y_coord(label)
-        lines.append(
-            f'<text x="12" y="{y + 5:.2f}" font-size="12" font-family="monospace" fill="#475569">{label:.2f}</text>'
-        )
-        lines.append(
-            f'<line x1="{left}" y1="{y:.2f}" x2="{left + plot_width}" y2="{y:.2f}" stroke="#e2e8f0" stroke-width="1"/>'
-        )
-    lines.append("</svg>")
-    return "".join(lines)
-
-
-def render_bar_chart(
-    title: str,
-    items: Sequence[Mapping[str, object]],
-    *,
-    label_key: str,
-    value_key: str,
-) -> str:
-    """
-    Render a horizontal bar chart as an SVG string.
-    
-    Parameters:
-        title (str): Chart title placed at the top-left of the SVG.
-        items (Sequence[Mapping[str, object]]): Sequence of records for each bar. Each record is expected to contain keys specified by `label_key` and `value_key`.
-        label_key (str): Key in each item mapping used for the bar label (displayed at left).
-        value_key (str): Key in each item mapping used for the numeric value determining bar length; non-finite or missing values are treated as 0.
-    
-    Returns:
-        str: An SVG document string containing a horizontal bar chart of the provided items. If `items` is empty, returns a placeholder SVG indicating "No data available."
-    """
-    if not items:
-        return render_placeholder_svg(title, "No data available.")
-    width = 960
-    height = max(260, 70 + 34 * len(items))
-    left = 250
-    right = 30
-    top = 55
-    bar_height = 22
-    gap = 10
-    plot_width = width - left - right
-    max_value = max(_coerce_float(item.get(value_key), 0.0) for item in items)
-    max_value = max(max_value, 1.0)
-    lines = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
-        '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" />',
-        f'<text x="32" y="32" font-size="22" font-family="monospace" fill="#0f172a">{escape(title)}</text>',
-    ]
-    for index, item in enumerate(items):
-        value = _coerce_float(item.get(value_key), 0.0)
-        label = str(item.get(label_key) or "")
-        y = top + index * (bar_height + gap)
-        bar_width = plot_width * _safe_divide(value, max_value)
-        lines.append(
-            f'<text x="32" y="{y + 16}" font-size="13" font-family="monospace" fill="#334155">{escape(label)}</text>'
-        )
-        lines.append(
-            f'<rect x="{left}" y="{y}" width="{plot_width}" height="{bar_height}" fill="#e2e8f0" rx="4" />'
-        )
-        lines.append(
-            f'<rect x="{left}" y="{y}" width="{bar_width:.2f}" height="{bar_height}" fill="#2563eb" rx="4" />'
-        )
-        lines.append(
-            f'<text x="{left + plot_width + 8}" y="{y + 16}" font-size="12" font-family="monospace" fill="#475569">{value:.2f}</text>'
-        )
-    lines.append("</svg>")
-    return "".join(lines)
-
-
-def render_matrix_heatmap(
-    title: str,
-    *,
-    train_conditions: Sequence[str],
-    eval_conditions: Sequence[str],
-    matrix: Mapping[str, Mapping[str, Mapping[str, object]]],
-    train_marginals: Mapping[str, object],
-    eval_marginals: Mapping[str, object],
-) -> str:
-    """
-    Render a train-by-eval heatmap as an SVG string.
-    
-    Renders a rectangular grid where each cell shows a success-rate value (0.00-1.00 clamped and shown as a two-decimal percentage-like fraction) with a background color scaled from light to dark according to the value. Appends an extra "mean" row and column computed from the provided marginals.
-    
-    Parameters:
-        title (str): Chart title rendered at the top-left of the SVG.
-        train_conditions (Sequence[str]): Ordered list of training condition names used for matrix rows.
-        eval_conditions (Sequence[str]): Ordered list of evaluation condition names used for matrix columns.
-        matrix (Mapping[str, Mapping[str, Mapping[str, object]]]): Nested mapping of train_condition -> eval_condition -> cell payload; cell payload should expose `scenario_success_rate` (numeric) when available.
-        train_marginals (Mapping[str, object]): Per-train-condition marginal values used for the "mean" column and the final mean row.
-        eval_marginals (Mapping[str, object]): Per-eval-condition marginal values used for the "mean" row and the final mean column.
-    
-    Returns:
-        str: An SVG document as a string. If either `train_conditions` or `eval_conditions` is empty, returns a placeholder SVG indicating no data.
-    """
-    if not train_conditions or not eval_conditions:
-        return render_placeholder_svg(title, "No data available.")
-    width = 980
-    height = max(320, 130 + 52 * (len(train_conditions) + 1))
-    left = 220
-    top = 92
-    cell_width = max(78, int((width - left - 60) / (len(eval_conditions) + 1)))
-    cell_height = 42
-
-    def _cell_color(value: float | None) -> str:
-        if value is None:
-            return "#e2e8f0"
-        clamped = max(0.0, min(1.0, value))
-        red = int(241 - (clamped * 204))
-        green = int(245 - (clamped * 108))
-        blue = int(249 - (clamped * 26))
-        return f"rgb({red},{green},{blue})"
-
-    lines = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
-        '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" />',
-        f'<text x="32" y="36" font-size="22" font-family="monospace" fill="#0f172a">{escape(title)}</text>',
-        f'<text x="{left - 120}" y="{top - 18}" font-size="13" font-family="monospace" fill="#475569">train \\ eval</text>',
-    ]
-
-    headers = [*eval_conditions, "mean"]
-    for index, label in enumerate(headers):
-        x = left + index * cell_width
-        lines.append(
-            f'<text x="{x + 8}" y="{top - 18}" font-size="13" font-family="monospace" fill="#334155">{escape(str(label))}</text>'
-        )
-
-    for row_index, train_condition in enumerate([*train_conditions, "mean"]):
-        y = top + row_index * cell_height
-        lines.append(
-            f'<text x="32" y="{y + 26}" font-size="13" font-family="monospace" fill="#334155">{escape(str(train_condition))}</text>'
-        )
-        for col_index, eval_condition in enumerate(headers):
-            x = left + col_index * cell_width
-            if train_condition == "mean" and eval_condition == "mean":
-                value = _noise_robustness_mean(
-                    _noise_robustness_marginal(train_marginals, name)
-                    for name in train_conditions
-                )
-            elif train_condition == "mean":
-                value = _noise_robustness_marginal(eval_marginals, eval_condition)
-            elif eval_condition == "mean":
-                value = _noise_robustness_marginal(train_marginals, train_condition)
-            else:
-                value = _noise_robustness_rate(
-                    matrix,
-                    train_condition=train_condition,
-                    eval_condition=eval_condition,
-                )
-            lines.append(
-                f'<rect x="{x}" y="{y}" width="{cell_width - 8}" height="{cell_height - 8}" fill="{_cell_color(value)}" stroke="#cbd5e1" stroke-width="1" rx="4" />'
-            )
-            lines.append(
-                f'<text x="{x + 10}" y="{y + 24}" font-size="13" font-family="monospace" fill="#0f172a">{escape(_format_optional_metric(value))}</text>'
-            )
-    lines.append("</svg>")
-    return "".join(lines)
-
-
-def _write_svg(path: Path, svg: str) -> None:
-    """
-    Write SVG content to the given filesystem path.
-    
-    Writes the provided SVG text to `path` using UTF-8 encoding, overwriting any existing file.
-    """
-    path.write_text(svg, encoding="utf-8")
-
-
-def _write_csv(path: Path, rows: Sequence[Mapping[str, object]], fieldnames: Sequence[str]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(fieldnames))
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({name: row.get(name, "") for name in fieldnames})
-
-
-def _markdown_table(rows: Sequence[Sequence[object]], headers: Sequence[str]) -> str:
-    if not rows:
-        return "_No data available._"
-    header_line = "| " + " | ".join(headers) + " |"
-    separator = "| " + " | ".join("---" for _ in headers) + " |"
-    body = [
-        "| " + " | ".join(str(value) for value in row) + " |"
-        for row in rows
-    ]
-    return "\n".join([header_line, separator, *body])
-
-
-def build_report_data(
-    *,
-    summary: Mapping[str, object],
-    trace: Sequence[Mapping[str, object]],
-    behavior_rows: Sequence[Mapping[str, object]],
-    summary_path: str | Path | None = None,
-    trace_path: str | Path | None = None,
-    behavior_csv_path: str | Path | None = None,
-) -> dict[str, object]:
-    """
-    Assembles analysis sections from provided inputs and returns the consolidated report payload.
-    
-    Parameters:
-        summary: Parsed summary JSON mapping (may be empty) used as the primary source for evaluations and ablations.
-        trace: Sequence of parsed trace records (JSONL entries); used to compute reflex frequency and trace-derived indicators.
-        behavior_rows: Sequence of behavior CSV row mappings; normalized and used to reconstruct scenario/ablation/comparison data when summary is incomplete.
-        summary_path: Optional original path for the summary input (used only for reporting).
-        trace_path: Optional original path for the trace input (used only for reporting).
-        behavior_csv_path: Optional original path for the behavior CSV input (used only for reporting).
-    
-    Returns:
-        A dict containing assembled report sections and metadata:
-        - inputs: dict with input paths and booleans indicating which inputs produced data.
-        - training_eval: training/evaluation series payload.
-        - scenario_success: normalized per-scenario success payload.
-        - primary_benchmark: selected "no-reflex" benchmark payload and provenance.
-        - shaping_program: reward-shaping minimization audit, gap metrics, and minimal-profile survival indicators.
-        - comparisons: reward-profile and map-template comparison payloads.
-        - ablations: ablation variants, reference selection, deltas vs reference, and limitations.
-        - reflex_frequency: per-module reflex event metrics derived from trace.
-        - reflex_dependence: override/dominance indicators, thresholds, and statuses.
-        - scenario_checks: list of CSV-like rows describing scenario checks.
-        - reward_components: list of rows for reward component values aggregated from summary, scenarios, and trace.
-        - diagnostics: diagnostic metric entries aggregated from the various analyses.
-        - limitations: list of textual limitation messages surfaced from the assembled sections.
-    """
-    normalized_rows = normalize_behavior_rows(behavior_rows)
-    training_eval = extract_training_eval_series(summary)
-    scenario_success = extract_scenario_success(summary, normalized_rows)
-    comparisons = extract_comparisons(summary, normalized_rows)
-    noise_robustness = extract_noise_robustness(summary, normalized_rows)
-    ablations = extract_ablations(summary, normalized_rows)
-    shaping_program = extract_shaping_audit(summary)
-    reflex_frequency = extract_reflex_frequency(trace)
-    predator_type_specialization = extract_predator_type_specialization(
-        summary,
-        normalized_rows,
-        trace,
-    )
-    primary_benchmark = build_primary_benchmark(
-        summary,
-        scenario_success,
-        ablations,
-    )
-    reflex_dependence = build_reflex_dependence_indicators(
-        summary,
-        reflex_frequency,
-    )
-    scenario_check_rows = build_scenario_checks_rows(scenario_success)
-    reward_component_rows = build_reward_component_rows(
-        summary,
-        scenario_success,
-        trace,
-    )
-    diagnostics = build_diagnostics(
-        summary,
-        scenario_success,
-        ablations,
-        reflex_frequency,
-    )
-
-    limitations: list[str] = []
-    for section in (
-        training_eval,
-        scenario_success,
-        comparisons,
-        noise_robustness,
-        ablations,
-        shaping_program,
-        reflex_frequency,
-        predator_type_specialization,
-    ):
-        if isinstance(section, Mapping):
-            limitations.extend(
-                str(item)
-                for item in section.get("limitations", [])
-                if item
-            )
-
-    inputs = {
-        "summary_path": str(summary_path) if summary_path is not None else None,
-        "trace_path": str(trace_path) if trace_path is not None else None,
-        "behavior_csv_path": str(behavior_csv_path) if behavior_csv_path is not None else None,
-        "summary_loaded": bool(summary),
-        "trace_loaded": bool(trace),
-        "behavior_csv_loaded": bool(normalized_rows),
-    }
-    return {
-        "inputs": inputs,
-        "training_eval": training_eval,
-        "scenario_success": scenario_success,
-        "primary_benchmark": primary_benchmark,
-        "shaping_program": shaping_program,
-        "comparisons": comparisons,
-        "noise_robustness": noise_robustness,
-        "ablations": ablations,
-        "predator_type_specialization": predator_type_specialization,
-        "reflex_frequency": reflex_frequency,
-        "reflex_dependence": reflex_dependence,
-        "scenario_checks": scenario_check_rows,
-        "reward_components": reward_component_rows,
-        "diagnostics": diagnostics,
-        "limitations": limitations,
-    }
-
-
-def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[str, str]:
-    """
-    Write filesystem artifacts (SVG, CSV, JSON, and Markdown) that represent the provided analysis report.
-    
-    Parameters:
-        output_dir (str | Path): Target directory where artifact files will be created; created if missing.
-        report (Mapping[str, object]): Report data used to populate charts, tables, and markdown. Expected keys include (but are not limited to) "training_eval", "scenario_success", "shaping_program", "ablations", "reflex_frequency", "scenario_checks", "reward_components", "diagnostics", "primary_benchmark", "limitations", and "inputs".
-    
-    Returns:
-        dict[str, str]: Mapping of artifact identifiers to their filesystem paths. Keys include "report_md", "report_json", "training_eval_svg", "scenario_success_svg", "scenario_checks_csv", "reward_components_csv", "ablation_comparison_svg", and "reflex_frequency_svg".
-    """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    training_eval = report.get("training_eval", {})
-    scenario_success = report.get("scenario_success", {})
-    primary_benchmark = report.get("primary_benchmark", {})
-    shaping_program = report.get("shaping_program", {})
-    noise_robustness = report.get("noise_robustness", {})
-    ablations = report.get("ablations", {})
-    predator_type_specialization = report.get("predator_type_specialization", {})
-    reflex_frequency = report.get("reflex_frequency", {})
-
-    training_series = []
-    if isinstance(training_eval, Mapping):
-        training_series.extend(
-            training_eval.get("training_points", [])
-            if isinstance(training_eval.get("training_points"), list)
-            else []
-        )
-        evaluation_points = (
-            training_eval.get("evaluation_points", [])
-            if isinstance(training_eval.get("evaluation_points"), list)
-            else []
-        )
-    else:
-        evaluation_points = []
-
-    training_svg_path = output_path / "training_eval.svg"
-    if training_series:
-        _write_svg(
-            training_svg_path,
-            render_line_chart("Training reward trajectory", training_series),
-        )
-    elif evaluation_points:
-        _write_svg(
-            training_svg_path,
-            render_line_chart("Evaluation reward trajectory", evaluation_points),
-        )
-    else:
-        _write_svg(
-            training_svg_path,
-            render_placeholder_svg("Training / evaluation", "No summary reward series was available."),
-        )
-
-    scenario_svg_path = output_path / "scenario_success.svg"
-    scenario_items = (
-        scenario_success.get("scenarios", [])
-        if isinstance(scenario_success, Mapping)
-        else []
-    )
-    scenario_chart_items = [
-        {"scenario": item.get("scenario"), "success_rate": item.get("success_rate")}
-        for item in scenario_items
-        if isinstance(item, Mapping)
-    ]
-    _write_svg(
-        scenario_svg_path,
-        render_bar_chart(
-            "Scenario success rate",
-            scenario_chart_items,
-            label_key="scenario",
-            value_key="success_rate",
-        ),
-    )
-
-    robustness_svg_path = output_path / "robustness_matrix.svg"
-    _nr = _mapping_or_empty(noise_robustness)
-    robustness_matrix_spec = _mapping_or_empty(_nr.get("matrix_spec"))
-    _train_conds_raw = robustness_matrix_spec.get("train_conditions")
-    _eval_conds_raw = robustness_matrix_spec.get("eval_conditions")
-    robustness_train_conditions = list(_train_conds_raw) if isinstance(_train_conds_raw, list) else []
-    robustness_eval_conditions = list(_eval_conds_raw) if isinstance(_eval_conds_raw, list) else []
-    robustness_matrix = _mapping_or_empty(_nr.get("matrix"))
-    robustness_train_marginals = _mapping_or_empty(_nr.get("train_marginals"))
-    robustness_eval_marginals = _mapping_or_empty(_nr.get("eval_marginals"))
-    _write_svg(
-        robustness_svg_path,
-        render_matrix_heatmap(
-            "Noise robustness matrix",
-            train_conditions=robustness_train_conditions,
-            eval_conditions=robustness_eval_conditions,
-            matrix=robustness_matrix,
-            train_marginals=robustness_train_marginals,
-            eval_marginals=robustness_eval_marginals,
-        ),
-    )
-
-    ablation_svg_path = ""
-    if isinstance(ablations, Mapping) and ablations.get("available"):
-        variants = []
-        variants_payload = ablations.get("variants", {})
-        if isinstance(variants_payload, Mapping):
-            for variant_name, payload in sorted(variants_payload.items()):
-                if not isinstance(payload, Mapping):
-                    continue
-                summary_payload = payload.get("summary", {})
-                variants.append(
-                    {
-                        "variant": variant_name,
-                        "score": _coerce_float(
-                            summary_payload.get("scenario_success_rate"),
-                            0.0,
-                        ),
-                    }
-                )
-        if variants:
-            ablation_svg_path = str(output_path / "ablation_comparison.svg")
-            _write_svg(
-                Path(ablation_svg_path),
-                render_bar_chart(
-                    "Ablation scenario success rate",
-                    variants,
-                    label_key="variant",
-                    value_key="score",
-                ),
-            )
-
-    reflex_svg_path = ""
-    if isinstance(reflex_frequency, Mapping) and reflex_frequency.get("available"):
-        modules = reflex_frequency.get("modules", [])
-        if isinstance(modules, list) and modules:
-            reflex_svg_path = str(output_path / "reflex_frequency.svg")
-            _write_svg(
-                Path(reflex_svg_path),
-                render_bar_chart(
-                    "Reflex events per module",
-                    modules,
-                    label_key="module",
-                    value_key="reflex_events",
-                ),
-            )
-
-    scenario_checks_path = output_path / "scenario_checks.csv"
-    _write_csv(
-        scenario_checks_path,
-        report.get("scenario_checks", []) if isinstance(report.get("scenario_checks"), list) else [],
-        ("scenario", "check_name", "pass_rate", "mean_value", "expected", "description", "source"),
-    )
-
-    reward_components_path = output_path / "reward_components.csv"
-    _write_csv(
-        reward_components_path,
-        report.get("reward_components", []) if isinstance(report.get("reward_components"), list) else [],
-        ("source", "scope", "component", "value"),
-    )
-
-    report_json_path = output_path / "report.json"
-    report_json_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    diagnostics = report.get("diagnostics", [])
-    diagnostic_rows = [
-        (
-            str(item.get("label") or ""),
-            str(item.get("value") or ""),
-        )
-        for item in diagnostics
-        if isinstance(item, Mapping)
-    ]
-    primary_benchmark_rows = []
-    if isinstance(primary_benchmark, Mapping) and primary_benchmark.get("available"):
-        primary_benchmark_rows.append(
-            (
-                str(primary_benchmark.get("label") or ""),
-                f"{_coerce_float(primary_benchmark.get('scenario_success_rate')):.2f}",
-                (
-                    "n/a"
-                    if primary_benchmark.get("eval_reflex_scale") is None
-                    else f"{_coerce_float(primary_benchmark.get('eval_reflex_scale')):.2f}"
-                ),
-                str(primary_benchmark.get("reference_variant") or ""),
-                str(primary_benchmark.get("source") or ""),
-            )
-        )
-    shaping_gap_rows = []
-    shaping_component_rows = []
-    shaping_profile_rows = []
-    shaping_disposition_rows = []
-    shaping_survival_rows = []
-    shaping_summary_line = "_No shaping minimization audit was available._"
-    shaping_removed_gap_line = "_No removed disposition weight gap was available._"
-    shaping_warning_line = ""
-    shaping_program = _mapping_or_empty(shaping_program)
-    if shaping_program and bool(shaping_program.get("available")):
-        dense_profile = str(shaping_program.get("dense_profile") or "classic")
-        minimal_profile = str(shaping_program.get("minimal_profile") or "austere")
-        gap_metrics = _mapping_or_empty(shaping_program.get("gap_metrics"))
-        flags = _mapping_or_empty(shaping_program.get("interpretive_flags"))
-        thresholds = _mapping_or_empty(shaping_program.get("thresholds"))
-        if gap_metrics and bool(flags.get("gap_available")):
-            scenario_delta = _coerce_float(
-                gap_metrics.get("scenario_success_rate_delta")
-            )
-            episode_delta = _coerce_float(
-                gap_metrics.get("episode_success_rate_delta")
-            )
-            reward_delta = _coerce_float(gap_metrics.get("mean_reward_delta"))
-            shaping_gap_rows.append(
-                (
-                    f"{dense_profile} - {minimal_profile}",
-                    f"{scenario_delta:.2f}",
-                    f"{episode_delta:.2f}",
-                    f"{reward_delta:.2f}",
-                    str(shaping_program.get("interpretation") or ""),
-                )
-            )
-        if bool(flags.get("shaping_dependent")):
-            shaping_warning_line = (
-                "> WARNING: High shaping dependence detected. Dense-profile "
-                "scenario success exceeds the minimal-shaping warning threshold of "
-                f"{_coerce_float(thresholds.get('shaping_dependence'), SHAPING_DEPENDENCE_WARNING_THRESHOLD):.2f}."
-            )
-        profile_weight_breakdown = _mapping_or_empty(
-            shaping_program.get("profile_weight_breakdown")
-        )
-        for profile_name, weights in sorted(profile_weight_breakdown.items()):
-            if not isinstance(weights, Mapping):
-                continue
-            for disposition, weight in sorted(weights.items()):
-                shaping_profile_rows.append(
-                    (
-                        str(profile_name),
-                        str(disposition),
-                        f"{_coerce_float(weight):.2f}",
-                    )
-                )
-        disposition_summary = _mapping_or_empty(
-            shaping_program.get("disposition_summary")
-        )
-        for disposition, payload in sorted(disposition_summary.items()):
-            if not isinstance(payload, Mapping):
-                continue
-            components = payload.get("components", [])
-            if isinstance(components, list):
-                component_names = ", ".join(str(component) for component in components)
-                default_count = len(components)
-            else:
-                component_names = ""
-                default_count = 0
-            shaping_disposition_rows.append(
-                (
-                    str(disposition),
-                    str(int(_coerce_float(payload.get("component_count"), default_count))),
-                    component_names,
-                )
-            )
-        shaping_removed_gap_line = (
-            "Removed disposition weight gap "
-            f"({dense_profile} - {minimal_profile}): "
-            f"{_coerce_float(shaping_program.get('removed_weight_gap')):.2f}."
-        )
-        components = shaping_program.get("component_classification", [])
-        if isinstance(components, list):
-            shaping_component_rows = [
-                (
-                    str(item.get("component") or ""),
-                    str(item.get("category") or ""),
-                    str(item.get("risk") or ""),
-                    str(item.get("disposition") or ""),
-                    str(item.get("rationale") or ""),
-                )
-                for item in components
-                if isinstance(item, Mapping)
-            ]
-        behavior_survival = _mapping_or_empty(shaping_program.get("behavior_survival"))
-        survival_scenarios = behavior_survival.get("scenarios", [])
-        if isinstance(survival_scenarios, list):
-            shaping_survival_rows = [
-                (
-                    str(item.get("scenario") or ""),
-                    f"{_coerce_float(item.get('austere_success_rate')):.2f}",
-                    "yes" if bool(item.get("survives")) else "no",
-                    str(int(_coerce_float(item.get("episodes"), 0.0))),
-                )
-                for item in survival_scenarios
-                if isinstance(item, Mapping)
-            ]
-        if not bool(behavior_survival.get("available")):
-            shaping_summary_line = "_No shaping survival data available._"
-        else:
-            shaping_summary_line = (
-                f"{int(_coerce_float(behavior_survival.get('surviving_scenario_count'), 0.0))}/"
-                f"{int(_coerce_float(behavior_survival.get('scenario_count'), 0.0))} "
-                "scenarios survive minimal shaping "
-                f"({_coerce_float(behavior_survival.get('survival_rate')):.2f})."
-            )
-    scenario_rows = [
-        (
-            str(item.get("scenario") or ""),
-            f"{_coerce_float(item.get('success_rate')):.2f}",
-            str(len(item.get("checks", {})) if isinstance(item.get("checks"), Mapping) else 0),
-        )
-        for item in scenario_items
-        if isinstance(item, Mapping)
-    ]
-    ablation_rows = []
-    ablation_predator_type_rows = []
-    if isinstance(ablations, Mapping):
-        variants_payload = ablations.get("variants", {})
-        if isinstance(variants_payload, Mapping):
-            for variant_name, payload in sorted(variants_payload.items()):
-                if not isinstance(payload, Mapping):
-                    continue
-                summary_payload = payload.get("summary", {})
-                config_payload = payload.get("config", {})
-                if not isinstance(summary_payload, Mapping):
-                    summary_payload = {}
-                if not isinstance(config_payload, Mapping):
-                    config_payload = {}
-                ablation_rows.append(
-                    (
-                        str(variant_name),
-                        str(config_payload.get("architecture") or ""),
-                        f"{_coerce_float(summary_payload.get('eval_reflex_scale'), _coerce_float(payload.get('eval_reflex_scale'), 0.0)):.2f}",
-                        f"{_coerce_float(summary_payload.get('scenario_success_rate')):.2f}",
-                    )
-                )
-        predator_type_comparisons = ablations.get("predator_type_comparisons", {})
-        if isinstance(predator_type_comparisons, Mapping):
-            comparisons = predator_type_comparisons.get("comparisons", {})
-            if isinstance(comparisons, Mapping):
-                for variant_name, payload in sorted(comparisons.items()):
-                    if not isinstance(payload, Mapping):
-                        continue
-                    visual_group = _mapping_or_empty(payload.get("visual_predator_scenarios"))
-                    olfactory_group = _mapping_or_empty(payload.get("olfactory_predator_scenarios"))
-                    ablation_predator_type_rows.append(
-                        (
-                            str(variant_name),
-                            f"{_coerce_float(visual_group.get('mean_success_rate')):.2f}",
-                            f"{_coerce_float(olfactory_group.get('mean_success_rate')):.2f}",
-                            f"{_coerce_float(payload.get('visual_minus_olfactory_success_rate')):.2f}",
-                        )
-                    )
-
-    specialization_rows = []
-    specialization_summary_line = "_No predator-type specialization metrics were available._"
-    specialization = _mapping_or_empty(predator_type_specialization)
-    if specialization and bool(specialization.get("available")):
-        predator_types = _mapping_or_empty(specialization.get("predator_types"))
-        for predator_type in ("visual", "olfactory"):
-            payload = _mapping_or_empty(predator_types.get(predator_type))
-            specialization_rows.append(
-                (
-                    predator_type,
-                    f"{_coerce_float(payload.get('visual_cortex_activation')):.2f}",
-                    f"{_coerce_float(payload.get('sensory_cortex_activation')):.2f}",
-                    str(payload.get("dominant_module") or ""),
-                )
-            )
-        specialization_summary_line = (
-            "Specialization score: "
-            f"{_coerce_float(specialization.get('specialization_score')):.2f} "
-            f"({str(specialization.get('interpretation') or 'unknown')}). "
-            "Type-module correlation proxy: "
-            f"{_coerce_float(specialization.get('type_module_correlation')):.2f}."
-        )
-    differential_activation = _mapping_or_empty(
-        _mapping_or_empty(predator_type_specialization).get("differential_activation")
-    )
-    specialization_delta_rows = []
-    if differential_activation:
-        specialization_delta_rows = [
-            (
-                "visual_cortex (visual - olfactory)",
-                f"{_coerce_float(differential_activation.get('visual_cortex_visual_minus_olfactory')):.2f}",
-            ),
-            (
-                "sensory_cortex (olfactory - visual)",
-                f"{_coerce_float(differential_activation.get('sensory_cortex_olfactory_minus_visual')):.2f}",
-            ),
-        ]
-
-    robustness_rows = []
-    if robustness_train_conditions and robustness_eval_conditions:
-        for train_condition in robustness_train_conditions:
-            row = [train_condition]
-            for eval_condition in robustness_eval_conditions:
-                row.append(
-                    _format_optional_metric(
-                        _noise_robustness_rate(
-                            robustness_matrix,
-                            train_condition=train_condition,
-                            eval_condition=eval_condition,
-                        )
-                    )
-                )
-            row.append(
-                _format_optional_metric(
-                    _noise_robustness_marginal(
-                        robustness_train_marginals,
-                        train_condition,
-                    )
-                )
-            )
-            robustness_rows.append(tuple(row))
-        marginal_row = ["mean"]
-        for eval_condition in robustness_eval_conditions:
-            marginal_row.append(
-                _format_optional_metric(
-                    _noise_robustness_marginal(
-                        robustness_eval_marginals,
-                        eval_condition,
-                    )
-                )
-            )
-        marginal_row.append(
-            _format_optional_metric(
-                _coerce_optional_float(noise_robustness.get("robustness_score"))
-            )
-        )
-        robustness_rows.append(tuple(marginal_row))
-
-    markdown_lines = [
-        "# Offline Analysis Report",
-        "",
-        "## Inputs",
-        "",
-        f"- `summary`: {report['inputs']['summary_path']}",
-        f"- `trace`: {report['inputs']['trace_path']}",
-        f"- `behavior_csv`: {report['inputs']['behavior_csv_path']}",
-        "",
-        "## Diagnostics",
-        "",
-        _markdown_table(diagnostic_rows, ("metric", "value")),
-        "",
-        "## Primary Benchmark",
-        "",
-        _markdown_table(
-            primary_benchmark_rows,
-            ("metric", "scenario_success_rate", "eval_reflex_scale", "reference_variant", "source"),
-        ),
-        "",
-        "## Shaping Minimization Program",
-        "",
-    ]
-    if shaping_warning_line:
-        markdown_lines.extend([shaping_warning_line, ""])
-    markdown_lines.extend(
-        [
-            "### Dense vs Minimal Gap",
-            "",
-            _markdown_table(
-                shaping_gap_rows,
-                (
-                    "comparison",
-                    "scenario_success_rate_delta",
-                    "episode_success_rate_delta",
-                    "mean_reward_delta",
-                    "interpretation",
-                ),
-            ),
-            "",
-            "### Profile-Level Summary",
-            "",
-            shaping_removed_gap_line,
-            "",
-            "Profile disposition weight proxies:",
-            "",
-            _markdown_table(
-                shaping_profile_rows,
-                ("profile", "disposition", "total_weight_proxy"),
-            ),
-            "",
-            "Disposition component summary:",
-            "",
-            _markdown_table(
-                shaping_disposition_rows,
-                ("disposition", "component_count", "components"),
-            ),
-            "",
-            "### Component Dispositions",
-            "",
-            _markdown_table(
-                shaping_component_rows,
-                ("Component", "Category", "Risk", "Disposition", "Rationale"),
-            ),
-            "",
-            "### Behavior Survival",
-            "",
-            shaping_summary_line,
-            "",
-            _markdown_table(
-                shaping_survival_rows,
-                ("scenario", "austere_success_rate", "survives", "episodes"),
-            ),
-            "",
-            "## Scenario Success",
-            "",
-            _markdown_table(scenario_rows, ("scenario", "success_rate", "check_count")),
-            "",
-            "## Ablations",
-            "",
-            _markdown_table(
-                ablation_rows,
-                ("variant", "architecture", "eval_reflex_scale", "scenario_success_rate"),
-            ),
-            "",
-            "Ablation predator-type comparisons:",
-            "",
-            _markdown_table(
-                ablation_predator_type_rows,
-                ("variant", "visual_scenarios", "olfactory_scenarios", "visual_minus_olfactory"),
-            ),
-            "",
-            "## Predator Type Specialization",
-            "",
-            specialization_summary_line,
-            "",
-            _markdown_table(
-                specialization_rows,
-                (
-                    "predator_type",
-                    "visual_cortex_activation",
-                    "sensory_cortex_activation",
-                    "dominant_module",
-                ),
-            ),
-            "",
-            _markdown_table(
-                specialization_delta_rows,
-                ("differential", "value"),
-            ),
-            "",
-            "## Noise Robustness Matrix",
-            "",
-            (
-                _markdown_table(
-                    robustness_rows,
-                    ("train \\ eval", *robustness_eval_conditions, "mean"),
-                )
-                if robustness_rows
-                else "_No noise robustness matrix was available._"
-            ),
-            "",
-            "Overall robustness score: "
-            f"{_format_optional_metric(_coerce_optional_float(_mapping_or_empty(noise_robustness).get('robustness_score')))}.",
-            "Diagonal score: "
-            f"{_format_optional_metric(_coerce_optional_float(_mapping_or_empty(noise_robustness).get('diagonal_score')))}.",
-            "Off-diagonal score: "
-            f"{_format_optional_metric(_coerce_optional_float(_mapping_or_empty(noise_robustness).get('off_diagonal_score')))}.",
-            "",
-            "## Limitations",
-            "",
-        ]
-    )
-    limitations = report.get("limitations", [])
-    if isinstance(limitations, list) and limitations:
-        markdown_lines.extend(f"- {item}" for item in limitations)
-    else:
-        markdown_lines.append("- None.")
-    markdown_lines.extend(
-        [
-            "",
-            "## Generated Files",
-            "",
-            "- `training_eval.svg`",
-            "- `scenario_success.svg`",
-            "- `robustness_matrix.svg`",
-            "- `scenario_checks.csv`",
-            "- `reward_components.csv`",
-            "- `report.json`",
-        ]
-    )
-    if ablation_svg_path:
-        markdown_lines.append("- `ablation_comparison.svg`")
-    if reflex_svg_path:
-        markdown_lines.append("- `reflex_frequency.svg`")
-
-    report_md_path = output_path / "report.md"
-    report_md_path.write_text("\n".join(markdown_lines) + "\n", encoding="utf-8")
-
-    return {
-        "report_md": str(report_md_path),
-        "report_json": str(report_json_path),
-        "training_eval_svg": str(training_svg_path),
-        "scenario_success_svg": str(scenario_svg_path),
-        "robustness_matrix_svg": str(robustness_svg_path),
-        "scenario_checks_csv": str(scenario_checks_path),
-        "reward_components_csv": str(reward_components_path),
-        "ablation_comparison_svg": ablation_svg_path,
-        "reflex_frequency_svg": reflex_svg_path,
-    }
-
-
-def run_offline_analysis(
-    *,
-    summary_path: str | Path | None = None,
-    trace_path: str | Path | None = None,
-    behavior_csv_path: str | Path | None = None,
-    output_dir: str | Path,
-) -> dict[str, object]:
-    summary = load_summary(summary_path)
-    trace = load_trace(trace_path)
-    behavior_rows = load_behavior_csv(behavior_csv_path)
-    report = build_report_data(
-        summary=summary,
-        trace=trace,
-        behavior_rows=behavior_rows,
-        summary_path=summary_path,
-        trace_path=trace_path,
-        behavior_csv_path=behavior_csv_path,
-    )
-    report["generated_files"] = write_report(output_dir, report)
-    return report
-
-
-def build_parser() -> argparse.ArgumentParser:
-    """
-    Create and configure the command-line ArgumentParser for the offline analysis tool.
-    
-    The parser exposes the following options:
-    - --summary: path to an optional summary.json input.
-    - --trace: path to an optional trace.jsonl input.
-    - --behavior-csv: path to an optional behavior CSV exported by the main CLI.
-    - --output-dir: required path where the report and artifacts will be written.
-    
-    Returns:
-        argparse.ArgumentParser: A configured ArgumentParser instance.
-    """
-    parser = argparse.ArgumentParser(
-        description="Generate reproducible offline analysis from summary, trace, and behavior_csv.",
-    )
-    parser.add_argument("--summary", type=Path, default=None, help="Path to summary.json.")
-    parser.add_argument("--trace", type=Path, default=None, help="Path to trace.jsonl.")
-    parser.add_argument(
-        "--behavior-csv",
-        type=Path,
-        default=None,
-        help="Path to behavior CSV exported by the main CLI.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        required=True,
-        help="Directory where the report and artifacts will be generated.",
-    )
-    return parser
-
-
-def main() -> None:
-    """
-    Parse command-line arguments, run the offline analysis pipeline with the provided inputs, write report artifacts to the output directory, and print the resulting report as JSON to stdout.
-    
-    If none of --summary, --trace, or --behavior-csv are supplied, the parser terminates with an error.
-    """
-    parser = build_parser()
-    args = parser.parse_args()
-    if args.summary is None and args.trace is None and args.behavior_csv is None:
-        parser.error(
-            "At least one of --summary, --trace, and --behavior-csv is required."
-        )
-    report = run_offline_analysis(
-        summary_path=args.summary,
-        trace_path=args.trace,
-        behavior_csv_path=args.behavior_csv,
-        output_dir=args.output_dir,
-    )
-    print(json.dumps(report, indent=2, ensure_ascii=False))
-
-
-if __name__ == "__main__":
-    main()

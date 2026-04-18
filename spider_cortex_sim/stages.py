@@ -16,9 +16,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .interfaces import LOCOMOTION_ACTIONS
+from .memory import refresh_all_memory
+from .noise import apply_motor_noise
 from .physiology import (
     apply_homeostasis_penalties,
     apply_predator_contact,
+    apply_turn_fatigue,
     apply_wakefulness,
     clip_state,
     resolve_autonomic_behaviors,
@@ -28,6 +31,9 @@ from .reward import (
     apply_pressure_penalties,
     apply_progress_and_event_rewards,
     compute_predator_threat,
+    copy_reward_components,
+    empty_reward_components,
+    reward_total,
 )
 from .world_types import MemorySlot, StageDescriptor, TickContext
 
@@ -72,7 +78,7 @@ def build_tick_context(world: "SpiderWorld", action_idx: int) -> TickContext:
         executed_action=intended_action,
         motor_noise_applied=False,
         snapshot=snapshot,
-        reward_components=world._empty_reward_components(),
+        reward_components=empty_reward_components(),
         info={
             "action": intended_action,
             "intended_action": intended_action,
@@ -95,6 +101,11 @@ def build_tick_context(world: "SpiderWorld", action_idx: int) -> TickContext:
                     "components": {},
                 },
             },
+            "momentum": float(np.clip(world.state.momentum, 0.0, 1.0)),
+            "momentum_before": float(np.clip(world.state.momentum, 0.0, 1.0)),
+            "momentum_after": float(np.clip(world.state.momentum, 0.0, 1.0)),
+            "turn_angle": 0.0,
+            "turn_fatigue_applied": 0.0,
             "motor_slip": {
                 "occurred": False,
                 "reason": "none",
@@ -119,7 +130,9 @@ def build_tick_context(world: "SpiderWorld", action_idx: int) -> TickContext:
 
 def run_action_stage(world: "SpiderWorld", context: TickContext) -> None:
     """Apply the resolved action and record the movement result."""
-    slip_info = world._apply_motor_noise(context.intended_action)
+    momentum_before = float(np.clip(world.state.momentum, 0.0, 1.0))
+    heading_before = (int(world.state.heading_dx), int(world.state.heading_dy))
+    slip_info = apply_motor_noise(world, context.intended_action)
     context.executed_action = str(slip_info["executed_action"])
     context.motor_noise_applied = bool(slip_info["occurred"])
     context.execution_difficulty = float(slip_info["execution_difficulty"])
@@ -142,6 +155,27 @@ def run_action_stage(world: "SpiderWorld", context: TickContext) -> None:
                 "components": dict(context.execution_components),
                 "slip": dict(context.motor_slip_info),
             },
+            "momentum_before": momentum_before,
+        }
+    )
+    context.moved = bool(world._move_spider_action(context.executed_action))
+    world._update_momentum(
+        context.executed_action,
+        previous_heading=heading_before,
+        moved=bool(context.moved),
+    )
+    turn_cost = apply_turn_fatigue(
+        world,
+        heading_before,
+        (int(world.state.heading_dx), int(world.state.heading_dy)),
+    )
+    momentum_after = float(np.clip(world.state.momentum, 0.0, 1.0))
+    context.info.update(
+        {
+            "momentum": momentum_after,
+            "momentum_after": momentum_after,
+            "turn_angle": float(turn_cost["turn_angle"]),
+            "turn_fatigue_applied": float(turn_cost["turn_fatigue_applied"]),
         }
     )
     context.record_event(
@@ -154,6 +188,10 @@ def run_action_stage(world: "SpiderWorld", context: TickContext) -> None:
         slip_reason=str(slip_info["reason"]),
         slip_probability=round(float(slip_info["slip_probability"]), 6),
         execution_difficulty=round(float(context.execution_difficulty), 6),
+        momentum_before=round(float(momentum_before), 6),
+        momentum_after=round(float(momentum_after), 6),
+        turn_angle=round(float(turn_cost["turn_angle"]), 6),
+        turn_fatigue_applied=round(float(turn_cost["turn_fatigue_applied"]), 6),
         orientation_alignment=round(
             float(context.execution_components.get("orientation_alignment", 1.0)),
             6,
@@ -167,7 +205,6 @@ def run_action_stage(world: "SpiderWorld", context: TickContext) -> None:
             6,
         ),
     )
-    context.moved = bool(world._move_spider_action(context.executed_action))
     context.record_event(
         "action",
         "movement_applied",
@@ -175,6 +212,7 @@ def run_action_stage(world: "SpiderWorld", context: TickContext) -> None:
         spider_pos=[int(world.state.x), int(world.state.y)],
         last_move_dx=int(world.state.last_move_dx),
         last_move_dy=int(world.state.last_move_dy),
+        momentum=round(float(momentum_after), 6),
     )
 
 
@@ -372,7 +410,7 @@ def run_postprocess_stage(world: "SpiderWorld", context: TickContext) -> None:
     if context.done:
         context.reward_components["death_penalty"] -= death_penalty
 
-    context.reward = float(world._reward_total(context.reward_components))
+    context.reward = float(reward_total(context.reward_components))
     world.state.last_reward = context.reward
     world.state.total_reward += context.reward
     world.state.steps_alive += 1
@@ -386,7 +424,7 @@ def run_postprocess_stage(world: "SpiderWorld", context: TickContext) -> None:
         predator_escape=bool(context.predator_escape),
         predator_visible_now=bool(context.predator_visible_now),
         reward=round(float(context.reward), 6),
-        reward_components=world._copy_reward_components(context.reward_components),
+        reward_components=copy_reward_components(context.reward_components),
     )
     context.record_event(
         "postprocess",
@@ -413,7 +451,7 @@ def run_memory_stage(world: "SpiderWorld", context: TickContext) -> None:
         """
         return list(slot.target) if slot.target is not None else None
 
-    world.refresh_memory(predator_escape=context.predator_escape)
+    refresh_all_memory(world, predator_escape=context.predator_escape)
     context.record_event(
         "memory",
         "memory_refreshed",
@@ -439,7 +477,8 @@ def finalize_step(
         done=bool(context.done),
         tick=int(world.tick),
     )
-    context.info["reward_components"] = world._copy_reward_components(context.reward_components)
+    context.info["reward_components"] = copy_reward_components(context.reward_components)
+    context.info["momentum"] = float(np.clip(world.state.momentum, 0.0, 1.0))
     context.info["state"] = world.state_dict()
     context.info["predator_escape"] = bool(context.predator_escape)
     context.info["event_log"] = context.serialized_event_log()
@@ -452,7 +491,8 @@ TICK_STAGES: tuple[StageDescriptor, ...] = (
         run=run_action_stage,
         mutates=(
             "context.{executed_action,motor_noise_applied,execution_difficulty,execution_components,motor_slip_info,moved,info,event_log}",
-            "world.state.{x,y,last_move_dx,last_move_dy,heading_dx,heading_dy}",
+            "world.state.{x,y,last_move_dx,last_move_dy,heading_dx,heading_dy,fatigue,momentum,last_scan_tick_up,last_scan_tick_down,last_scan_tick_left,last_scan_tick_right,last_scan_tick_up_left,last_scan_tick_up_right,last_scan_tick_down_left,last_scan_tick_down_right}",
+            "world._perceptual_buffer",
         ),
     ),
     StageDescriptor(
@@ -476,7 +516,7 @@ TICK_STAGES: tuple[StageDescriptor, ...] = (
         run=run_autonomic_stage,
         mutates=(
             "context.{fed_this_tick,reward_components,info,event_log}",
-            "world.state.{hunger,health,food_eaten,sleep_phase,rest_streak,fatigue,sleep_debt,sleep_events}",
+            "world.state.{hunger,health,food_eaten,sleep_phase,rest_streak,fatigue,sleep_debt,sleep_events,momentum}",
         ),
     ),
     StageDescriptor(
@@ -500,7 +540,7 @@ TICK_STAGES: tuple[StageDescriptor, ...] = (
         run=run_postprocess_stage,
         mutates=(
             "context.{done,reward,event_log,reward_components}",
-            "world.state.{recent_contact,recent_pain,hunger,fatigue,sleep_debt,health,last_reward,total_reward,steps_alive,last_action}",
+            "world.state.{recent_contact,recent_pain,hunger,fatigue,sleep_debt,health,momentum,last_reward,total_reward,steps_alive,last_action}",
             "world.{_last_on_shelter,_last_predator_visible,tick}",
         ),
     ),

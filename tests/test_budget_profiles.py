@@ -732,6 +732,11 @@ class PaperCheckpointSelectionEnforcementTest(unittest.TestCase):
         sim.train.assert_called_once()
 
     def test_cli_claim_test_suite_reuses_precomputed_payloads(self) -> None:
+        """
+        Verifies that the CLI reuses precomputed ablation and learning-evidence payloads when invoking the claim test suite.
+        
+        Patches the CLI entrypoint environment and the functions that produce ablation, learning-evidence, and claim-test payloads so they return distinct objects, runs main(), and asserts the call to `run_claim_test_suite` receives the exact payload objects produced earlier (no copies or recomputation).
+        """
         sim = MagicMock()
         sim._build_summary.return_value = self._minimal_summary()
         ablation_payload = {"variants": {"modular_full": {"summary": {}}}}
@@ -764,17 +769,22 @@ class PaperCheckpointSelectionEnforcementTest(unittest.TestCase):
         ), patch(
             "spider_cortex_sim.cli.SpiderSimulation",
             return_value=sim,
-        ) as simulation_cls:
-            simulation_cls.compare_ablation_suite.return_value = (ablation_payload, [])
-            simulation_cls.compare_learning_evidence.return_value = (
+        ) as simulation_cls, patch(
+            "spider_cortex_sim.cli.compare_ablation_suite",
+            return_value=(ablation_payload, []),
+        ), patch(
+            "spider_cortex_sim.cli.compare_learning_evidence",
+            return_value=(
                 learning_payload,
                 [],
-            )
-            simulation_cls.run_claim_test_suite.return_value = (claim_payload, [])
-
+            ),
+        ), patch(
+            "spider_cortex_sim.cli.run_claim_test_suite",
+            return_value=(claim_payload, []),
+        ) as run_claim_suite:
             main()
 
-        claim_kwargs = simulation_cls.run_claim_test_suite.call_args.kwargs
+        claim_kwargs = run_claim_suite.call_args.kwargs
         self.assertIs(claim_kwargs["ablation_payload"], ablation_payload)
         self.assertIs(
             claim_kwargs["learning_evidence_payload"],

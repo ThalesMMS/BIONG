@@ -22,9 +22,19 @@ class MemorySlot:
 
 @dataclass
 class PerceptTrace:
+    """Short-lived percept plus the orientation context that captured it.
+
+    ``heading_dx`` and ``heading_dy`` store the spider's heading vector at
+    observation time, using sign components in ``{-1, 0, 1}``. They are not a
+    direction toward the target; they preserve past orientation context for
+    reconstructing how the trace was observed.
+    """
+
     target: tuple[int, int] | None
     age: int
     certainty: float
+    heading_dx: int = 0
+    heading_dy: int = 0
 
 
 @dataclass
@@ -74,6 +84,15 @@ class SpiderState:
     food_trace: PerceptTrace
     shelter_trace: PerceptTrace
     predator_trace: PerceptTrace
+    momentum: float = 0.0
+    last_scan_tick_up: int = -1
+    last_scan_tick_down: int = -1
+    last_scan_tick_left: int = -1
+    last_scan_tick_right: int = -1
+    last_scan_tick_up_left: int = -1
+    last_scan_tick_up_right: int = -1
+    last_scan_tick_down_left: int = -1
+    last_scan_tick_down_right: int = -1
 
 
 @dataclass(frozen=True)
@@ -89,6 +108,7 @@ class TickSnapshot:
     prev_predator_visible: bool
     night: bool
     rest_streak: int
+    momentum: float = 0.0
 
     def to_payload(self) -> dict[str, object]:
         """
@@ -109,7 +129,9 @@ class TickSnapshot:
                 - "prev_predator_visible": `true` if predator was visible in previous tick, `false` otherwise
                 - "night": `true` if it was night, `false` otherwise
                 - "rest_streak": integer rest streak count
+                - "momentum": bounded execution momentum before this tick
         """
+        momentum = max(0.0, min(1.0, float(self.momentum)))
         return {
             "tick": int(self.tick),
             "spider_pos": [int(self.spider_pos[0]), int(self.spider_pos[1])],
@@ -122,6 +144,7 @@ class TickSnapshot:
             "prev_predator_visible": bool(self.prev_predator_visible),
             "night": bool(self.night),
             "rest_streak": int(self.rest_streak),
+            "momentum": momentum,
         }
 
 

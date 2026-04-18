@@ -5,148 +5,18 @@ from typing import Optional
 
 import numpy as np
 
-
-Array = np.ndarray
-
-
-def softmax(logits: Array) -> Array:
-    logits = np.clip(
-        np.nan_to_num(np.asarray(logits, dtype=float), nan=0.0, posinf=20.0, neginf=-20.0),
-        -20.0,
-        20.0,
-    )
-    shifted = logits - np.max(logits)
-    exp = np.exp(shifted)
-    total = float(np.sum(exp))
-    if total <= 0.0 or not np.isfinite(total):
-        return np.full_like(logits, 1.0 / len(logits), dtype=float)
-    return exp / total
-
-
-def one_hot(index: int, size: int) -> Array:
-    vec = np.zeros(size, dtype=float)
-    vec[index] = 1.0
-    return vec
-
-
-def _weight_scale(dim: int) -> float:
-    """
-    Compute the standard deviation to use for weight initialization for a layer of the given dimension.
-    
-    Parameters:
-        dim (int): Layer dimension used to scale the initialization; values less than 1 are treated as 1.
-    
-    Returns:
-        float: Standard deviation computed as 0.35 / sqrt(max(1, dim)).
-    """
-    return 0.35 / np.sqrt(max(1, dim))
-
-
-def _coerce_state_array(state: dict[str, object], key: str, shape: tuple[int, ...], *, name: str) -> Array:
-    """
-    Validate and convert an entry from a saved state dict into a float NumPy array with an exact shape.
-    
-    Parameters:
-        state (dict[str, object]): Mapping containing serialized arrays.
-        key (str): Key in `state` whose value will be converted.
-        shape (tuple[int, ...]): Expected shape of the resulting array.
-        name (str): Human-readable name used in the error message on mismatch.
-    
-    Returns:
-        Array: A copied NumPy array of dtype `float` with the specified `shape`.
-    
-    Raises:
-        ValueError: If `state[key]` is missing or does not have the expected `shape`.
-    """
-    if key not in state:
-        raise ValueError(f"{name}: missing required state key {key!r}")
-    array = np.asarray(state[key], dtype=float)
-    if array.shape != shape:
-        raise ValueError(f"{name}: {key} expected {shape}, received {array.shape}")
-    return np.array(array, dtype=float, copy=True)
-
-
-def _state_scalar(value: object) -> object:
-    if isinstance(value, np.ndarray) and value.shape == ():
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    return value
-
-
-def _validate_state_dict(
-    state: dict[str, object],
-    *,
-    expected_keys: set[str],
-    expected_metadata: dict[str, object],
-    name: str,
-) -> None:
-    """
-    Validate that a state dictionary contains exactly the expected keys and that specified metadata entries match expected values.
-    
-    Parameters:
-        state (dict[str, object]): Serialized state dictionary to check.
-        expected_keys (set[str]): Exact set of keys that `state` must contain.
-        expected_metadata (dict[str, object]): Mapping of metadata keys to their expected scalar values; each entry is compared against the corresponding value in `state` after coercion via `_state_scalar`.
-        name (str): Contextual name used in raised error messages.
-    
-    Raises:
-        ValueError: If `state` is missing or contains unexpected keys, or if any metadata entry does not equal its expected value.
-    """
-    actual_keys = set(state.keys())
-    missing = sorted(expected_keys - actual_keys)
-    unexpected = sorted(actual_keys - expected_keys)
-    if missing or unexpected:
-        parts: list[str] = []
-        if missing:
-            parts.append(f"missing keys {missing}")
-        if unexpected:
-            parts.append(f"unexpected keys {unexpected}")
-        raise ValueError(f"{name}: state_dict key mismatch ({'; '.join(parts)})")
-
-    for key, expected in expected_metadata.items():
-        actual = _state_scalar(state[key])
-        if actual != expected:
-            raise ValueError(f"{name}: metadata {key!r} expected {expected!r}, received {actual!r}")
-
-
-def _parameter_norm_of(*arrays: np.ndarray) -> float:
-    """Return the L2 norm of all elements across the given parameter arrays."""
-    return float(np.sqrt(sum(np.sum(a**2) for a in arrays)))
-
-
-def _clip_grad_logits(grad_logits: Array, grad_clip: float) -> Array:
-    """Sanitize and clip a gradient vector by its L2 norm."""
-    grad_logits = np.asarray(grad_logits, dtype=float)
-    if grad_logits.ndim != 1:
-        raise ValueError("grad_logits must be a 1-D vector")
-    grad_clip_array = np.asarray(grad_clip, dtype=float)
-    if grad_clip_array.shape != ():
-        raise ValueError("grad_clip must be a finite non-negative scalar")
-    grad_clip_value = float(grad_clip_array)
-    if not np.isfinite(grad_clip_value) or grad_clip_value < 0.0:
-        raise ValueError("grad_clip must be a finite non-negative scalar")
-    if grad_clip_value == 0.0:
-        return np.zeros_like(grad_logits, dtype=float)
-    grad_logits = np.nan_to_num(grad_logits, nan=0.0, posinf=5.0, neginf=-5.0)
-    norm = float(np.linalg.norm(grad_logits))
-    if norm > grad_clip_value:
-        grad_logits = grad_logits * (grad_clip_value / (norm + 1e-8))
-    return grad_logits
-
-
-def _sigmoid(x: Array) -> Array:
-    """
-    Compute a numerically-stabilized sigmoid of the input.
-    
-    Parameters:
-        x (array-like): Input values to transform. Will be converted to a float NumPy array; NaNs are replaced with 0 and infinities are clamped to the range [-60, 60] before applying the sigmoid.
-    
-    Returns:
-        ndarray: Array of the same shape as `x` containing sigmoid outputs in the range (0, 1).
-    """
-    x = np.clip(np.nan_to_num(np.asarray(x, dtype=float), nan=0.0, posinf=60.0, neginf=-60.0), -60.0, 60.0)
-    return 1.0 / (1.0 + np.exp(-x))
+from .nn_utils import (
+    Array,
+    _clip_grad_logits,
+    _coerce_state_array,
+    _parameter_norm_of,
+    _sigmoid,
+    _state_scalar,
+    _validate_state_dict,
+    _weight_scale,
+    one_hot,
+    softmax,
+)
 
 
 @dataclass

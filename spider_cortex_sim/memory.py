@@ -3,7 +3,13 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING, Iterable
 
-from .perception import has_line_of_sight, predator_visible_to_spider, visible_object, visible_range
+from .perception import (
+    advance_percept_trace,
+    has_line_of_sight,
+    predator_visible_to_spider,
+    visible_object,
+    visible_range,
+)
 from .world_types import MemorySlot
 
 if TYPE_CHECKING:
@@ -43,6 +49,13 @@ MEMORY_AUDIT_CLASSIFICATIONS = {
             "explicit spider memory slots in this classification."
         ),
     },
+    "self-knowledge": {
+        "definition": (
+            "Inspection or action-history signals derived from the spider's own "
+            "heading, scans, and observation history. These signals describe what "
+            "the spider has inspected, not privileged world state."
+        ),
+    },
     "leakage": {
         "definition": (
             "Direct access to simulation internals that bypasses perception. This "
@@ -56,6 +69,8 @@ MEMORY_AUDIT_CLASSIFICATIONS = {
 # - Do not write from world.food_positions unless filtered through visibility.
 # - Do not write from world.predator.position without a perception check.
 # - Do not write from grid state that bypasses the perception layer.
+# - Active-sensing signals may expose the spider's own inspection history, but
+#   must not expose hidden target positions or world-owned planning state.
 MEMORY_LEAKAGE_AUDIT = {
     "food_memory": {
         "classification": "plausible_memory",
@@ -106,6 +121,90 @@ MEMORY_LEAKAGE_AUDIT = {
             "hidden object locations."
         ),
         "notes": "The escape target is derived from movement history and world-boundary clamping without walkability or shelter-policy queries.",
+    },
+    "foveal_scan_age": {
+        "classification": "self-knowledge",
+        "risk": "low",
+        "source": "spider_cortex_sim.world._scan_age_for_heading",
+        "update_rule": "world tick minus the last tick when the current heading was actively scanned",
+        "allowed_sources": ("action history", "inspection history"),
+        "rationale": (
+            "Scan age is computed from last_scan_tick_* fields written when the "
+            "spider changes heading through locomotion or ORIENT_* actions."
+        ),
+        "notes": "Active-sensing recency reflects the spider's own inspection history, not privileged world state.",
+    },
+    "food_trace_heading_dx": {
+        "classification": "self-knowledge",
+        "risk": "low",
+        "source": "spider_cortex_sim.perception.advance_percept_trace",
+        "update_rule": "current heading_dx when a food trace is refreshed from local perception",
+        "allowed_sources": ("observation history", "inspection history"),
+        "rationale": (
+            "The heading is copied from SpiderState only after a food target has "
+            "passed local visibility, field-of-view, and line-of-sight checks."
+        ),
+        "notes": "Trace heading context records how the spider inspected the target; it is not a target direction or hidden location.",
+    },
+    "food_trace_heading_dy": {
+        "classification": "self-knowledge",
+        "risk": "low",
+        "source": "spider_cortex_sim.perception.advance_percept_trace",
+        "update_rule": "current heading_dy when a food trace is refreshed from local perception",
+        "allowed_sources": ("observation history", "inspection history"),
+        "rationale": (
+            "The heading is copied from SpiderState only after a food target has "
+            "passed local visibility, field-of-view, and line-of-sight checks."
+        ),
+        "notes": "Trace heading context records how the spider inspected the target; it is not a target direction or hidden location.",
+    },
+    "shelter_trace_heading_dx": {
+        "classification": "self-knowledge",
+        "risk": "low",
+        "source": "spider_cortex_sim.perception.advance_percept_trace",
+        "update_rule": "current heading_dx when a shelter trace is refreshed from local perception",
+        "allowed_sources": ("observation history", "inspection history"),
+        "rationale": (
+            "The heading is copied from SpiderState only after a shelter target has "
+            "passed local visibility, field-of-view, and line-of-sight checks."
+        ),
+        "notes": "Trace heading context records how the spider inspected the target; it is not a target direction or hidden location.",
+    },
+    "shelter_trace_heading_dy": {
+        "classification": "self-knowledge",
+        "risk": "low",
+        "source": "spider_cortex_sim.perception.advance_percept_trace",
+        "update_rule": "current heading_dy when a shelter trace is refreshed from local perception",
+        "allowed_sources": ("observation history", "inspection history"),
+        "rationale": (
+            "The heading is copied from SpiderState only after a shelter target has "
+            "passed local visibility, field-of-view, and line-of-sight checks."
+        ),
+        "notes": "Trace heading context records how the spider inspected the target; it is not a target direction or hidden location.",
+    },
+    "predator_trace_heading_dx": {
+        "classification": "self-knowledge",
+        "risk": "low",
+        "source": "spider_cortex_sim.perception.advance_percept_trace",
+        "update_rule": "current heading_dx when a predator trace is refreshed from local perception",
+        "allowed_sources": ("observation history", "inspection history"),
+        "rationale": (
+            "The heading is copied from SpiderState only after a predator target has "
+            "passed local visibility, field-of-view, and line-of-sight checks."
+        ),
+        "notes": "Trace heading context records how the spider inspected the target; it is not a target direction or hidden location.",
+    },
+    "predator_trace_heading_dy": {
+        "classification": "self-knowledge",
+        "risk": "low",
+        "source": "spider_cortex_sim.perception.advance_percept_trace",
+        "update_rule": "current heading_dy when a predator trace is refreshed from local perception",
+        "allowed_sources": ("observation history", "inspection history"),
+        "rationale": (
+            "The heading is copied from SpiderState only after a predator target has "
+            "passed local visibility, field-of-view, and line-of-sight checks."
+        ),
+        "notes": "Trace heading context records how the spider inspected the target; it is not a target direction or hidden location.",
     },
 }
 
@@ -280,3 +379,48 @@ def refresh_memory(
 
     if predator_escape:
         set_memory(world.state.escape_memory, escape_memory_target(world))
+
+
+def refresh_perceptual_state(world: "SpiderWorld") -> None:
+    """
+    Update short-lived percept traces from the current immediate perceptions.
+
+    The trace refresh uses non-noisy visibility views so the memory stage owns
+    one deterministic update of food, shelter, and predator traces per tick.
+    """
+    radius = visible_range(world)
+    food_view = visible_object(world, world.food_positions, radius=radius, apply_noise=False)
+    shelter_view = visible_object(world, world.shelter_cells, radius=radius, apply_noise=False)
+    predator_view = predator_visible_to_spider(world, apply_noise=False)
+
+    world.state.food_trace = advance_percept_trace(
+        world,
+        world.state.food_trace,
+        food_view,
+        world.food_positions,
+    )
+    world.state.shelter_trace = advance_percept_trace(
+        world,
+        world.state.shelter_trace,
+        shelter_view,
+        world.shelter_cells,
+    )
+    world.state.predator_trace = advance_percept_trace(
+        world,
+        world.state.predator_trace,
+        predator_view,
+        world.predator_positions() or [world.lizard_pos()],
+    )
+
+
+def refresh_all_memory(
+    world: "SpiderWorld",
+    *,
+    predator_escape: bool = False,
+    initial: bool = False,
+) -> None:
+    """
+    Refresh explicit memory slots and short-lived percept traces together.
+    """
+    refresh_memory(world, predator_escape=predator_escape, initial=initial)
+    refresh_perceptual_state(world)

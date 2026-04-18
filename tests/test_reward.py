@@ -1,1591 +1,568 @@
-import unittest
+"""Tests for the reward package introduced/restructured in this PR.
 
-from spider_cortex_sim.noise import NoiseConfig
+Covers aspects not already addressed by the focused submodule test files:
+- reward/__init__.py compatibility layer (all symbols importable from
+  spider_cortex_sim.reward)
+- shaping_reduction_roadmap() return structure and deep-copy isolation
+- validate_shaping_disposition() valid and invalid inputs
+- validate_gap_policy() with realistic comparison payloads
+- MINIMAL_SHAPING_SURVIVAL_THRESHOLD value constraints
+- REWARD_COMPONENT_NAMES coverage against reward computation
+- REWARD_PROFILES structure invariants
+"""
+
+from __future__ import annotations
+
+import unittest
+from copy import deepcopy
+
 from spider_cortex_sim.reward import (
-    REWARD_COMPONENT_NAMES,
+    DISPOSITION_EVIDENCE_CRITERIA,
+    MINIMAL_SHAPING_SURVIVAL_THRESHOLD,
     REWARD_COMPONENT_AUDIT,
+    REWARD_COMPONENT_NAMES,
     REWARD_PROFILES,
+    SCENARIO_AUSTERE_REQUIREMENTS,
     SHAPING_DISPOSITIONS,
-    apply_action_and_terrain_effects,
-    apply_pressure_penalties,
-    apply_progress_and_event_rewards,
-    compute_predator_threat,
-    copy_reward_components,
+    SHAPING_GAP_POLICY,
+    SHAPING_REDUCTION_ROADMAP,
     empty_reward_components,
     reward_component_audit,
     reward_profile_audit,
     reward_total,
     shaping_disposition_summary,
+    shaping_reduction_roadmap,
+    validate_gap_policy,
+    validate_shaping_disposition,
 )
-from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
-from spider_cortex_sim.world import SpiderWorld
-from spider_cortex_sim.world_types import TickContext, TickSnapshot
 
 
-class ShapingDispositionTest(unittest.TestCase):
-    def test_high_risk_components_have_shaping_disposition(self) -> None:
-        """
-        Verify that every reward component marked with shaping_risk == "high" includes a valid shaping_disposition.
-        
-        Asserts that each audited component whose metadata["shaping_risk"] is "high" contains the "shaping_disposition" key and that its value is one of the values in SHAPING_DISPOSITIONS.
-        """
-        audit = reward_component_audit()
-        for component_name, metadata in audit.items():
-            if metadata["shaping_risk"] != "high":
-                continue
-            self.assertIn(
-                "shaping_disposition",
-                metadata,
-                f"High-risk component {component_name!r} needs a disposition",
-            )
-            self.assertIn(metadata["shaping_disposition"], SHAPING_DISPOSITIONS)
+# ---------------------------------------------------------------------------
+# shaping_reduction_roadmap()
+# ---------------------------------------------------------------------------
 
-    def test_progress_components_have_shaping_disposition(self) -> None:
-        audit = reward_component_audit()
-        for component_name, metadata in audit.items():
-            if metadata["category"] != "progress":
-                continue
-            self.assertIn(
-                "shaping_disposition",
-                metadata,
-                f"Progress component {component_name!r} needs a disposition",
-            )
-            self.assertIn(metadata["shaping_disposition"], SHAPING_DISPOSITIONS)
+class ShapingReductionRoadmapFunctionTest(unittest.TestCase):
+    """Tests for shaping_reduction_roadmap() function."""
 
-    def test_shaping_disposition_summary_has_expected_categories(self) -> None:
-        summary = shaping_disposition_summary()
-        self.assertEqual(set(summary), set(SHAPING_DISPOSITIONS) | {"counts"})
-        self.assertIsInstance(summary["counts"], dict)
-        self.assertEqual(set(summary["counts"]), set(SHAPING_DISPOSITIONS))
-        for disposition in SHAPING_DISPOSITIONS:
-            self.assertIsInstance(summary[disposition], list)
+    def setUp(self) -> None:
+        self.roadmap = shaping_reduction_roadmap()
 
-    def test_under_investigation_components_have_rationale(self) -> None:
-        # REWARD_COMPONENT_AUDIT currently has no under-investigation entries;
-        # if one is added, it must carry an explicit rationale.
-        audit = reward_component_audit()
-        for component_name, metadata in audit.items():
-            if metadata["shaping_disposition"] != "under_investigation":
-                continue
-            rationale = metadata.get("disposition_rationale")
-            self.assertIsInstance(
-                rationale,
-                str,
-                f"Under-investigation component {component_name!r} needs a rationale",
-            )
-            self.assertGreater(len(rationale.strip()), 0)
+    def test_returns_dict(self) -> None:
+        self.assertIsInstance(self.roadmap, dict)
 
-    def test_missing_shaping_disposition_raises_value_error(self) -> None:
-        metadata = dict(REWARD_COMPONENT_AUDIT["feeding"])
-        metadata.pop("shaping_disposition")
-        REWARD_COMPONENT_AUDIT["missing_disposition_test"] = metadata
-        try:
-            with self.assertRaisesRegex(ValueError, "missing shaping_disposition"):
-                shaping_disposition_summary()
-            with self.assertRaisesRegex(ValueError, "missing shaping_disposition"):
-                reward_profile_audit("classic")
-        finally:
-            del REWARD_COMPONENT_AUDIT["missing_disposition_test"]
-
-
-class RewardModuleTest(unittest.TestCase):
-    def _profile_with_reward_updates(self, **updates: float) -> OperationalProfile:
-        """
-        Create an OperationalProfile derived from DEFAULT_OPERATIONAL_PROFILE with specified reward fields overridden.
-        
-        Parameters:
-            **updates: float
-                Reward field names and their new numeric values to apply to the profile's `reward` section. Keys must be valid reward keys present in the default profile; values will be cast to `float`.
-        
-        Returns:
-            OperationalProfile: An OperationalProfile constructed from the modified summary with the provided reward updates applied.
-        
-        Raises:
-            ValueError: If any provided update key is not a valid reward key; the exception message lists the unknown keys and the allowed keys.
-        """
-        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
-        summary["name"] = "reward_test_profile"
-        summary["version"] = 7
-        allowed_keys = set(summary["reward"].keys())
-        invalid_keys = sorted(set(updates) - allowed_keys)
-        if invalid_keys:
-            raise ValueError(
-                f"Unknown reward profile field(s): {', '.join(invalid_keys)}. "
-                f"Allowed keys: {', '.join(sorted(allowed_keys))}."
-            )
-        summary["reward"].update({name: float(value) for name, value in updates.items()})
-        return OperationalProfile.from_summary(summary)
-
-    def _tick_context(
-        self,
-        world: SpiderWorld,
-        *,
-        action_name: str,
-        moved: bool,
-        night: bool,
-        terrain_now: str,
-        was_on_shelter: bool,
-        prev_food_dist: int,
-        prev_shelter_dist: int,
-        prev_predator_dist: int,
-        prev_predator_visible: bool,
-        prev_spider_pos: tuple[int, int],
-        prev_lizard_pos: tuple[int, int],
-        prev_rest_streak: int | None = None,
-    ) -> TickContext:
-        return TickContext(
-            action_idx=0,
-            intended_action=action_name,
-            executed_action=action_name,
-            motor_noise_applied=False,
-            snapshot=TickSnapshot(
-                tick=int(world.tick),
-                spider_pos=prev_spider_pos,
-                lizard_pos=prev_lizard_pos,
-                was_on_shelter=bool(was_on_shelter),
-                prev_shelter_role=world.shelter_role_at(prev_spider_pos),
-                prev_food_dist=int(prev_food_dist),
-                prev_shelter_dist=int(prev_shelter_dist),
-                prev_predator_dist=int(prev_predator_dist),
-                prev_predator_visible=bool(prev_predator_visible),
-                night=bool(night),
-                rest_streak=int(world.state.rest_streak if prev_rest_streak is None else prev_rest_streak),
-            ),
-            reward_components=empty_reward_components(),
-            info={"distance_deltas": {}},
-            moved=bool(moved),
-            terrain_now=terrain_now,
-        )
-
-    def test_empty_reward_components_matches_declared_names(self) -> None:
-        reward_components = empty_reward_components()
-        self.assertEqual(set(reward_components.keys()), set(REWARD_COMPONENT_NAMES))
-        self.assertTrue(all(value == 0.0 for value in reward_components.values()))
-
-    def test_reward_total_and_copy_round_trip(self) -> None:
-        reward_components = empty_reward_components()
-        reward_components["feeding"] = 1.2
-        reward_components["action_cost"] = -0.2
-        copied = copy_reward_components(reward_components)
-        self.assertEqual(copied, reward_components)
-        self.assertAlmostEqual(reward_total(reward_components), 1.0)
-
-    def test_apply_action_and_terrain_effects_updates_state_and_costs(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999, map_template="entrance_funnel")
-        world.reset(seed=1)
-        world.state.x, world.state.y = 5, world.height // 2
-        reward_components = empty_reward_components()
-        hunger_before = world.state.hunger
-        fatigue_before = world.state.fatigue
-        terrain_now = apply_action_and_terrain_effects(
-            world,
-            action_name="MOVE_RIGHT",
-            moved=True,
-            reward_components=reward_components,
-        )
-        self.assertEqual(terrain_now, world.terrain_at(world.spider_pos()))
-        self.assertLess(reward_components["action_cost"], 0.0)
-        self.assertGreater(world.state.hunger, hunger_before)
-        self.assertGreater(world.state.fatigue, fatigue_before)
-
-    def test_compute_predator_threat_detects_visible_predator(self) -> None:
-        world = SpiderWorld(seed=3, lizard_move_interval=999999)
-        world.reset(seed=3)
-        world.state.x, world.state.y = 2, 2
-        world.lizard.x, world.lizard.y = 4, 2
-        self.assertTrue(
-            compute_predator_threat(
-                world,
-                prev_predator_visible=True,
-                prev_predator_dist=2,
-            )
-        )
-
-    def test_apply_pressure_penalties_uses_state_levels(self) -> None:
-        world = SpiderWorld(seed=5, lizard_move_interval=999999)
-        world.reset(seed=5)
-        world.state.hunger = 0.8
-        world.state.fatigue = 0.6
-        world.state.sleep_debt = 0.4
-        reward_components = empty_reward_components()
-        apply_pressure_penalties(world, reward_components)
-        self.assertLess(reward_components["hunger_pressure"], 0.0)
-        self.assertLess(reward_components["fatigue_pressure"], 0.0)
-        self.assertLess(reward_components["sleep_debt_pressure"], 0.0)
-
-    def test_reward_profiles_contain_required_keys(self) -> None:
-        """
-        Verify each reward profile in REWARD_PROFILES includes the full set of required reward configuration keys.
-        
-        This test checks that every profile contains the following keys:
-        "action_cost_stay", "action_cost_move", "hunger_pressure", "fatigue_pressure",
-        "sleep_debt_pressure", "food_progress", "shelter_progress", "predator_escape",
-        "predator_escape_bonus", "sleep_debt_night_awake", "sleep_debt_day_awake",
-        "sleep_debt_overdue_threshold", "sleep_debt_health_penalty", "recent_contact_decay",
-        "recent_pain_decay", and "death_penalty".
-        
-        If any key is missing from a profile, the test fails with a message identifying
-        the profile name and the missing key.
-        """
+    def test_has_all_required_keys(self) -> None:
         required_keys = {
-            "action_cost_stay", "action_cost_move",
-            "hunger_pressure", "fatigue_pressure", "sleep_debt_pressure",
-            "food_progress", "shelter_progress",
-            "predator_escape", "predator_escape_bonus",
-            "sleep_debt_night_awake", "sleep_debt_day_awake",
-            "sleep_debt_overdue_threshold", "sleep_debt_health_penalty",
-            "recent_contact_decay", "recent_pain_decay", "death_penalty",
+            "minimal_profile",
+            "survival_threshold",
+            "reduction_targets",
+            "gap_policy",
+            "evidence_criteria",
+            "scenario_requirements",
+            "notes",
         }
-        for profile_name, profile in REWARD_PROFILES.items():
-            for key in required_keys:
-                self.assertIn(key, profile, f"Profile '{profile_name}' missing key: {key}")
+        self.assertEqual(set(self.roadmap.keys()), required_keys)
 
-    def test_reward_profiles_has_classic_and_ecological(self) -> None:
-        self.assertIn("classic", REWARD_PROFILES)
-        self.assertIn("ecological", REWARD_PROFILES)
-        self.assertIn("austere", REWARD_PROFILES)
+    def test_minimal_profile_is_austere(self) -> None:
+        self.assertEqual(self.roadmap["minimal_profile"], "austere")
 
-    def test_reward_profiles_ecological_stricter_penalties(self) -> None:
-        classic = REWARD_PROFILES["classic"]
-        ecological = REWARD_PROFILES["ecological"]
-        self.assertGreater(ecological["hunger_pressure"], classic["hunger_pressure"])
-        self.assertGreater(ecological["fatigue_pressure"], classic["fatigue_pressure"])
+    def test_survival_threshold_matches_constant(self) -> None:
+        self.assertAlmostEqual(
+            self.roadmap["survival_threshold"],
+            MINIMAL_SHAPING_SURVIVAL_THRESHOLD,
+        )
 
-    def test_austere_profile_zeroes_progress_guidance_terms(self) -> None:
-        austere = REWARD_PROFILES["austere"]
-        self.assertEqual(austere["food_progress"], 0.0)
-        self.assertEqual(austere["shelter_progress"], 0.0)
-        self.assertEqual(austere["threat_shelter_progress"], 0.0)
-        self.assertEqual(austere["predator_escape"], 0.0)
-        self.assertEqual(austere["predator_escape_bonus"], 0.0)
-        self.assertEqual(austere["day_exploration_hungry"], 0.0)
-        self.assertEqual(austere["day_exploration_calm"], 0.0)
+    def test_notes_is_non_empty_list(self) -> None:
+        notes = self.roadmap["notes"]
+        self.assertIsInstance(notes, list)
+        self.assertGreater(len(notes), 0)
 
-    def test_reward_component_audit_covers_declared_components(self) -> None:
+    def test_reduction_targets_is_dict(self) -> None:
+        self.assertIsInstance(self.roadmap["reduction_targets"], dict)
+
+    def test_gap_policy_is_dict(self) -> None:
+        self.assertIsInstance(self.roadmap["gap_policy"], dict)
+
+    def test_evidence_criteria_is_dict(self) -> None:
+        self.assertIsInstance(self.roadmap["evidence_criteria"], dict)
+
+    def test_scenario_requirements_is_dict(self) -> None:
+        self.assertIsInstance(self.roadmap["scenario_requirements"], dict)
+
+    def test_returns_deep_copy_not_reference(self) -> None:
+        roadmap1 = shaping_reduction_roadmap()
+        roadmap2 = shaping_reduction_roadmap()
+        # Mutating roadmap1 must not affect roadmap2
+        if roadmap1["reduction_targets"]:
+            first_key = next(iter(roadmap1["reduction_targets"]))
+            roadmap1["reduction_targets"][first_key] = "mutated"
+            self.assertNotEqual(
+                roadmap2["reduction_targets"].get(first_key), "mutated"
+            )
+
+    def test_gap_policy_in_roadmap_matches_constant(self) -> None:
+        policy = self.roadmap["gap_policy"]
+        self.assertIn("minimal_profile", policy)
+        self.assertEqual(policy["minimal_profile"], SHAPING_GAP_POLICY["minimal_profile"])
+
+    def test_evidence_criteria_covers_all_dispositions(self) -> None:
+        criteria = self.roadmap["evidence_criteria"]
+        for disposition in SHAPING_DISPOSITIONS:
+            if disposition not in ("under_investigation",):
+                # All non-investigative dispositions should have evidence criteria
+                pass  # not every disposition is required to have criteria
+        # At minimum, defended and removed should be present
+        self.assertIn("defended", criteria)
+        self.assertIn("removed", criteria)
+
+    def test_scenario_requirements_values_have_required_fields(self) -> None:
+        reqs = self.roadmap["scenario_requirements"]
+        for scenario_name, req in reqs.items():
+            self.assertIn(
+                "requirement_level", req,
+                f"Scenario {scenario_name!r} missing 'requirement_level'",
+            )
+            self.assertIn(
+                "rationale", req,
+                f"Scenario {scenario_name!r} missing 'rationale'",
+            )
+
+    def test_scenario_requirement_levels_are_valid(self) -> None:
+        valid_levels = {"gate", "warning", "diagnostic", "excluded"}
+        reqs = self.roadmap["scenario_requirements"]
+        for scenario_name, req in reqs.items():
+            level = req["requirement_level"]
+            self.assertIn(
+                level, valid_levels,
+                f"Scenario {scenario_name!r} has invalid requirement_level {level!r}",
+            )
+
+
+# ---------------------------------------------------------------------------
+# validate_shaping_disposition()
+# ---------------------------------------------------------------------------
+
+class ValidateShapingDispositionTest(unittest.TestCase):
+    """Tests for validate_shaping_disposition()."""
+
+    def test_valid_disposition_returned_unchanged(self) -> None:
+        for disposition in SHAPING_DISPOSITIONS:
+            metadata = {"shaping_disposition": disposition}
+            result = validate_shaping_disposition(metadata, "test_component")
+            self.assertEqual(result, disposition)
+
+    def test_missing_disposition_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            validate_shaping_disposition({}, "my_component")
+        self.assertIn("my_component", str(ctx.exception))
+
+    def test_invalid_disposition_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            validate_shaping_disposition(
+                {"shaping_disposition": "not_a_valid_disposition"},
+                "action_cost",
+            )
+        self.assertIn("action_cost", str(ctx.exception))
+
+    def test_component_name_in_error_message(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            validate_shaping_disposition(
+                {"shaping_disposition": "completely_wrong"},
+                "sleep_debt_pressure",
+            )
+        self.assertIn("sleep_debt_pressure", str(ctx.exception))
+
+    def test_none_disposition_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_shaping_disposition(
+                {"shaping_disposition": None}, "some_component"
+            )
+
+    def test_return_type_is_str(self) -> None:
+        result = validate_shaping_disposition(
+            {"shaping_disposition": "defended"}, "action_cost"
+        )
+        self.assertIsInstance(result, str)
+
+    def test_all_audit_dispositions_pass_validation(self) -> None:
+        audit = reward_component_audit()
+        for component_name, metadata in audit.items():
+            with self.subTest(component=component_name):
+                result = validate_shaping_disposition(metadata, component_name)
+                self.assertIn(result, SHAPING_DISPOSITIONS)
+
+
+# ---------------------------------------------------------------------------
+# validate_gap_policy()
+# ---------------------------------------------------------------------------
+
+class ValidateGapPolicyTest(unittest.TestCase):
+    """Tests for validate_gap_policy()."""
+
+    def test_empty_payload_passes_with_no_violations(self) -> None:
+        result = validate_gap_policy({})
+        self.assertTrue(result["passes"])
+        self.assertEqual(result["violations"], [])
+        self.assertEqual(result["warnings"], [])
+
+    def test_returns_required_keys(self) -> None:
+        result = validate_gap_policy({})
+        required_keys = {
+            "passes", "policy", "violations", "warnings",
+            "checked_profiles", "checked_scenarios", "notes",
+        }
+        self.assertEqual(set(result.keys()), required_keys)
+
+    def test_no_violation_when_deltas_within_limits(self) -> None:
+        comparison = {
+            "deltas_vs_minimal": {
+                "classic": {
+                    "scenario_success_rate_delta": 0.10,  # limit is 0.20
+                    "mean_reward_delta": 0.30,  # limit is 0.50
+                },
+            }
+        }
+        result = validate_gap_policy(comparison)
+        self.assertTrue(result["passes"])
+        self.assertEqual(result["violations"], [])
+
+    def test_violation_when_success_rate_delta_exceeds_limit(self) -> None:
+        comparison = {
+            "deltas_vs_minimal": {
+                "classic": {
+                    "scenario_success_rate_delta": 0.50,  # exceeds 0.20 limit
+                    "mean_reward_delta": 0.0,
+                },
+            }
+        }
+        result = validate_gap_policy(comparison)
+        self.assertFalse(result["passes"])
+        self.assertGreater(len(result["violations"]), 0)
+
+    def test_violation_when_mean_reward_delta_exceeds_limit(self) -> None:
+        comparison = {
+            "deltas_vs_minimal": {
+                "classic": {
+                    "scenario_success_rate_delta": 0.0,
+                    "mean_reward_delta": 0.99,  # exceeds 0.50 limit
+                },
+            }
+        }
+        result = validate_gap_policy(comparison)
+        self.assertFalse(result["passes"])
+        self.assertGreater(len(result["violations"]), 0)
+
+    def test_warning_when_delta_exceeds_warning_threshold(self) -> None:
+        # warning_threshold_multiplier = 0.80, limit = 0.20 → warning at 0.16+
+        comparison = {
+            "deltas_vs_minimal": {
+                "classic": {
+                    "scenario_success_rate_delta": 0.18,  # 0.80*0.20=0.16 < 0.18 < 0.20
+                    "mean_reward_delta": 0.0,
+                },
+            }
+        }
+        result = validate_gap_policy(comparison)
+        self.assertTrue(result["passes"])
+        self.assertGreater(len(result["warnings"]), 0)
+
+    def test_no_checked_profiles_when_no_deltas(self) -> None:
+        result = validate_gap_policy({})
+        self.assertEqual(result["checked_profiles"], [])
+
+    def test_checked_profiles_includes_evaluated_profile(self) -> None:
+        comparison = {
+            "deltas_vs_minimal": {
+                "classic": {"scenario_success_rate_delta": 0.0, "mean_reward_delta": 0.0},
+            }
+        }
+        result = validate_gap_policy(comparison)
+        self.assertIn("classic", result["checked_profiles"])
+
+    def test_austere_survival_violation_when_below_minimum(self) -> None:
+        comparison = {
+            "behavior_survival": {
+                "available": True,
+                "survival_rate": 0.10,  # well below 0.50 threshold
+            }
+        }
+        result = validate_gap_policy(comparison)
+        self.assertFalse(result["passes"])
+        metric_names = [v.get("metric") for v in result["violations"]]
+        self.assertIn("austere_survival_rate", metric_names)
+
+    def test_austere_survival_passes_when_above_minimum(self) -> None:
+        comparison = {
+            "behavior_survival": {
+                "available": True,
+                "survival_rate": 0.80,
+            }
+        }
+        result = validate_gap_policy(comparison)
+        self.assertTrue(result["passes"])
+
+    def test_policy_key_in_result_is_deep_copy(self) -> None:
+        result = validate_gap_policy({})
+        result["policy"]["minimal_profile"] = "mutated"
+        # Original SHAPING_GAP_POLICY should be unchanged
+        self.assertNotEqual(SHAPING_GAP_POLICY["minimal_profile"], "mutated")
+
+    def test_notes_in_result_is_non_empty_list(self) -> None:
+        result = validate_gap_policy({})
+        self.assertIsInstance(result["notes"], list)
+        self.assertGreater(len(result["notes"]), 0)
+
+    def test_missing_behavior_survival_section_does_not_error(self) -> None:
+        # Should not raise even when 'behavior_survival' is absent
+        result = validate_gap_policy({"deltas_vs_minimal": {}})
+        self.assertIsInstance(result["passes"], bool)
+
+    def test_missing_available_flag_skips_survival_check(self) -> None:
+        comparison = {
+            "behavior_survival": {
+                "survival_rate": 0.1,  # below threshold, but 'available' missing
+            }
+        }
+        result = validate_gap_policy(comparison)
+        # Without available=True, survival check should be skipped
+        metric_names = [v.get("metric") for v in result["violations"]]
+        self.assertNotIn("austere_survival_rate", metric_names)
+
+    def test_ecological_profile_delta_checked(self) -> None:
+        comparison = {
+            "deltas_vs_minimal": {
+                "ecological": {
+                    "scenario_success_rate_delta": 0.99,  # exceeds 0.15 limit
+                    "mean_reward_delta": 0.0,
+                }
+            }
+        }
+        result = validate_gap_policy(comparison)
+        self.assertFalse(result["passes"])
+
+    def test_unknown_profile_delta_ignored(self) -> None:
+        # A profile not in the policy limits should be silently ignored
+        comparison = {
+            "deltas_vs_minimal": {
+                "unknown_profile": {
+                    "scenario_success_rate_delta": 9.9,
+                    "mean_reward_delta": 9.9,
+                }
+            }
+        }
+        result = validate_gap_policy(comparison)
+        # No violations because limits are not defined for unknown_profile
+        success_violations = [
+            v for v in result["violations"]
+            if v.get("metric") == "scenario_success_rate_delta"
+        ]
+        self.assertEqual(success_violations, [])
+
+
+# ---------------------------------------------------------------------------
+# MINIMAL_SHAPING_SURVIVAL_THRESHOLD
+# ---------------------------------------------------------------------------
+
+class MinimalShapingSurvivalThresholdTest(unittest.TestCase):
+    """Tests for the MINIMAL_SHAPING_SURVIVAL_THRESHOLD constant."""
+
+    def test_is_a_float(self) -> None:
+        self.assertIsInstance(MINIMAL_SHAPING_SURVIVAL_THRESHOLD, float)
+
+    def test_is_in_unit_interval(self) -> None:
+        self.assertGreater(MINIMAL_SHAPING_SURVIVAL_THRESHOLD, 0.0)
+        self.assertLessEqual(MINIMAL_SHAPING_SURVIVAL_THRESHOLD, 1.0)
+
+    def test_value_is_reasonable_for_survival(self) -> None:
+        # Should be at least a moderate survival threshold
+        self.assertGreaterEqual(MINIMAL_SHAPING_SURVIVAL_THRESHOLD, 0.3)
+
+    def test_gap_policy_references_same_value(self) -> None:
+        self.assertAlmostEqual(
+            SHAPING_GAP_POLICY["min_austere_survival_rate"],
+            MINIMAL_SHAPING_SURVIVAL_THRESHOLD,
+        )
+
+
+# ---------------------------------------------------------------------------
+# REWARD_COMPONENT_NAMES coverage
+# ---------------------------------------------------------------------------
+
+class RewardComponentNamesCoverageTest(unittest.TestCase):
+    """Tests for REWARD_COMPONENT_NAMES completeness."""
+
+    def test_is_non_empty_tuple_or_sequence(self) -> None:
+        self.assertGreater(len(REWARD_COMPONENT_NAMES), 0)
+
+    def test_all_names_are_strings(self) -> None:
+        for name in REWARD_COMPONENT_NAMES:
+            self.assertIsInstance(name, str)
+
+    def test_matches_empty_reward_components_keys(self) -> None:
+        components = empty_reward_components()
+        self.assertEqual(set(components.keys()), set(REWARD_COMPONENT_NAMES))
+
+    def test_matches_audit_keys(self) -> None:
         audit = reward_component_audit()
         self.assertEqual(set(audit.keys()), set(REWARD_COMPONENT_NAMES))
-        self.assertEqual(set(REWARD_COMPONENT_AUDIT.keys()), set(REWARD_COMPONENT_NAMES))
 
-    def test_reward_component_audit_classifies_progress_components(self) -> None:
-        audit = reward_component_audit()
-        self.assertEqual(audit["food_progress"]["category"], "progress")
-        self.assertEqual(audit["shelter_progress"]["category"], "progress")
-        self.assertEqual(audit["predator_escape"]["category"], "progress")
-
-    def test_reward_profile_audit_reduces_progress_weight_in_austere_profile(self) -> None:
-        classic_audit = reward_profile_audit("classic")
-        austere_audit = reward_profile_audit("austere")
-        self.assertEqual(austere_audit["profile"], "austere")
-        self.assertEqual(
-            austere_audit["component_weight_proxy"]["food_progress"],
-            0.0,
-        )
-        self.assertEqual(
-            austere_audit["component_weight_proxy"]["shelter_progress"],
-            0.0,
-        )
-        self.assertLess(
-            austere_audit["category_weight_proxy"]["progress"],
-            classic_audit["category_weight_proxy"]["progress"],
-        )
-
-    def test_reward_profile_audit_exposes_configurable_and_hardcoded_mass(self) -> None:
-        audit = reward_profile_audit("austere")
-        self.assertIn("configurable_category_weight_proxy", audit)
-        self.assertIn("hardcoded_mass", audit)
-        self.assertGreater(audit["hardcoded_mass"], 0.0)
-        self.assertLessEqual(
-            audit["configurable_category_weight_proxy"]["progress"],
-            audit["category_weight_proxy"]["progress"],
-        )
-
-    def test_reward_component_audit_returns_deep_copy_not_reference(self) -> None:
-        audit1 = reward_component_audit()
-        audit2 = reward_component_audit()
-        audit1["food_progress"]["category"] = "mutated"
-        self.assertEqual(audit2["food_progress"]["category"], "progress")
-
-    def test_reward_component_audit_event_category_components_present(self) -> None:
-        audit = reward_component_audit()
-        expected_event_components = {
-            "action_cost", "terrain_cost", "night_exposure",
-            "predator_contact", "feeding", "resting", "shelter_entry",
-            "night_shelter_bonus", "death_penalty",
+    def test_expected_components_present(self) -> None:
+        expected = {
+            "action_cost", "feeding", "predator_contact",
+            "death_penalty", "hunger_pressure", "fatigue_pressure",
         }
-        actual_event_components = {
-            name for name, data in audit.items()
-            if data["category"] == "event"
-        }
-        self.assertEqual(actual_event_components, expected_event_components)
+        for name in expected:
+            self.assertIn(name, REWARD_COMPONENT_NAMES, f"Missing component: {name!r}")
 
-    def test_reward_component_audit_internal_pressure_components_present(self) -> None:
-        audit = reward_component_audit()
-        expected_pressure_components = {
-            "hunger_pressure", "fatigue_pressure",
-            "sleep_debt_pressure", "homeostasis_penalty",
-        }
-        actual_pressure_components = {
-            name for name, data in audit.items()
-            if data["category"] == "internal_pressure"
-        }
-        self.assertEqual(actual_pressure_components, expected_pressure_components)
+    def test_no_duplicate_names(self) -> None:
+        names_list = list(REWARD_COMPONENT_NAMES)
+        self.assertEqual(len(names_list), len(set(names_list)))
 
-    def test_reward_component_audit_all_entries_have_required_fields(self) -> None:
-        audit = reward_component_audit()
-        required_fields = {
-            "category", "source", "gates", "config_keys",
-            "configured_weight_keys", "shaping_risk",
-            "shaping_disposition", "notes",
-        }
-        for component_name, metadata in audit.items():
-            for field in required_fields:
-                self.assertIn(
-                    field,
-                    metadata,
-                    f"Reward component {component_name!r} missing field {field!r}",
-                )
 
-    def test_reward_component_audit_shaping_risk_values_are_valid(self) -> None:
-        audit = reward_component_audit()
-        valid_risk_levels = {"low", "medium", "high"}
-        for name, data in audit.items():
-            self.assertIn(
-                data["shaping_risk"],
-                valid_risk_levels,
-                f"Component {name!r} has unexpected shaping_risk {data['shaping_risk']!r}",
-            )
+# ---------------------------------------------------------------------------
+# REWARD_PROFILES structure invariants
+# ---------------------------------------------------------------------------
 
-    def test_reward_component_audit_shaping_disposition_values_are_valid(self) -> None:
-        audit = reward_component_audit()
-        valid_dispositions = set(SHAPING_DISPOSITIONS)
-        for name, data in audit.items():
-            self.assertIn(
-                data["shaping_disposition"],
-                valid_dispositions,
-                f"Component {name!r} has unexpected shaping_disposition {data['shaping_disposition']!r}",
-            )
+class RewardProfilesStructureTest(unittest.TestCase):
+    """Tests for REWARD_PROFILES structure invariants from the reward package."""
 
-    def test_reward_component_audit_requires_rationale_for_non_outcome_signals(self) -> None:
-        audit = reward_component_audit()
-        for name, data in audit.items():
-            with self.subTest(component=name):
-                if data["shaping_disposition"] == "outcome_signal":
-                    continue
-                self.assertIn(
-                    "disposition_rationale",
-                    data,
-                    f"Component {name!r} needs a shaping disposition rationale",
-                )
-                self.assertIsInstance(data["disposition_rationale"], str)
-                self.assertGreater(len(data["disposition_rationale"].strip()), 0)
+    def test_has_classic_ecological_and_austere(self) -> None:
+        for profile_name in ("classic", "ecological", "austere"):
+            self.assertIn(profile_name, REWARD_PROFILES)
 
-    def test_high_risk_progress_components_are_marked_removed(self) -> None:
-        """
-        Verify that the high-risk progress reward components are assigned the "removed" shaping disposition and that their disposition rationale mentions "austere".
-        
-        Checks the audit entries for "food_progress", "shelter_progress", and "predator_escape".
-        """
-        audit = reward_component_audit()
-        for component_name in ("food_progress", "shelter_progress", "predator_escape"):
-            self.assertEqual(audit[component_name]["shaping_disposition"], "removed")
-            self.assertIn("austere", audit[component_name]["disposition_rationale"])
-
-    def test_low_risk_outcome_components_are_marked_outcome_signals(self) -> None:
-        """
-        Asserts that specific low-risk reward components are labeled with the "outcome_signal" shaping disposition.
-        
-        Verifies that the audit entries for "predator_contact", "feeding", and "death_penalty" have `shaping_disposition == "outcome_signal"`.
-        """
-        audit = reward_component_audit()
-        for component_name in ("predator_contact", "feeding", "death_penalty"):
-            self.assertEqual(audit[component_name]["shaping_disposition"], "outcome_signal")
+    def test_each_profile_is_non_empty_dict(self) -> None:
+        for profile_name, profile in REWARD_PROFILES.items():
             self.assertIsInstance(
-                audit[component_name]["disposition_rationale"],
-                str,
+                profile, dict,
+                f"Profile {profile_name!r} should be a dict",
             )
             self.assertGreater(
-                len(audit[component_name]["disposition_rationale"].strip()),
-                0,
+                len(profile), 0,
+                f"Profile {profile_name!r} should not be empty",
             )
 
-    def test_shaping_disposition_summary_groups_components_and_counts(self) -> None:
-        summary = shaping_disposition_summary()
-        counts = summary["counts"]
-        for disposition in SHAPING_DISPOSITIONS:
-            components = summary[disposition]
-            self.assertEqual(counts[disposition], len(components))
-        self.assertIn("food_progress", summary["removed"])
-        self.assertIn("feeding", summary["outcome_signal"])
-        self.assertIn("resting", summary["weakened"])
+    def test_component_weights_are_none_or_numeric(self) -> None:
+        for profile_name, profile in REWARD_PROFILES.items():
+            for component_name, weight in profile.items():
+                if weight is not None:
+                    self.assertIsInstance(
+                        weight, (int, float),
+                        f"Profile {profile_name!r} component {component_name!r} "
+                        f"has non-numeric weight {weight!r}",
+                    )
 
-    def test_reward_profile_audit_raises_key_error_for_unknown_profile(self) -> None:
-        with self.assertRaises(KeyError):
-            reward_profile_audit("nonexistent_profile")
+    def test_austere_profile_has_fewer_or_equal_positive_values_than_classic(self) -> None:
+        # The austere profile removes dense progress signals; so it should have
+        # fewer non-zero config values than the classic profile
+        classic = REWARD_PROFILES["classic"]
+        austere = REWARD_PROFILES["austere"]
+        classic_nonzero = sum(1 for v in classic.values() if v)
+        austere_nonzero = sum(1 for v in austere.values() if v)
+        self.assertLessEqual(austere_nonzero, classic_nonzero)
 
-    def test_reward_profile_audit_classic_has_all_expected_keys(self) -> None:
-        audit = reward_profile_audit("classic")
-        expected_keys = {
-            "profile", "component_weight_proxy", "category_weight_proxy",
-            "configurable_category_weight_proxy", "disposition_summary",
-            "dominant_category", "hardcoded_mass",
-            "non_configurable_components", "notes",
-        }
-        self.assertEqual(set(audit.keys()), expected_keys)
-
-    def test_reward_profile_audit_disposition_summary_contains_all_dispositions(self) -> None:
-        audit = reward_profile_audit("classic")
-        disposition_summary = audit["disposition_summary"]
-        self.assertEqual(set(disposition_summary.keys()), set(SHAPING_DISPOSITIONS))
-        for disposition, data in disposition_summary.items():
-            self.assertIn("components", data, disposition)
-            self.assertIn("component_count", data, disposition)
-            self.assertIn("total_weight_proxy", data, disposition)
-            self.assertEqual(data["component_count"], len(data["components"]))
-
-    def test_reward_profile_audit_reports_removed_disposition_weight_gap(self) -> None:
-        classic_audit = reward_profile_audit("classic")
-        austere_audit = reward_profile_audit("austere")
-        self.assertGreater(
-            classic_audit["disposition_summary"]["removed"]["total_weight_proxy"],
-            0.0,
-        )
-        self.assertEqual(
-            austere_audit["disposition_summary"]["removed"]["total_weight_proxy"],
-            0.0,
-        )
-
-    def test_reward_profile_audit_dominant_category_is_valid(self) -> None:
-        for profile_name in REWARD_PROFILES:
-            audit = reward_profile_audit(profile_name)
-            self.assertIn(
-                audit["dominant_category"],
-                {"event", "progress", "internal_pressure"},
-                f"Profile {profile_name!r} has unexpected dominant_category",
-            )
-
-    def test_reward_profile_audit_non_configurable_components_includes_expected(self) -> None:
-        audit = reward_profile_audit("classic")
-        non_configurable = audit["non_configurable_components"]
-        for expected in ("predator_contact", "feeding"):
-            self.assertIn(
-                expected,
-                non_configurable,
-                f"Expected {expected!r} in non_configurable_components",
-            )
-        self.assertNotIn("death_penalty", non_configurable)
-
-    def test_reward_profile_audit_non_configurable_components_is_sorted(self) -> None:
-        audit = reward_profile_audit("classic")
-        components = audit["non_configurable_components"]
-        self.assertEqual(components, sorted(components))
-
-    def test_reward_profile_audit_notes_is_non_empty_list(self) -> None:
-        audit = reward_profile_audit("classic")
-        self.assertIsInstance(audit["notes"], list)
-        self.assertGreater(len(audit["notes"]), 0)
-
-    def test_reward_profile_audit_category_weight_proxy_has_three_categories(self) -> None:
-        audit = reward_profile_audit("classic")
-        self.assertEqual(
-            set(audit["category_weight_proxy"].keys()),
-            {"event", "progress", "internal_pressure"},
-        )
-
-    def test_reward_profile_audit_classic_total_weight_is_positive(self) -> None:
-        audit = reward_profile_audit("classic")
-        total = sum(audit["category_weight_proxy"].values())
+    def test_classic_profile_total_weight_positive(self) -> None:
+        classic = REWARD_PROFILES["classic"]
+        total = sum(w for w in classic.values() if isinstance(w, (int, float)) and w)
         self.assertGreater(total, 0.0)
 
-    def test_reward_profile_audit_component_weights_are_non_negative(self) -> None:
+    def test_profile_audit_matches_profiles_dict(self) -> None:
         for profile_name in REWARD_PROFILES:
             audit = reward_profile_audit(profile_name)
-            for comp_name, weight in audit["component_weight_proxy"].items():
-                self.assertGreaterEqual(
-                    weight,
-                    0.0,
-                    f"Profile {profile_name!r} component {comp_name!r} has negative weight proxy",
-                )
+            self.assertEqual(audit["profile"], profile_name)
 
-    def test_austere_profile_has_non_zero_action_costs_and_pressures(self) -> None:
-        austere = REWARD_PROFILES["austere"]
-        self.assertGreater(austere["action_cost_stay"], 0.0)
-        self.assertGreater(austere["action_cost_move"], 0.0)
-        self.assertGreater(austere["hunger_pressure"], 0.0)
-        self.assertGreater(austere["fatigue_pressure"], 0.0)
-        self.assertGreater(austere["sleep_debt_pressure"], 0.0)
 
-    def test_austere_profile_zeroes_shelter_entry_and_night_bonus(self) -> None:
-        austere = REWARD_PROFILES["austere"]
-        self.assertEqual(austere["shelter_entry"], 0.0)
-        self.assertEqual(austere["night_shelter_bonus"], 0.0)
+# ---------------------------------------------------------------------------
+# SHAPING_DISPOSITIONS completeness
+# ---------------------------------------------------------------------------
 
-    def test_reward_profile_audit_ecological_has_progress_category(self) -> None:
-        audit = reward_profile_audit("ecological")
-        self.assertIn("progress", audit["category_weight_proxy"])
-        self.assertGreater(audit["category_weight_proxy"]["progress"], 0.0)
+class ShapingDispositionsTest(unittest.TestCase):
+    """Tests for SHAPING_DISPOSITIONS constant."""
 
-    def test_reward_component_audit_resting_has_hardcoded_weight(self) -> None:
-        audit = reward_component_audit()
-        self.assertIn("hardcoded_weight", audit["resting"])
-        self.assertGreater(float(audit["resting"]["hardcoded_weight"]), 0.0)
-
-    def test_reward_component_audit_death_penalty_is_configurable(self) -> None:
-        audit = reward_component_audit()
-        self.assertEqual(audit["death_penalty"]["config_keys"], ["death_penalty"])
-        self.assertEqual(audit["death_penalty"]["configured_weight_keys"], ["death_penalty"])
-        self.assertNotIn("hardcoded_weight", audit["death_penalty"])
-
-    def test_profile_with_reward_updates_rejects_unknown_keys(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            self._profile_with_reward_updates(not_a_real_reward_key=1.0)
-        self.assertIn("not_a_real_reward_key", str(ctx.exception))
-
-    def test_copy_reward_components_is_independent(self) -> None:
-        original = empty_reward_components()
-        original["feeding"] = 2.5
-        copied = copy_reward_components(original)
-        self.assertAlmostEqual(copied["feeding"], 2.5)
-        copied["feeding"] = 9.9
-        self.assertAlmostEqual(original["feeding"], 2.5)
-
-    def test_reward_total_handles_negative_values(self) -> None:
-        components = empty_reward_components()
-        components["action_cost"] = -0.5
-        components["predator_contact"] = -2.0
-        components["feeding"] = 3.0
-        total = reward_total(components)
-        self.assertAlmostEqual(total, 0.5)
-
-    def test_reward_total_all_zeros(self) -> None:
-        components = empty_reward_components()
-        self.assertAlmostEqual(reward_total(components), 0.0)
-
-    def test_apply_action_and_terrain_effects_stay_cost(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        reward_components = empty_reward_components()
-        apply_action_and_terrain_effects(
-            world,
-            action_name="STAY",
-            moved=False,
-            reward_components=reward_components,
-        )
-        expected_cost = -world.reward_config["action_cost_stay"]
-        self.assertAlmostEqual(reward_components["action_cost"], expected_cost)
-
-    def test_apply_action_and_terrain_effects_move_costs_more_than_stay(self) -> None:
-        world_stay = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world_stay.reset(seed=1)
-        rc_stay = empty_reward_components()
-        apply_action_and_terrain_effects(world_stay, action_name="STAY", moved=False, reward_components=rc_stay)
-
-        world_move = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world_move.reset(seed=1)
-        rc_move = empty_reward_components()
-        apply_action_and_terrain_effects(world_move, action_name="MOVE_RIGHT", moved=True, reward_components=rc_move)
-
-        self.assertLess(rc_move["action_cost"], rc_stay["action_cost"])
-
-    def test_compute_predator_threat_false_when_safe(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        world.state.x, world.state.y = 1, 1
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.recent_contact = 0.0
-        world.state.recent_pain = 0.0
-        result = compute_predator_threat(
-            world,
-            prev_predator_visible=False,
-            prev_predator_dist=10,
-        )
-        self.assertFalse(result)
-
-    def test_compute_predator_threat_uses_operational_profile_thresholds(self) -> None:
-        world = SpiderWorld(
-            seed=1,
-            lizard_move_interval=999999,
-            operational_profile=self._profile_with_reward_updates(predator_threat_smell_threshold=0.0),
-        )
-        world.reset(seed=1)
-        world.state.x, world.state.y = 1, 1
-        world.lizard.x, world.lizard.y = 2, 1
-        world.state.recent_contact = 0.0
-        world.state.recent_pain = 0.0
-        result = compute_predator_threat(
-            world,
-            prev_predator_visible=False,
-            prev_predator_dist=10,
-        )
-        self.assertTrue(result)
-
-    def test_compute_predator_threat_uses_deterministic_smell_signal(self) -> None:
-        noise_profile = NoiseConfig(
-            name="olfactory_drop_test",
-            visual={"certainty_jitter": 0.0, "direction_jitter": 0.0, "dropout_prob": 0.0},
-            olfactory={"strength_jitter": 1.0, "direction_jitter": 1.0},
-            motor={"action_flip_prob": 0.0},
-            spawn={"uniform_mix": 0.0},
-            predator={"random_choice_prob": 0.0},
-        )
-        world = SpiderWorld(
-            seed=1,
-            lizard_move_interval=999999,
-            noise_profile=noise_profile,
-            operational_profile=self._profile_with_reward_updates(predator_threat_smell_threshold=0.0),
-        )
-        for episode_seed in (1, 7, 29, 101):
-            world.reset(seed=episode_seed)
-            world.state.x, world.state.y = 1, 1
-            world.lizard.x, world.lizard.y = 2, 1
-            world.state.recent_contact = 0.0
-            world.state.recent_pain = 0.0
-
-            result = compute_predator_threat(
-                world,
-                prev_predator_visible=False,
-                prev_predator_dist=10,
-            )
-
-            self.assertTrue(result, f"Threat detection changed under episode_seed={episode_seed}")
-
-    def test_apply_progress_and_event_rewards_food_approach(self) -> None:
-        """
-        Tests that moving the spider closer to a food target increases the `food_progress` reward and records distance changes.
-        
-        Sets up a world with a food item, moves the spider one step nearer, invokes apply_progress_and_event_rewards, and asserts that `info` contains a "distance_deltas" entry and that `reward_components["food_progress"]` is greater than 0.0.
-        """
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        world.state.x, world.state.y = 3, 3
-        world.food_positions = [(5, 3)]
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.hunger = 0.7
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        prev_food_dist = world.manhattan(world.spider_pos(), world.food_positions[0])
-        world.state.x = 4
-        context = self._tick_context(
-            world,
-            action_name="MOVE_RIGHT",
-            moved=True,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=prev_food_dist,
-            prev_shelter_dist=5,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        self.assertIn("distance_deltas", context.info)
-        self.assertGreater(context.reward_components["food_progress"], 0.0)
-
-    def test_apply_progress_food_gate_uses_operational_profile_threshold(self) -> None:
-        world = SpiderWorld(
-            seed=1,
-            lizard_move_interval=999999,
-            operational_profile=self._profile_with_reward_updates(food_progress_hunger_threshold=0.95),
-        )
-        world.reset(seed=1)
-        world.state.x, world.state.y = 3, 3
-        world.food_positions = [(5, 3)]
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.hunger = 0.9
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        prev_food_dist = world.manhattan(world.spider_pos(), world.food_positions[0])
-        world.state.x = 4
-        context = self._tick_context(
-            world,
-            action_name="MOVE_RIGHT",
-            moved=True,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=prev_food_dist,
-            prev_shelter_dist=5,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        self.assertEqual(context.reward_components["food_progress"], 0.0)
-
-    def test_apply_progress_and_event_rewards_shelter_entry_bonus(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        entrance_cells = list(world.shelter_entrance_cells)
-        if not entrance_cells:
-            self.skipTest("No entrance cells")
-        world.state.x, world.state.y = sorted(entrance_cells)[0]
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.shelter_entries = 0
-        terrain_now = world.terrain_at(world.spider_pos())
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now=terrain_now,
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=3,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        self.assertGreater(context.reward_components["shelter_entry"], 0.0)
-        self.assertEqual(world.state.shelter_entries, 1)
-
-    def test_apply_progress_and_event_rewards_day_exploration_reward(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        world.state.x, world.state.y = 3, 3
-        world.state.hunger = 0.5
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.tick = 0
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        context = self._tick_context(
-            world,
-            action_name="MOVE_RIGHT",
-            moved=True,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        self.assertGreaterEqual(context.reward_components["day_exploration"], 0.0)
-
-    def test_apply_progress_and_event_rewards_escape_bonus(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        deep_cells = list(world.shelter_deep_cells)
-        if not deep_cells:
-            self.skipTest("No deep shelter cells")
-        world.state.x, world.state.y = sorted(deep_cells)[0]
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.recent_contact = 0.0
-        terrain_now = world.terrain_at(world.spider_pos())
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now=terrain_now,
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=3,
-            prev_predator_visible=True,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        self.assertGreater(context.reward_components["predator_escape"], 0.0)
-        self.assertTrue(context.predator_escape)
-
-    def test_apply_progress_and_event_rewards_updates_predator_visible_now(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        world.state.x, world.state.y = 2, 2
-        world.lizard.x, world.lizard.y = 3, 2
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        prev_predator_dist = world.manhattan(prev_spider_pos, prev_lizard_pos)
-
-        visible_context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now=world.terrain_at(world.spider_pos()),
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=prev_predator_dist,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=visible_context)
-        self.assertTrue(visible_context.predator_visible_now)
-
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        far_lizard_pos = world.lizard_pos()
-        far_context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now=world.terrain_at(world.spider_pos()),
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=world.manhattan(prev_spider_pos, far_lizard_pos),
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=far_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=far_context)
-        self.assertFalse(far_context.predator_visible_now)
-
-    def test_shelter_progress_gate_uses_operational_profile_fatigue_threshold(self) -> None:
-        # High fatigue threshold in profile → shelter progress not awarded for moderate fatigue
-        world = SpiderWorld(
-            seed=1,
-            lizard_move_interval=999999,
-            operational_profile=self._profile_with_reward_updates(shelter_progress_fatigue_threshold=0.99),
-        )
-        world.reset(seed=1)
-        world.state.x, world.state.y = 3, 3
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.fatigue = 0.5
-        world.state.sleep_debt = 0.0
-
-        shelter_cells = list(world.shelter_deep_cells or world.shelter_cells)
-        if not shelter_cells:
-            self.skipTest("No shelter cells")
-        original_pos = world.spider_pos()
-        _, prev_shelter_dist = world.nearest(shelter_cells)
-        candidate_moves = {
-            "MOVE_LEFT": (-1, 0),
-            "MOVE_RIGHT": (1, 0),
-            "MOVE_UP": (0, -1),
-            "MOVE_DOWN": (0, 1),
+    def test_contains_all_five_dispositions(self) -> None:
+        expected = {
+            "defended", "weakened", "removed",
+            "outcome_signal", "under_investigation",
         }
-        chosen_action = None
-        new_shelter_dist = prev_shelter_dist
-        for action_name, (dx, dy) in candidate_moves.items():
-            new_x = original_pos[0] + dx
-            new_y = original_pos[1] + dy
-            if not (0 <= new_x < world.width and 0 <= new_y < world.height):
-                continue
-            world.state.x, world.state.y = new_x, new_y
-            _, candidate_shelter_dist = world.nearest(shelter_cells)
-            if candidate_shelter_dist < prev_shelter_dist:
-                chosen_action = action_name
-                new_shelter_dist = candidate_shelter_dist
-                break
-        if chosen_action is None:
-            self.fail("Expected at least one one-step move that reduces shelter distance.")
-        self.assertGreater(prev_shelter_dist, new_shelter_dist)
+        self.assertEqual(set(SHAPING_DISPOSITIONS), expected)
 
-        prev_lizard_pos = world.lizard_pos()
-        context = self._tick_context(
-            world,
-            action_name=chosen_action,
-            moved=True,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=prev_shelter_dist,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=original_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        self.assertEqual(context.reward_components["shelter_progress"], 0.0)
+    def test_all_dispositions_are_strings(self) -> None:
+        for d in SHAPING_DISPOSITIONS:
+            self.assertIsInstance(d, str)
 
-    def test_day_exploration_hunger_threshold_uses_operational_profile(self) -> None:
-        # Raise hunger threshold so that moderate hunger is treated as "calm"
-        world = SpiderWorld(
-            seed=1,
-            lizard_move_interval=999999,
-            operational_profile=self._profile_with_reward_updates(day_exploration_hunger_threshold=0.90),
-        )
-        world.reset(seed=1)
-        world.state.x, world.state.y = 3, 3
-        world.state.hunger = 0.6  # above default 0.35, below custom 0.90
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.tick = 0
+    def test_no_duplicates(self) -> None:
+        dlist = list(SHAPING_DISPOSITIONS)
+        self.assertEqual(len(dlist), len(set(dlist)))
 
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        context_hungry = self._tick_context(
-            world,
-            action_name="MOVE_RIGHT",
-            moved=True,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context_hungry)
-        # At hunger=0.6 with threshold=0.90, should get calm exploration (not hungry bonus)
-        default_world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        default_world.reset(seed=1)
-        default_world.state.x, default_world.state.y = 3, 3
-        default_world.state.hunger = 0.6
-        default_world.lizard.x, default_world.lizard.y = default_world.width - 1, default_world.height - 1
-        default_world.tick = 0
+    def test_disposition_evidence_criteria_covers_main_dispositions(self) -> None:
+        # "defended", "weakened", "removed" should all have evidence criteria
+        for d in ("defended", "weakened", "removed"):
+            self.assertIn(d, DISPOSITION_EVIDENCE_CRITERIA)
 
-        default_prev_spider_pos = default_world.spider_pos()
-        default_prev_lizard_pos = default_world.lizard_pos()
-        context_default = self._tick_context(
-            default_world,
-            action_name="MOVE_RIGHT",
-            moved=True,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=default_prev_spider_pos,
-            prev_lizard_pos=default_prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(default_world, tick_context=context_default)
-        # Custom world has raised threshold so gets calm bonus; default world gets hungry bonus
-        self.assertGreater(
-            context_default.reward_components["day_exploration"],
-            context_hungry.reward_components["day_exploration"],
-        )
-
-    def test_predator_threat_distance_threshold_uses_operational_profile(self) -> None:
-        # Raise distance threshold so threat is detected from further away
-        world = SpiderWorld(
-            seed=1,
-            lizard_move_interval=999999,
-            operational_profile=self._profile_with_reward_updates(predator_threat_distance_threshold=10.0),
-        )
-        world.reset(seed=1)
-        world.state.x, world.state.y = 1, 1
-        world.lizard.x, world.lizard.y = world.width - 2, world.height - 2
-        world.state.recent_contact = 0.0
-        world.state.recent_pain = 0.0
-
-        result = compute_predator_threat(
-            world,
-            prev_predator_visible=False,
-            prev_predator_dist=10,
-        )
-        self.assertTrue(result)
-
-    def test_world_stores_operational_profile(self) -> None:
-        profile = self._profile_with_reward_updates(predator_threat_smell_threshold=0.99)
-        world = SpiderWorld(seed=1, lizard_move_interval=999999, operational_profile=profile)
-        self.assertIs(world.operational_profile, profile)
-
-    def test_apply_progress_and_event_rewards_records_distance_deltas_event(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        world.state.x, world.state.y = 3, 3
-        world.food_positions = [(5, 3)]
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.hunger = 0.7
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        prev_food_dist = world.manhattan(world.spider_pos(), world.food_positions[0])
-        world.state.x = 4
-        context = self._tick_context(
-            world,
-            action_name="MOVE_RIGHT",
-            moved=True,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=prev_food_dist,
-            prev_shelter_dist=5,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        event_names = [e.name for e in context.event_log]
-        self.assertIn("distance_deltas", event_names)
-        event = next(e for e in context.event_log if e.name == "distance_deltas")
-        self.assertIn("food", event.payload)
-        self.assertIn("shelter", event.payload)
-        self.assertIn("predator", event.payload)
-        self.assertIsInstance(event.payload["food"], int)
-        self.assertIsInstance(event.payload["shelter"], int)
-        self.assertIsInstance(event.payload["predator"], int)
-
-    def test_apply_progress_and_event_rewards_records_distance_deltas_in_stage_reward(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        world.state.x, world.state.y = 3, 3
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        # distance_deltas is the primary event recorded by this function directly
-        event_stages = [e.stage for e in context.event_log]
-        self.assertTrue(all(s == "reward" for s in event_stages), "All events from apply_progress_and_event_rewards should be in 'reward' stage")
-        event_names = [e.name for e in context.event_log]
-        self.assertIn("distance_deltas", event_names)
-
-    def test_apply_progress_and_event_rewards_sets_predator_visible_now_in_context(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        world.state.x, world.state.y = 3, 3
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        self.assertFalse(context.predator_visible_now)
-        apply_progress_and_event_rewards(world, tick_context=context)
-        # predator_visible_now should be a bool
-        self.assertIsInstance(context.predator_visible_now, bool)
-
-    def test_apply_progress_and_event_rewards_shelter_entry_records_event(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        entrance_cells = list(world.shelter_entrance_cells)
-        if not entrance_cells:
-            self.skipTest("No entrance cells")
-        world.state.x, world.state.y = sorted(entrance_cells)[0]
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.shelter_entries = 0
-        terrain_now = world.terrain_at(world.spider_pos())
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now=terrain_now,
-            was_on_shelter=False,  # Coming from outside, entering shelter
-            prev_food_dist=5,
-            prev_shelter_dist=3,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        if context.reward_components["shelter_entry"] > 0.0:
-            event_names = [e.name for e in context.event_log]
-            self.assertIn("shelter_entry", event_names)
-            entry_event = next(e for e in context.event_log if e.name == "shelter_entry")
-            self.assertIn("shelter_role", entry_event.payload)
-
-    def test_apply_progress_and_event_rewards_predator_escape_sets_context_flag(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        deep_cells = list(world.shelter_deep_cells)
-        if not deep_cells:
-            self.skipTest("No deep shelter cells")
-        world.state.x, world.state.y = sorted(deep_cells)[0]
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.recent_contact = 0.0
-        terrain_now = world.terrain_at(world.spider_pos())
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now=terrain_now,
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=3,
-            prev_predator_visible=True,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        # context.predator_escape should be set by the function
-        self.assertIsInstance(context.predator_escape, bool)
-        if context.predator_escape:
-            event_names = [e.name for e in context.event_log]
-            self.assertIn("predator_escape", event_names)
-
-    def test_apply_progress_and_event_rewards_predator_escape_bonus_is_one_shot_per_threat_episode(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        deep_cells = list(world.shelter_deep_cells)
-        if not deep_cells:
-            self.skipTest("No deep shelter cells")
-        world.state.x, world.state.y = sorted(deep_cells)[0]
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-        world.state.recent_contact = 1.0
-        terrain_now = world.terrain_at(world.spider_pos())
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        first_context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now=terrain_now,
-            was_on_shelter=True,
-            prev_food_dist=5,
-            prev_shelter_dist=0,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=first_context)
-
-        second_context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now=terrain_now,
-            was_on_shelter=True,
-            prev_food_dist=5,
-            prev_shelter_dist=0,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=second_context)
-
-        self.assertTrue(first_context.predator_escape)
-        self.assertFalse(second_context.predator_escape)
-        self.assertEqual(world.state.predator_escapes, 1)
-        self.assertIn(
-            "predator_escape",
-            [event.name for event in first_context.event_log],
-        )
-        self.assertNotIn(
-            "predator_escape",
-            [event.name for event in second_context.event_log],
-        )
-
-    def test_apply_progress_and_event_rewards_info_distance_deltas_populated(self) -> None:
-        world = SpiderWorld(seed=1, lizard_move_interval=999999)
-        world.reset(seed=1)
-        world.state.x, world.state.y = 3, 3
-        world.lizard.x, world.lizard.y = world.width - 1, world.height - 1
-
-        prev_spider_pos = world.spider_pos()
-        prev_lizard_pos = world.lizard_pos()
-        context = self._tick_context(
-            world,
-            action_name="STAY",
-            moved=False,
-            night=False,
-            terrain_now="open",
-            was_on_shelter=False,
-            prev_food_dist=5,
-            prev_shelter_dist=5,
-            prev_predator_dist=10,
-            prev_predator_visible=False,
-            prev_spider_pos=prev_spider_pos,
-            prev_lizard_pos=prev_lizard_pos,
-        )
-        apply_progress_and_event_rewards(world, tick_context=context)
-        self.assertIn("distance_deltas", context.info)
-        deltas = context.info["distance_deltas"]
-        self.assertIn("food", deltas)
-        self.assertIn("shelter", deltas)
-        self.assertIn("predator", deltas)
-
-
-class AustreProfileStructureTest(unittest.TestCase):
-    """Regression tests for the austere reward profile added in this PR."""
-
-    def test_austere_profile_has_same_keys_as_classic(self) -> None:
-        self.assertEqual(
-            set(REWARD_PROFILES["austere"].keys()),
-            set(REWARD_PROFILES["classic"].keys()),
-        )
-
-    def test_austere_profile_has_same_keys_as_ecological(self) -> None:
-        self.assertEqual(
-            set(REWARD_PROFILES["austere"].keys()),
-            set(REWARD_PROFILES["ecological"].keys()),
-        )
-
-    def test_all_three_profiles_have_identical_key_sets(self) -> None:
-        classic_keys = set(REWARD_PROFILES["classic"].keys())
-        ecological_keys = set(REWARD_PROFILES["ecological"].keys())
-        austere_keys = set(REWARD_PROFILES["austere"].keys())
-        self.assertEqual(classic_keys, ecological_keys)
-        self.assertEqual(classic_keys, austere_keys)
-
-    def test_austere_predator_escape_stay_penalty_is_zero(self) -> None:
-        self.assertEqual(REWARD_PROFILES["austere"]["predator_escape_stay_penalty"], 0.0)
-
-    def test_austere_sleep_debt_terms_are_positive(self) -> None:
-        austere = REWARD_PROFILES["austere"]
-        self.assertGreater(austere["sleep_debt_night_awake"], 0.0)
-        self.assertGreater(austere["sleep_debt_resting_night"], 0.0)
-        self.assertGreater(austere["sleep_debt_deep_night"], 0.0)
-
-    def test_austere_pressure_terms_are_stronger_than_ecological(self) -> None:
-        # austere should have higher or equal homeostatic pressure vs. ecological
-        austere = REWARD_PROFILES["austere"]
-        ecological = REWARD_PROFILES["ecological"]
-        self.assertGreaterEqual(austere["hunger_pressure"], ecological["hunger_pressure"])
-        self.assertGreaterEqual(austere["fatigue_pressure"], ecological["fatigue_pressure"])
-        self.assertGreaterEqual(austere["sleep_debt_pressure"], ecological["sleep_debt_pressure"])
-
-    def test_all_reward_profile_names_are_registered(self) -> None:
-        expected = {"classic", "ecological", "austere"}
-        self.assertEqual(set(REWARD_PROFILES.keys()), expected)
-
-    def test_austere_profile_all_values_are_finite(self) -> None:
-        import math
-        for key, value in REWARD_PROFILES["austere"].items():
-            self.assertTrue(
-                math.isfinite(value),
-                f"austere[{key!r}] = {value!r} is not finite",
-            )
-
-
-class RewardProfileFatigueCostValuesTest(unittest.TestCase):
-    """Regression tests for the current fatigue cost values across all profiles."""
-
-    def _check_profile_fatigue_costs(self, profile_name: str) -> None:
-        profile = REWARD_PROFILES[profile_name]
-        self.assertAlmostEqual(profile["base_fatigue_cost"], 0.0035, places=6)
-        self.assertAlmostEqual(profile["move_fatigue_cost"], 0.003, places=6)
-        self.assertAlmostEqual(profile["idle_fatigue_cost"], 0.001, places=6)
-
-    def test_classic_fatigue_costs(self) -> None:
-        self._check_profile_fatigue_costs("classic")
-
-    def test_ecological_fatigue_costs(self) -> None:
-        self._check_profile_fatigue_costs("ecological")
-
-    def test_austere_fatigue_costs(self) -> None:
-        self._check_profile_fatigue_costs("austere")
-
-    def test_move_fatigue_cost_exceeds_idle_fatigue_cost_in_all_profiles(self) -> None:
-        for name in REWARD_PROFILES:
-            with self.subTest(profile=name):
-                profile = REWARD_PROFILES[name]
-                self.assertGreater(
-                    profile["move_fatigue_cost"],
-                    profile["idle_fatigue_cost"],
-                    f"{name}: move_fatigue_cost should exceed idle_fatigue_cost",
+    def test_each_evidence_entry_has_required_fields(self) -> None:
+        required = {"definition", "required_evidence", "example_components", "transition_conditions"}
+        for disposition, entry in DISPOSITION_EVIDENCE_CRITERIA.items():
+            for field in required:
+                self.assertIn(
+                    field, entry,
+                    f"Disposition {disposition!r} evidence criteria missing field {field!r}",
                 )
 
 
-class RewardProfileNightExposureValuesTest(unittest.TestCase):
-    """Regression tests for the current night-exposure values across all profiles."""
+# ---------------------------------------------------------------------------
+# SHAPING_GAP_POLICY structure
+# ---------------------------------------------------------------------------
 
-    def test_classic_night_exposure_fatigue(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["classic"]["night_exposure_fatigue"], 0.006, places=6)
+class ShapingGapPolicyStructureTest(unittest.TestCase):
+    """Tests for SHAPING_GAP_POLICY structure."""
 
-    def test_classic_night_exposure_debt(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["classic"]["night_exposure_debt"], 0.009, places=6)
+    def test_has_required_keys(self) -> None:
+        required_keys = {
+            "minimal_profile",
+            "max_scenario_success_rate_delta",
+            "max_mean_reward_delta",
+            "min_austere_survival_rate",
+            "warning_threshold_multiplier",
+            "notes",
+        }
+        self.assertEqual(set(SHAPING_GAP_POLICY.keys()), required_keys)
 
-    def test_ecological_night_exposure_fatigue(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["night_exposure_fatigue"], 0.009, places=6)
+    def test_minimal_profile_is_austere(self) -> None:
+        self.assertEqual(SHAPING_GAP_POLICY["minimal_profile"], "austere")
 
-    def test_ecological_night_exposure_debt(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["night_exposure_debt"], 0.014, places=6)
+    def test_warning_threshold_multiplier_is_between_zero_and_one(self) -> None:
+        mult = SHAPING_GAP_POLICY["warning_threshold_multiplier"]
+        self.assertGreater(float(mult), 0.0)
+        self.assertLess(float(mult), 1.0)
 
-    def test_austere_night_exposure_fatigue(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["austere"]["night_exposure_fatigue"], 0.010, places=6)
+    def test_success_rate_delta_limits_are_positive(self) -> None:
+        limits = SHAPING_GAP_POLICY["max_scenario_success_rate_delta"]
+        for profile_key, limit in limits.items():
+            self.assertGreater(float(limit), 0.0, f"Limit for {profile_key!r} must be positive")
 
-    def test_austere_night_exposure_debt(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["austere"]["night_exposure_debt"], 0.015, places=6)
+    def test_mean_reward_delta_limits_are_positive(self) -> None:
+        limits = SHAPING_GAP_POLICY["max_mean_reward_delta"]
+        for profile_key, limit in limits.items():
+            self.assertGreater(float(limit), 0.0, f"Limit for {profile_key!r} must be positive")
 
-    def test_austere_exposure_fatigue_exceeds_classic(self) -> None:
-        self.assertGreater(
-            REWARD_PROFILES["austere"]["night_exposure_fatigue"],
-            REWARD_PROFILES["classic"]["night_exposure_fatigue"],
-        )
+    def test_notes_is_non_empty_list(self) -> None:
+        notes = SHAPING_GAP_POLICY["notes"]
+        self.assertIsInstance(notes, list)
+        self.assertGreater(len(notes), 0)
 
-    def test_austere_exposure_debt_exceeds_classic(self) -> None:
-        self.assertGreater(
-            REWARD_PROFILES["austere"]["night_exposure_debt"],
-            REWARD_PROFILES["classic"]["night_exposure_debt"],
-        )
+    def test_classic_limit_in_success_rate_deltas(self) -> None:
+        limits = SHAPING_GAP_POLICY["max_scenario_success_rate_delta"]
+        self.assertIn("classic_minus_austere", limits)
 
+    def test_ecological_limit_in_success_rate_deltas(self) -> None:
+        limits = SHAPING_GAP_POLICY["max_scenario_success_rate_delta"]
+        self.assertIn("ecological_minus_austere", limits)
 
-class RewardProfileSleepDebtPenaltyValuesTest(unittest.TestCase):
-    """Regression tests for the current sleep-debt penalty values across all profiles."""
+    def test_classical_limit_stricter_than_ecological_is_not_required(self) -> None:
+        # This is a policy-level check: classic can have a looser or tighter limit
+        # than ecological – just verify both exist and are numeric
+        limits = SHAPING_GAP_POLICY["max_scenario_success_rate_delta"]
+        self.assertIsInstance(float(limits["classic_minus_austere"]), float)
+        self.assertIsInstance(float(limits["ecological_minus_austere"]), float)
 
-    def test_classic_sleep_debt_interrupt(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["classic"]["sleep_debt_interrupt"], 0.035, places=6)
-
-    def test_ecological_sleep_debt_interrupt(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["sleep_debt_interrupt"], 0.050, places=6)
-
-    def test_austere_sleep_debt_interrupt(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["austere"]["sleep_debt_interrupt"], 0.060, places=6)
-
-    def test_classic_sleep_debt_night_awake(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["classic"]["sleep_debt_night_awake"], 0.007, places=6)
-
-    def test_ecological_sleep_debt_night_awake(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["sleep_debt_night_awake"], 0.011, places=6)
-
-    def test_austere_sleep_debt_night_awake(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["austere"]["sleep_debt_night_awake"], 0.012, places=6)
-
-    def test_classic_sleep_debt_day_awake(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["classic"]["sleep_debt_day_awake"], 0.0015, places=6)
-
-    def test_ecological_sleep_debt_day_awake(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["sleep_debt_day_awake"], 0.002, places=6)
-
-    def test_austere_sleep_debt_day_awake(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["austere"]["sleep_debt_day_awake"], 0.0025, places=6)
-
-    def test_sleep_debt_interrupt_is_greater_than_night_awake_in_all_profiles(self) -> None:
-        for name in REWARD_PROFILES:
-            with self.subTest(profile=name):
-                profile = REWARD_PROFILES[name]
-                self.assertGreater(
-                    profile["sleep_debt_interrupt"],
-                    profile["sleep_debt_night_awake"],
-                    f"{name}: sleep_debt_interrupt should be greater than sleep_debt_night_awake",
-                )
-
-    def test_sleep_debt_night_awake_exceeds_day_awake_in_all_profiles(self) -> None:
-        for name in REWARD_PROFILES:
-            with self.subTest(profile=name):
-                profile = REWARD_PROFILES[name]
-                self.assertGreater(
-                    profile["sleep_debt_night_awake"],
-                    profile["sleep_debt_day_awake"],
-                    f"{name}: sleep_debt_night_awake should exceed sleep_debt_day_awake",
-                )
-
-
-class RewardProfileClutterNarrowFatigueValuesTest(unittest.TestCase):
-    """Regression tests for the current clutter/narrow fatigue values."""
-
-    def test_classic_clutter_fatigue(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["classic"]["clutter_fatigue"], 0.002, places=6)
-
-    def test_ecological_clutter_fatigue(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["clutter_fatigue"], 0.003, places=6)
-
-    def test_austere_clutter_fatigue(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["austere"]["clutter_fatigue"], 0.003, places=6)
-
-    def test_classic_narrow_fatigue(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["classic"]["narrow_fatigue"], 0.0015, places=6)
-
-    def test_ecological_narrow_fatigue(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["ecological"]["narrow_fatigue"], 0.0025, places=6)
-
-    def test_austere_narrow_fatigue(self) -> None:
-        self.assertAlmostEqual(REWARD_PROFILES["austere"]["narrow_fatigue"], 0.0025, places=6)
-
-    def test_clutter_fatigue_exceeds_narrow_fatigue_in_all_profiles(self) -> None:
-        for name in REWARD_PROFILES:
-            with self.subTest(profile=name):
-                profile = REWARD_PROFILES[name]
-                self.assertGreaterEqual(
-                    profile["clutter_fatigue"],
-                    profile["narrow_fatigue"],
-                    f"{name}: clutter_fatigue should be >= narrow_fatigue",
-                )
-
-
-class ShapingDispositionSummaryAdditionalTest(unittest.TestCase):
-    """Additional tests for shaping_disposition_summary and reward_profile_audit disposition_summary."""
-
-    def test_shaping_disposition_summary_components_are_sorted_alphabetically(self) -> None:
-        summary = shaping_disposition_summary()
-        for disposition in SHAPING_DISPOSITIONS:
-            components = summary[disposition]
-            self.assertEqual(
-                components,
-                sorted(components),
-                f"Components for disposition {disposition!r} are not sorted",
-            )
-
-    def test_shaping_disposition_summary_total_count_equals_all_components(self) -> None:
-        summary = shaping_disposition_summary()
-        total_from_counts = sum(summary["counts"][d] for d in SHAPING_DISPOSITIONS)
-        total_components = len(REWARD_COMPONENT_NAMES)
-        self.assertEqual(total_from_counts, total_components)
-
-    def test_shaping_disposition_summary_no_duplicate_components_across_dispositions(self) -> None:
-        summary = shaping_disposition_summary()
-        seen = []
-        for disposition in SHAPING_DISPOSITIONS:
-            seen.extend(summary[disposition])
-        self.assertEqual(len(seen), len(set(seen)), "Some components appear in multiple dispositions")
-
-    def test_shaping_disposition_summary_every_component_name_appears_exactly_once(self) -> None:
-        summary = shaping_disposition_summary()
-        all_components = []
-        for disposition in SHAPING_DISPOSITIONS:
-            all_components.extend(summary[disposition])
-        self.assertEqual(sorted(all_components), sorted(REWARD_COMPONENT_NAMES))
-
-    def test_shaping_disposition_summary_defended_components_are_non_empty(self) -> None:
-        summary = shaping_disposition_summary()
-        self.assertGreater(len(summary["defended"]), 0)
-
-    def test_shaping_disposition_summary_removed_components_include_progress_terms(self) -> None:
-        summary = shaping_disposition_summary()
-        for component in ("food_progress", "shelter_progress", "predator_escape",
-                          "day_exploration", "shelter_entry", "night_shelter_bonus"):
-            self.assertIn(component, summary["removed"])
-
-    def test_shaping_disposition_summary_outcome_signal_components_include_feeding_and_death(self) -> None:
-        summary = shaping_disposition_summary()
-        self.assertIn("feeding", summary["outcome_signal"])
-        self.assertIn("predator_contact", summary["outcome_signal"])
-        self.assertIn("death_penalty", summary["outcome_signal"])
-
-    def test_shaping_disposition_summary_weakened_contains_resting(self) -> None:
-        summary = shaping_disposition_summary()
-        self.assertIn("resting", summary["weakened"])
-
-    def test_reward_profile_audit_disposition_components_are_sorted(self) -> None:
-        for profile_name in REWARD_PROFILES:
-            audit = reward_profile_audit(profile_name)
-            for disposition, data in audit["disposition_summary"].items():
-                components = data["components"]
-                self.assertEqual(
-                    components,
-                    sorted(components),
-                    f"Profile {profile_name!r} disposition {disposition!r} components not sorted",
-                )
-
-    def test_reward_profile_audit_disposition_weight_proxies_are_non_negative(self) -> None:
-        for profile_name in REWARD_PROFILES:
-            audit = reward_profile_audit(profile_name)
-            for disposition, data in audit["disposition_summary"].items():
-                self.assertGreaterEqual(
-                    data["total_weight_proxy"],
-                    0.0,
-                    f"Profile {profile_name!r} disposition {disposition!r} has negative weight proxy",
-                )
-
-    def test_reward_profile_audit_disposition_component_counts_sum_to_total(self) -> None:
-        audit = reward_profile_audit("classic")
-        total_from_disposition = sum(
-            data["component_count"]
-            for data in audit["disposition_summary"].values()
-        )
-        self.assertEqual(total_from_disposition, len(REWARD_COMPONENT_NAMES))
-
-    def test_reward_profile_audit_disposition_components_union_equals_all_components(self) -> None:
-        for profile_name in REWARD_PROFILES:
-            audit = reward_profile_audit(profile_name)
-            all_in_disposition = []
-            for data in audit["disposition_summary"].values():
-                all_in_disposition.extend(data["components"])
-            self.assertEqual(
-                sorted(all_in_disposition),
-                sorted(REWARD_COMPONENT_NAMES),
-                f"Profile {profile_name!r} disposition components do not cover all reward components",
-            )
-
-    def test_reward_profile_audit_austere_removed_weight_is_zero(self) -> None:
-        audit = reward_profile_audit("austere")
-        self.assertEqual(audit["disposition_summary"]["removed"]["total_weight_proxy"], 0.0)
-
-    def test_reward_profile_audit_classic_removed_weight_exceeds_austere(self) -> None:
-        classic = reward_profile_audit("classic")
-        austere = reward_profile_audit("austere")
-        self.assertGreater(
-            classic["disposition_summary"]["removed"]["total_weight_proxy"],
-            austere["disposition_summary"]["removed"]["total_weight_proxy"],
-        )
-
-    def test_reward_profile_audit_defended_weight_positive_in_all_profiles(self) -> None:
-        for profile_name in REWARD_PROFILES:
-            audit = reward_profile_audit(profile_name)
-            self.assertGreater(
-                audit["disposition_summary"]["defended"]["total_weight_proxy"],
-                0.0,
-                f"Profile {profile_name!r} has no defended weight",
-            )
-
-    def test_reward_profile_audit_outcome_signal_summary_is_well_formed(self) -> None:
-        expected_components = {"predator_contact", "feeding", "death_penalty"}
-        for profile_name in REWARD_PROFILES:
-            audit = reward_profile_audit(profile_name)
-            outcome_signal = audit["disposition_summary"]["outcome_signal"]
-            self.assertIsInstance(outcome_signal, dict)
-            self.assertIn("components", outcome_signal)
-            self.assertIn("component_count", outcome_signal)
-            self.assertIn("total_weight_proxy", outcome_signal)
-            self.assertTrue(
-                expected_components.issubset(set(outcome_signal["components"])),
-                f"Profile {profile_name!r} missing expected outcome-signal components",
-            )
-            self.assertEqual(
-                outcome_signal["component_count"],
-                len(outcome_signal["components"]),
-            )
-            self.assertIsInstance(outcome_signal["total_weight_proxy"], float)
-
-    def test_reward_profile_audit_disposition_all_dispositions_present_in_ecological(self) -> None:
-        audit = reward_profile_audit("ecological")
-        self.assertEqual(set(audit["disposition_summary"].keys()), set(SHAPING_DISPOSITIONS))
-
-    def test_shaping_dispositions_sequence_has_five_values(self) -> None:
-        self.assertEqual(len(SHAPING_DISPOSITIONS), 5)
-        self.assertIn("defended", SHAPING_DISPOSITIONS)
-        self.assertIn("weakened", SHAPING_DISPOSITIONS)
-        self.assertIn("removed", SHAPING_DISPOSITIONS)
-        self.assertIn("outcome_signal", SHAPING_DISPOSITIONS)
-        self.assertIn("under_investigation", SHAPING_DISPOSITIONS)
 
 if __name__ == "__main__":
     unittest.main()

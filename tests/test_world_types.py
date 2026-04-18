@@ -51,25 +51,33 @@ class MemorySlotTest(unittest.TestCase):
 
 class PerceptTraceTest(unittest.TestCase):
     def test_percept_trace_stores_fields(self) -> None:
-        trace = PerceptTrace(target=(2, 5), age=3, certainty=0.75)
+        trace = PerceptTrace(target=(2, 5), age=3, certainty=0.75, heading_dx=1, heading_dy=0)
         self.assertEqual(trace.target, (2, 5))
         self.assertEqual(trace.age, 3)
         self.assertAlmostEqual(trace.certainty, 0.75)
+        self.assertEqual(trace.heading_dx, 1)
+        self.assertEqual(trace.heading_dy, 0)
 
     def test_percept_trace_none_target(self) -> None:
         trace = PerceptTrace(target=None, age=0, certainty=0.0)
         self.assertIsNone(trace.target)
         self.assertEqual(trace.age, 0)
         self.assertAlmostEqual(trace.certainty, 0.0)
+        self.assertEqual(trace.heading_dx, 0)
+        self.assertEqual(trace.heading_dy, 0)
 
     def test_percept_trace_is_mutable(self) -> None:
         trace = PerceptTrace(target=None, age=0, certainty=0.0)
         trace.target = (4, 7)
         trace.age = 2
         trace.certainty = 0.9
+        trace.heading_dx = -1
+        trace.heading_dy = 0
         self.assertEqual(trace.target, (4, 7))
         self.assertEqual(trace.age, 2)
         self.assertAlmostEqual(trace.certainty, 0.9)
+        self.assertEqual(trace.heading_dx, -1)
+        self.assertEqual(trace.heading_dy, 0)
 
     def test_percept_trace_equality(self) -> None:
         a = PerceptTrace(target=(1, 2), age=1, certainty=0.5)
@@ -89,6 +97,11 @@ class PerceptTraceTest(unittest.TestCase):
     def test_percept_trace_inequality_by_certainty(self) -> None:
         a = PerceptTrace(target=(1, 2), age=0, certainty=0.5)
         b = PerceptTrace(target=(1, 2), age=0, certainty=0.8)
+        self.assertNotEqual(a, b)
+
+    def test_percept_trace_inequality_by_heading(self) -> None:
+        a = PerceptTrace(target=(1, 2), age=0, certainty=0.5, heading_dx=1, heading_dy=0)
+        b = PerceptTrace(target=(1, 2), age=0, certainty=0.5, heading_dx=0, heading_dy=1)
         self.assertNotEqual(a, b)
 
     def test_percept_trace_inequality_none_vs_coordinate(self) -> None:
@@ -226,6 +239,15 @@ class SpiderStateTest(unittest.TestCase):
         self.assertEqual(state.heading_dx, 1)
         self.assertEqual(state.heading_dy, 0)
 
+    def test_momentum_defaults_to_zero(self) -> None:
+        state = self._make_state()
+        self.assertAlmostEqual(state.momentum, 0.0)
+
+    def test_momentum_field_is_mutable(self) -> None:
+        state = self._make_state()
+        state.momentum = 0.75
+        self.assertAlmostEqual(state.momentum, 0.75)
+
     def test_heading_fields_are_mutable(self) -> None:
         state = self._make_state()
         state.heading_dx = -1
@@ -265,6 +287,7 @@ class TickSnapshotTest(unittest.TestCase):
             "prev_predator_visible": False,
             "night": False,
             "rest_streak": 0,
+            "momentum": 0.25,
         }
         defaults.update(overrides)
         return TickSnapshot(**defaults)
@@ -282,6 +305,7 @@ class TickSnapshotTest(unittest.TestCase):
         self.assertFalse(snap.prev_predator_visible)
         self.assertFalse(snap.night)
         self.assertEqual(snap.rest_streak, 0)
+        self.assertAlmostEqual(snap.momentum, 0.25)
 
     def test_tick_snapshot_is_frozen(self) -> None:
         snap = self._make_snapshot()
@@ -295,6 +319,7 @@ class TickSnapshotTest(unittest.TestCase):
             "tick", "spider_pos", "lizard_pos", "was_on_shelter",
             "prev_shelter_role", "prev_food_dist", "prev_shelter_dist",
             "prev_predator_dist", "prev_predator_visible", "night", "rest_streak",
+            "momentum",
         }
         self.assertEqual(set(payload.keys()), expected_keys)
 
@@ -346,6 +371,19 @@ class TickSnapshotTest(unittest.TestCase):
         payload = snap.to_payload()
         self.assertIsInstance(payload["rest_streak"], int)
         self.assertEqual(payload["rest_streak"], 3)
+
+    def test_to_payload_momentum_is_float(self) -> None:
+        snap = self._make_snapshot(momentum=0.625)
+        payload = snap.to_payload()
+        self.assertIsInstance(payload["momentum"], float)
+        self.assertAlmostEqual(payload["momentum"], 0.625)
+
+    def test_to_payload_momentum_is_clamped(self) -> None:
+        high = self._make_snapshot(momentum=1.5).to_payload()
+        low = self._make_snapshot(momentum=-0.5).to_payload()
+
+        self.assertAlmostEqual(high["momentum"], 1.0)
+        self.assertAlmostEqual(low["momentum"], 0.0)
 
 
 class TickEventTest(unittest.TestCase):

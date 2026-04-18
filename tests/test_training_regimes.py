@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from spider_cortex_sim.cli import build_parser
+from spider_cortex_sim.comparison import compare_training_regimes
 from spider_cortex_sim.simulation import (
     EXPERIMENT_OF_RECORD_REGIME,
     SpiderSimulation,
@@ -344,7 +345,7 @@ class TrainingRegimeSimulationTest(unittest.TestCase):
             )
 
     def test_named_regime_comparison_reports_competence_gaps(self) -> None:
-        payload, rows = SpiderSimulation.compare_training_regimes(
+        payload, rows = compare_training_regimes(
             regime_names=["reflex_annealed", EXPERIMENT_OF_RECORD_REGIME],
             budget_profile="smoke",
             episodes=1,
@@ -380,7 +381,12 @@ class TrainingRegimeSimulationTest(unittest.TestCase):
         self.assertTrue(any(row["competence_type"] == "scaffolded" for row in rows))
 
     def test_regime_comparison_scaffolded_scale_uses_trained_runtime_scale(self) -> None:
-        payload, rows = SpiderSimulation.compare_training_regimes(
+        """
+        Verify that scaffolded evaluations record the trained runtime reflex scale for the "reflex_annealed" regime.
+        
+        Asserts that the regime payload's scaffolded summary `eval_reflex_scale` is 0.0 and that every scaffolded row for `reflex_annealed` has an `eval_reflex_scale` value equal to 0.0 when converted to float.
+        """
+        payload, rows = compare_training_regimes(
             regime_names=["reflex_annealed"],
             episodes=2,
             evaluation_episodes=0,

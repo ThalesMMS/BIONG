@@ -14,27 +14,64 @@ from spider_cortex_sim.interfaces import (
     MOTOR_CONTEXT_INTERFACE,
     ActionContextObservation,
     MotorContextObservation,
+    interface_registry,
 )
 from spider_cortex_sim.modules import ModuleResult
 from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
+from spider_cortex_sim.reflexes import (
+    _alert_reflex_decision,
+    _apply_reflex_path,
+    _hunger_reflex_decision,
+    _module_reflex_decision,
+    _sensory_reflex_decision,
+    _sleep_reflex_decision,
+    _visual_reflex_decision,
+)
 
 
 class SpiderReflexDecisionTest(unittest.TestCase):
     def setUp(self) -> None:
+        """
+        Prepare the test fixture by creating a deterministic SpiderBrain instance and storing it on self.brain.
+        
+        Initializes a SpiderBrain with seed=3 and module_dropout=0.0 so tests run with a reproducible brain configuration.
+        """
         self.brain = SpiderBrain(seed=3, module_dropout=0.0)
+
+    def _reflex_decision(
+        self,
+        result: ModuleResult,
+        *,
+        brain: SpiderBrain | None = None,
+    ):
+        """
+        Selects a SpiderBrain (defaults to the test instance's brain) and obtains the reflex decision for the given module result.
+        
+        Parameters:
+            result (ModuleResult): The module result whose named observation will be evaluated for reflexes.
+            brain (SpiderBrain | None): Optional brain to use for operational profile and interface registry; if None, uses self.brain.
+        
+        Returns:
+            ModuleReflex | None: The reflex decision for the module, or `None` if no reflex applies.
+        """
+        brain = self.brain if brain is None else brain
+        return _module_reflex_decision(
+            result.name,
+            result.named_observation(),
+            operational_profile=brain.operational_profile,
+            interface_registry=brain._interface_registry(),
+        )
 
     def _module_result(self, module_name: str, **signals: float) -> ModuleResult:
         """
-        Constructs a ModuleResult for the named module with a default observation and a uniform locomotion action distribution.
-        
-        The observation is built from the module's interface by setting inputs whose names end with "_age" to 1.0 and all other inputs to 0.0, then applying any provided `signals` overrides. The returned ModuleResult has zero logits, equal probabilities across locomotion actions, and is marked active.
+        Builds a ModuleResult for the given module using a default observation with optional signal overrides.
         
         Parameters:
-            module_name (str): Name of the module whose interface is used to build the observation.
-            **signals (float): Input name → value overrides applied on top of the default signal mapping.
+            module_name (str): Name of the module whose interface provides input names and observation key.
+            **signals (float): Mapping of input names to values that override the default signals. By default inputs whose names end with "_age" are set to 1.0 and all other inputs are set to 0.0 before applying overrides.
         
         Returns:
-            ModuleResult: Populated result containing `interface`, `name`, `observation_key`, `observation` (interface vector), zero `logits`, uniform `probs` over locomotion actions, and `active=True`.
+            ModuleResult: A result populated with the module's interface, name, observation_key, the constructed observation vector, zeroed `logits`, a uniform `probs` distribution over locomotion actions, and `active=True`.
         """
         interface = MODULE_INTERFACE_BY_NAME[module_name]
         signal_mapping = {
@@ -57,12 +94,12 @@ class SpiderReflexDecisionTest(unittest.TestCase):
     def _build_observation(self, **overrides: dict[str, float]) -> dict[str, np.ndarray]:
         """
         Builds a complete observation dictionary for all module, action-context, and motor-context interfaces.
-        
+
         Constructs default input vectors for each interface where inputs ending in "_age" are set to 1.0 and all other inputs to 0.0, then applies any numeric overrides supplied for an interface's observation key. The resulting vectors are produced via each interface's `vector_from_mapping` and stored under that interface's observation key.
-        
+
         Parameters:
             overrides (dict[str, dict[str, float]]): Optional per-interface override mappings keyed by interface observation key; each mapping provides input-name -> numeric value to override the defaults.
-        
+
         Returns:
             dict[str, np.ndarray]: A mapping from each interface's observation key to its validated observation vector.
         """
@@ -107,6 +144,16 @@ class SpiderReflexDecisionTest(unittest.TestCase):
         alert_aux_weight: float | None = None,
         visual_predator_certainty: float | None = None,
     ) -> OperationalProfile:
+        """
+        Create an OperationalProfile derived from DEFAULT_OPERATIONAL_PROFILE with optional reflex-specific overrides for testing.
+        
+        Parameters:
+            alert_aux_weight (float | None): If provided, sets the `brain.aux_weights.alert_center` value in the profile.
+            visual_predator_certainty (float | None): If provided, sets the `brain.reflex_thresholds.visual_cortex.predator_certainty` value in the profile.
+        
+        Returns:
+            OperationalProfile: An OperationalProfile constructed from the modified profile summary.
+        """
         summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
         summary["name"] = "test_profile"
         summary["version"] = 99
@@ -115,6 +162,218 @@ class SpiderReflexDecisionTest(unittest.TestCase):
         if visual_predator_certainty is not None:
             summary["brain"]["reflex_thresholds"]["visual_cortex"]["predator_certainty"] = visual_predator_certainty
         return OperationalProfile.from_summary(summary)
+
+    def _reordered_action_registry(self) -> dict[str, object]:
+        registry = interface_registry()
+        actions = list(registry["actions"])
+        registry["actions"] = actions[1:] + actions[:1]
+        return registry
+
+    def _assert_registry_local_target(self, reflex, registry: dict[str, object]) -> None:
+        self.assertIsNotNone(reflex)
+        actions = list(registry["actions"])
+        action_index = actions.index(reflex.action)
+        self.assertEqual(reflex.target_probs.shape, (len(actions),))
+        self.assertEqual(int(np.argmax(reflex.target_probs)), action_index)
+        self.assertAlmostEqual(float(reflex.target_probs[action_index]), 1.0)
+
+    def _assert_reordered_reflex_decision(
+        self,
+        decision_fn,
+        observations: dict[str, float],
+        *,
+        expected_action: str,
+        expected_reason: str,
+    ) -> None:
+        registry = self._reordered_action_registry()
+        reflex = decision_fn(
+            observations,
+            operational_profile=DEFAULT_OPERATIONAL_PROFILE,
+            interface_registry=registry,
+        )
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.action, expected_action)
+        self.assertEqual(reflex.reason, expected_reason)
+        self._assert_registry_local_target(reflex, registry)
+
+    def test_visual_reflex_function_accepts_explicit_context(self) -> None:
+        observations = self._module_result(
+            "visual_cortex",
+            predator_visible=1.0,
+            predator_certainty=0.9,
+            predator_dx=1.0,
+            predator_dy=0.0,
+        ).named_observation()
+
+        reflex = _visual_reflex_decision(
+            observations,
+            operational_profile=DEFAULT_OPERATIONAL_PROFILE,
+            interface_registry=interface_registry(),
+        )
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.action, "MOVE_LEFT")
+        self.assertEqual(reflex.reason, "retreat_from_visible_predator")
+
+        self._assert_reordered_reflex_decision(
+            _visual_reflex_decision,
+            observations,
+            expected_action="MOVE_LEFT",
+            expected_reason="retreat_from_visible_predator",
+        )
+
+    def test_sensory_reflex_function_accepts_explicit_context(self) -> None:
+        observations = self._module_result(
+            "sensory_cortex",
+            recent_contact=1.0,
+            predator_smell_dx=0.0,
+            predator_smell_dy=1.0,
+        ).named_observation()
+
+        reflex = _sensory_reflex_decision(
+            observations,
+            operational_profile=DEFAULT_OPERATIONAL_PROFILE,
+            interface_registry=interface_registry(),
+        )
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.action, "MOVE_UP")
+        self.assertEqual(reflex.reason, "retreat_from_immediate_threat")
+
+        self._assert_reordered_reflex_decision(
+            _sensory_reflex_decision,
+            observations,
+            expected_action="MOVE_UP",
+            expected_reason="retreat_from_immediate_threat",
+        )
+
+    def test_hunger_reflex_function_accepts_explicit_context(self) -> None:
+        observations = self._module_result(
+            "hunger_center",
+            hunger=0.8,
+            on_food=1.0,
+        ).named_observation()
+
+        reflex = _hunger_reflex_decision(
+            observations,
+            operational_profile=DEFAULT_OPERATIONAL_PROFILE,
+            interface_registry=interface_registry(),
+        )
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.action, "STAY")
+        self.assertEqual(reflex.reason, "stay_on_food")
+
+        self._assert_reordered_reflex_decision(
+            _hunger_reflex_decision,
+            observations,
+            expected_action="STAY",
+            expected_reason="stay_on_food",
+        )
+
+    def test_sleep_reflex_function_accepts_explicit_context(self) -> None:
+        observations = self._module_result(
+            "sleep_center",
+            on_shelter=1.0,
+            sleep_phase_level=0.8,
+            hunger=0.1,
+        ).named_observation()
+
+        reflex = _sleep_reflex_decision(
+            observations,
+            operational_profile=DEFAULT_OPERATIONAL_PROFILE,
+            interface_registry=interface_registry(),
+        )
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.action, "STAY")
+        self.assertEqual(reflex.reason, "stay_while_sleeping")
+
+        self._assert_reordered_reflex_decision(
+            _sleep_reflex_decision,
+            observations,
+            expected_action="STAY",
+            expected_reason="stay_while_sleeping",
+        )
+
+    def test_alert_reflex_function_accepts_explicit_context(self) -> None:
+        observations = self._module_result(
+            "alert_center",
+            predator_visible=1.0,
+            predator_certainty=0.9,
+            predator_dx=1.0,
+            predator_dy=0.0,
+        ).named_observation()
+
+        reflex = _alert_reflex_decision(
+            observations,
+            operational_profile=DEFAULT_OPERATIONAL_PROFILE,
+            interface_registry=interface_registry(),
+        )
+
+        self.assertIsNotNone(reflex)
+        self.assertEqual(reflex.action, "MOVE_LEFT")
+        self.assertEqual(reflex.reason, "retreat_from_visible_predator")
+
+        self._assert_reordered_reflex_decision(
+            _alert_reflex_decision,
+            observations,
+            expected_action="MOVE_LEFT",
+            expected_reason="retreat_from_visible_predator",
+        )
+
+    def test_apply_reflex_path_accepts_explicit_context(self) -> None:
+        """
+        Verify that _apply_reflex_path applies a hunger reflex to a ModuleResult when provided explicit context.
+        
+        Creates a hunger-center ModuleResult with hunger and on_food signals, calls _apply_reflex_path with explicit
+        ablation_config, operational_profile, interface_registry, current_reflex_scale, and module_valence_roles,
+        and asserts that a reflex was produced with action "STAY", that the reflex was applied, and that the module's
+        valence_role is set to "hunger".
+        """
+        result = self._module_result(
+            "hunger_center",
+            hunger=0.8,
+            on_food=1.0,
+        )
+
+        _apply_reflex_path(
+            [result],
+            ablation_config=self.brain.config,
+            operational_profile=self.brain.operational_profile,
+            interface_registry=self.brain._interface_registry(),
+            current_reflex_scale=self.brain.current_reflex_scale,
+            module_valence_roles=self.brain.MODULE_VALENCE_ROLES,
+        )
+
+        self.assertIsNotNone(result.reflex)
+        self.assertEqual(result.reflex.action, "STAY")
+        self.assertTrue(result.reflex_applied)
+        self.assertEqual(result.valence_role, "hunger")
+
+        reordered_result = self._module_result(
+            "hunger_center",
+            hunger=0.8,
+            on_food=1.0,
+        )
+        registry = self._reordered_action_registry()
+
+        _apply_reflex_path(
+            [reordered_result],
+            ablation_config=self.brain.config,
+            operational_profile=self.brain.operational_profile,
+            interface_registry=registry,
+            current_reflex_scale=self.brain.current_reflex_scale,
+            module_valence_roles=self.brain.MODULE_VALENCE_ROLES,
+        )
+
+        self.assertIsNotNone(reordered_result.reflex)
+        self.assertEqual(reordered_result.reflex.action, "STAY")
+        self.assertEqual(reordered_result.reflex.reason, "stay_on_food")
+        self.assertTrue(reordered_result.reflex_applied)
+        self.assertEqual(reordered_result.valence_role, "hunger")
+        self._assert_registry_local_target(reordered_result.reflex, registry)
 
     def test_visual_reflex_uses_named_predator_signals(self) -> None:
         result = self._module_result(
@@ -125,7 +384,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_dy=0.0,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.action, "MOVE_LEFT")
@@ -144,7 +403,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             food_dy=0.0,
         )
 
-        self.assertIsNone(self.brain._module_reflex_decision(result))
+        self.assertIsNone(self._reflex_decision(result))
 
     def test_hunger_reflex_follows_visible_food_when_hungry(self) -> None:
         result = self._module_result(
@@ -156,7 +415,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             food_dy=0.0,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.action, "MOVE_RIGHT")
@@ -172,7 +431,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             food_dy=0.0,
         )
 
-        self.assertIsNone(self.brain._module_reflex_decision(result))
+        self.assertIsNone(self._reflex_decision(result))
 
     def test_sleep_reflex_stays_when_already_sleeping_in_shelter(self) -> None:
         result = self._module_result(
@@ -182,7 +441,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             hunger=0.2,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.action, "STAY")
@@ -196,9 +455,16 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             hunger=0.9,
         )
 
-        self.assertIsNone(self.brain._module_reflex_decision(result))
+        self.assertIsNone(self._reflex_decision(result))
 
     def test_alert_reflex_retreats_from_visible_predator(self) -> None:
+        """
+        Verifies that the alert reflex causes a retreat when a predator is clearly visible.
+        
+        Constructs an `alert_center` ModuleResult with predator visibility, high certainty, and position signals,
+        calls the reflex decision helper, and asserts the reflex exists with action `"MOVE_LEFT"`
+        and reason `"retreat_from_visible_predator"`.
+        """
         result = self._module_result(
             "alert_center",
             predator_visible=1.0,
@@ -207,7 +473,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_dy=0.0,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.action, "MOVE_LEFT")
@@ -216,7 +482,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
     def test_alert_reflex_skips_when_threat_signals_are_absent(self) -> None:
         result = self._module_result("alert_center")
 
-        self.assertIsNone(self.brain._module_reflex_decision(result))
+        self.assertIsNone(self._reflex_decision(result))
 
     def test_alert_reflex_retreats_from_predator_trace_when_occluded(self) -> None:
         """retreat_from_predator_trace fires when predator is occluded and a trace exists."""
@@ -228,7 +494,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_trace_strength=0.8,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.reason, "retreat_from_predator_trace")
@@ -249,7 +515,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
         # With zero trace strength, the new guard prevents this branch from firing.
         # The reflex may be None or may take an earlier branch (memory/escape); we only
         # verify it does NOT produce the predator-trace reason.
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
         if reflex is not None:
             self.assertNotEqual(reflex.reason, "retreat_from_predator_trace")
 
@@ -263,7 +529,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_trace_strength=0.6,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.reason, "retreat_from_predator_trace")
@@ -281,7 +547,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_trace_strength=0.7,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.reason, "retreat_from_predator_trace")
@@ -298,7 +564,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_trace_strength=0.5,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.reason, "retreat_from_predator_trace")
@@ -313,7 +579,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_trace_strength=0.5,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.reason, "retreat_from_predator_trace")
@@ -329,7 +595,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             shelter_trace_strength=0.7,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.reason, "follow_shelter_trace_to_rest")
@@ -348,7 +614,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             shelter_trace_strength=0.0,  # zero strength blocks the reflex
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
         if reflex is not None:
             self.assertNotEqual(reflex.reason, "follow_shelter_trace_to_rest")
 
@@ -363,7 +629,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             shelter_trace_strength=0.5,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.reason, "follow_shelter_trace_to_rest")
@@ -382,7 +648,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             shelter_trace_strength=0.6,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.reason, "follow_shelter_trace_to_rest")
@@ -400,7 +666,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             shelter_trace_strength=0.4,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
 
         self.assertIsNotNone(reflex)
         self.assertEqual(reflex.reason, "follow_shelter_trace_to_rest")
@@ -417,7 +683,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             shelter_trace_strength=0.8,
         )
 
-        reflex = self.brain._module_reflex_decision(result)
+        reflex = self._reflex_decision(result)
         if reflex is not None:
             self.assertNotEqual(reflex.reason, "follow_shelter_trace_to_rest")
 
@@ -434,7 +700,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_dx=1.0,
             predator_dy=0.0,
         )
-        result.reflex = custom_brain._module_reflex_decision(result)
+        result.reflex = self._reflex_decision(result, brain=custom_brain)
 
         aux_grads = custom_brain._auxiliary_module_gradients([result])
 
@@ -457,12 +723,12 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_dy=0.0,
         )
 
-        self.assertIsNone(custom_brain._module_reflex_decision(result))
+        self.assertIsNone(self._reflex_decision(result, brain=custom_brain))
 
     def test_reflex_scale_zero_leaves_module_logits_unchanged(self) -> None:
         """
         Verifies that a global reflex scale of 0.0 prevents any reflex from altering module logits.
-        
+
         Creates a SpiderBrain configured with reflex_scale=0.0 and a predator-like observation, runs a step,
         and asserts that the alert_center's neural logits are unchanged after reflex processing:
         - `neural_logits` equals `post_reflex_logits`
@@ -554,7 +820,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
     def test_global_and_module_reflex_scales_multiply(self) -> None:
         """
         Verifies that global reflex scale and per-module reflex scale multiply to produce the effective reflex scale and that reflex strengths/auxiliary weights are scaled accordingly.
-        
+
         Asserts that:
         - The computed effective reflex scale for "alert_center" equals the product of the global reflex_scale and the module override (0.5 * 0.5 = 0.25).
         - The reflex logit strength is base_logit_strength multiplied by the effective reflex scale.
@@ -607,7 +873,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
     def test_action_input_uses_contract_validated_action_context(self) -> None:
         """
         Verifies that the action input is formed by concatenating module logits with a validated action-context vector.
-        
+
         Builds module results with distinct constant logits, creates an ActionContextObservation and converts it to the interface vector, calls _build_action_input with those inputs, and asserts the returned vector equals the concatenation of all module logits followed by the action-context vector.
         """
         module_results = []
@@ -667,7 +933,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
     def test_motor_input_uses_contract_validated_motor_context(self) -> None:
         """
         Verifies that _build_motor_input produces a concatenation of a validated action intent and the motor-context vector.
-        
+
         Constructs a MotorContextObservation, converts it through MOTOR_CONTEXT_INTERFACE, calls _build_motor_input with a one-hot action intent and the observation, and asserts the returned motor input equals the action intent followed by the validated motor-context vector.
         """
         motor_context_view = MotorContextObservation(
@@ -746,7 +1012,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_dx=0.0,
             predator_dy=1.0,
         )
-        result.reflex = default_brain._module_reflex_decision(result)
+        result.reflex = self._reflex_decision(result, brain=default_brain)
         custom_result = self._module_result(
             "alert_center",
             predator_visible=1.0,
@@ -754,7 +1020,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             predator_dx=0.0,
             predator_dy=1.0,
         )
-        custom_result.reflex = custom_brain._module_reflex_decision(custom_result)
+        custom_result.reflex = self._reflex_decision(custom_result, brain=custom_brain)
 
         default_grads = default_brain._auxiliary_module_gradients([result])
         custom_grads = custom_brain._auxiliary_module_gradients([custom_result])
@@ -796,7 +1062,7 @@ class SpiderReflexDecisionTest(unittest.TestCase):
             on_food=1.0,
             hunger=0.5,
         )
-        self.assertIsNone(custom_brain._module_reflex_decision(result))
+        self.assertIsNone(self._reflex_decision(result, brain=custom_brain))
 
     def test_set_runtime_reflex_scale_updates_current_scale(self) -> None:
         brain = SpiderBrain(seed=7, module_dropout=0.0)
@@ -1026,6 +1292,94 @@ class SpiderReflexDecisionTest(unittest.TestCase):
         for mode in ("normal", "reflex_only"):
             decision = self.brain.act(observation, sample=False, policy_mode=mode)
             self.assertEqual(decision.policy_mode, mode)
+
+
+class ModuleResultReflexFieldsTest(unittest.TestCase):
+    """Tests for the new reflex-related fields on ModuleResult (new in this PR)."""
+
+    def _make_result(self, **kwargs) -> ModuleResult:
+        """
+        Create a default ModuleResult for the "alert_center" interface, allowing field overrides.
+        
+        Constructs a ModuleResult whose observation is a zero vector sized to the alert_center interface input,
+        logits are a zero vector and probs are uniform over locomotion actions. Any ModuleResult field may be
+        overridden by passing it in via keyword arguments.
+        
+        Parameters:
+            kwargs (dict): Optional overrides for any ModuleResult constructor field (e.g., `logits`, `probs`,
+                `observation`, `name`, `observation_key`, `active`, `interface`).
+        
+        Returns:
+            ModuleResult: The constructed ModuleResult with defaults merged with provided overrides.
+        """
+        interface = MODULE_INTERFACE_BY_NAME["alert_center"]
+        obs = np.zeros(interface.input_dim, dtype=float)
+        action_dim = len(LOCOMOTION_ACTIONS)
+        defaults = dict(
+            interface=interface,
+            name="alert_center",
+            observation_key=interface.observation_key,
+            observation=obs,
+            logits=np.zeros(action_dim, dtype=float),
+            probs=np.full(action_dim, 1.0 / action_dim, dtype=float),
+            active=True,
+        )
+        defaults.update(kwargs)
+        return ModuleResult(**defaults)
+
+    def test_neural_logits_defaults_to_none(self) -> None:
+        result = self._make_result()
+        self.assertIsNone(result.neural_logits)
+
+    def test_reflex_delta_logits_defaults_to_none(self) -> None:
+        result = self._make_result()
+        self.assertIsNone(result.reflex_delta_logits)
+
+    def test_post_reflex_logits_defaults_to_none(self) -> None:
+        result = self._make_result()
+        self.assertIsNone(result.post_reflex_logits)
+
+    def test_reflex_applied_defaults_to_false(self) -> None:
+        result = self._make_result()
+        self.assertFalse(result.reflex_applied)
+
+    def test_effective_reflex_scale_defaults_to_zero(self) -> None:
+        result = self._make_result()
+        self.assertAlmostEqual(result.effective_reflex_scale, 0.0)
+
+    def test_module_reflex_override_defaults_to_false(self) -> None:
+        result = self._make_result()
+        self.assertFalse(result.module_reflex_override)
+
+    def test_module_reflex_dominance_defaults_to_zero(self) -> None:
+        result = self._make_result()
+        self.assertAlmostEqual(result.module_reflex_dominance, 0.0)
+
+    def test_can_set_neural_logits(self) -> None:
+        """
+        Verify that a ModuleResult preserves a provided `neural_logits` array.
+
+        Asserts that after constructing a ModuleResult with a given `neural_logits` vector, the `neural_logits` attribute matches the original values elementwise.
+        """
+        logits = np.linspace(0.1, 0.9, len(LOCOMOTION_ACTIONS), dtype=float)
+        result = self._make_result(neural_logits=logits.copy())
+        np.testing.assert_allclose(result.neural_logits, logits)
+
+    def test_can_set_reflex_applied_true(self) -> None:
+        result = self._make_result(reflex_applied=True)
+        self.assertTrue(result.reflex_applied)
+
+    def test_can_set_effective_reflex_scale(self) -> None:
+        result = self._make_result(effective_reflex_scale=0.5)
+        self.assertAlmostEqual(result.effective_reflex_scale, 0.5)
+
+    def test_can_set_module_reflex_override_true(self) -> None:
+        result = self._make_result(module_reflex_override=True)
+        self.assertTrue(result.module_reflex_override)
+
+    def test_can_set_module_reflex_dominance(self) -> None:
+        result = self._make_result(module_reflex_dominance=0.75)
+        self.assertAlmostEqual(result.module_reflex_dominance, 0.75)
 
 
 if __name__ == "__main__":

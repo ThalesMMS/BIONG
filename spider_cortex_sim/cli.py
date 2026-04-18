@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .ablations import BrainAblationConfig, canonical_ablation_variant_names
+from .benchmark_package import BenchmarkManifest, assemble_benchmark_package
 from .budget_profiles import (
     CHECKPOINT_METRIC_NAMES,
     CHECKPOINT_SELECTION_NAMES,
@@ -14,6 +17,15 @@ from .budget_profiles import (
     resolve_budget_profile,
 )
 from .claim_tests import claim_test_names
+from .claim_evaluation import run_claim_test_suite
+from .comparison import (
+    compare_ablation_suite,
+    compare_behavior_suite,
+    compare_configurations,
+    compare_learning_evidence,
+    compare_noise_robustness,
+    compare_training_regimes,
+)
 from .maps import MAP_TEMPLATE_NAMES
 from .noise import canonical_noise_profile_names
 from .operational_profiles import canonical_operational_profile_names
@@ -208,6 +220,47 @@ def _default_checkpointing_summary(
             "scope": "per_run",
         },
     }
+
+
+def _benchmark_package_manifest_summary(
+    manifest: BenchmarkManifest,
+    *,
+    output_dir: Path,
+) -> dict[str, object]:
+    """Return the compact manifest fields suitable for CLI stdout."""
+    return {
+        "output_dir": str(output_dir),
+        "package_version": manifest.package_version,
+        "created_at": manifest.created_at,
+        "seed_count": manifest.seed_count,
+        "confidence_level": manifest.confidence_level,
+        "file_count": len(manifest.contents),
+        "limitations": list(manifest.limitations),
+    }
+
+
+def _build_and_record_benchmark_package(
+    *,
+    output_dir: Path,
+    summary: dict[str, object],
+    behavior_csv: Path | None,
+    behavior_rows: Sequence[Mapping[str, object]],
+    command_metadata: Mapping[str, object],
+    trace: Sequence[Mapping[str, object]] = (),
+) -> BenchmarkManifest:
+    manifest = assemble_benchmark_package(
+        output_dir,
+        summary,
+        behavior_csv,
+        behavior_rows=behavior_rows,
+        trace=trace,
+        command_metadata=command_metadata,
+    )
+    summary["benchmark_package"] = _benchmark_package_manifest_summary(
+        manifest,
+        output_dir=output_dir,
+    )
+    return manifest
 
 
 def _build_compare_training_kwargs(
@@ -465,6 +518,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="CSV file path for exporting flat behavioral evaluation results.",
     )
     parser.add_argument(
+        "--benchmark-package",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for writing the benchmark-of-record package. Requires "
+            "--budget-profile paper and --checkpoint-selection best."
+        ),
+    )
+    parser.add_argument(
         "--scenario-episodes",
         type=int,
         default=None,
@@ -631,6 +693,11 @@ def main() -> None:
             args.checkpoint_dominance_penalty = (
                 EXPERIMENT_OF_RECORD_CHECKPOINT_DOMINANCE_PENALTY
             )
+    if args.benchmark_package is not None:
+        if args.budget_profile != "paper":
+            parser.error("--benchmark-package requires --budget-profile paper.")
+        if args.checkpoint_selection != "best":
+            parser.error("--benchmark-package requires --checkpoint-selection best.")
     if not math.isfinite(float(args.reflex_scale)):
         parser.error("--reflex-scale must be finite.")
     if (
@@ -786,7 +853,7 @@ def main() -> None:
                     f"{flag_name} is not supported with --noise-robustness."
                 )
         requested_scenarios = _collect_requested_scenarios(args)
-        robustness_payload, robustness_rows = SpiderSimulation.compare_noise_robustness(
+        robustness_payload, robustness_rows = compare_noise_robustness(
             width=args.width,
             height=args.height,
             food_count=args.food_count,
@@ -847,6 +914,17 @@ def main() -> None:
                 dominance_penalty_weight=args.checkpoint_dominance_penalty,
                 penalty_mode=args.checkpoint_penalty_mode,
             )
+        if args.benchmark_package is not None:
+            _build_and_record_benchmark_package(
+                output_dir=args.benchmark_package,
+                summary=summary,
+                behavior_csv=args.behavior_csv,
+                behavior_rows=robustness_rows,
+                command_metadata={
+                    "argv": list(sys.argv[1:]),
+                    "entrypoint": "spider_cortex_sim",
+                },
+            )
         if args.summary is not None:
             SpiderSimulation.save_summary(summary, args.summary)
         if args.behavior_csv is not None:
@@ -858,21 +936,18 @@ def main() -> None:
         printable_behavior_evaluation["robustness_matrix"] = (
             _short_robustness_matrix_summary(robustness_payload)
         )
-        print(
-            json.dumps(
-                {
-                    "reward_profile": args.reward_profile,
-                    "map_template": args.map_template,
-                    "budget_profile": budget.profile,
-                    "benchmark_strength": budget.benchmark_strength,
-                    "training_regime": {"name": "noise_robustness"},
-                    "operational_profile": args.operational_profile,
-                    "behavior_evaluation": printable_behavior_evaluation,
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
+        printable_payload = {
+            "reward_profile": args.reward_profile,
+            "map_template": args.map_template,
+            "budget_profile": budget.profile,
+            "benchmark_strength": budget.benchmark_strength,
+            "training_regime": {"name": "noise_robustness"},
+            "operational_profile": args.operational_profile,
+            "behavior_evaluation": printable_behavior_evaluation,
+        }
+        if "benchmark_package" in summary:
+            printable_payload["benchmark_package"] = summary["benchmark_package"]
+        print(json.dumps(printable_payload, indent=2, ensure_ascii=False))
         return
 
     sim = SpiderSimulation(
@@ -1024,7 +1099,7 @@ def main() -> None:
     if args.compare_profiles or args.compare_maps:
         comparison_profiles = sorted(REWARD_PROFILES.keys()) if args.compare_profiles else [args.reward_profile]
         comparison_maps = list(MAP_TEMPLATE_NAMES) if args.compare_maps else [args.map_template]
-        summary["comparisons"] = SpiderSimulation.compare_configurations(
+        summary["comparisons"] = compare_configurations(
             width=args.width,
             height=args.height,
             food_count=args.food_count,
@@ -1049,7 +1124,7 @@ def main() -> None:
         comparison_profiles = sorted(REWARD_PROFILES.keys()) if args.behavior_compare_profiles else [args.reward_profile]
         comparison_maps = list(MAP_TEMPLATE_NAMES) if args.behavior_compare_maps else [args.map_template]
         checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
-        behavior_comparisons, comparison_rows = SpiderSimulation.compare_behavior_suite(
+        behavior_comparisons, comparison_rows = compare_behavior_suite(
             width=args.width,
             height=args.height,
             food_count=args.food_count,
@@ -1088,7 +1163,7 @@ def main() -> None:
 
     if ablation_active:
         checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
-        ablation_payload, ablation_rows = SpiderSimulation.compare_ablation_suite(
+        ablation_payload, ablation_rows = compare_ablation_suite(
             width=args.width,
             height=args.height,
             food_count=args.food_count,
@@ -1124,7 +1199,7 @@ def main() -> None:
 
     if learning_evidence_active:
         checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
-        learning_evidence_payload, learning_evidence_rows = SpiderSimulation.compare_learning_evidence(
+        learning_evidence_payload, learning_evidence_rows = compare_learning_evidence(
             width=args.width,
             height=args.height,
             food_count=args.food_count,
@@ -1161,7 +1236,7 @@ def main() -> None:
 
     if claim_test_suite_active:
         checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
-        claim_test_payload, claim_test_rows = SpiderSimulation.run_claim_test_suite(
+        claim_test_payload, claim_test_rows = run_claim_test_suite(
             claim_tests=args.claim_test,
             width=args.width,
             height=args.height,
@@ -1205,7 +1280,7 @@ def main() -> None:
         and (budget.episodes > 0 or budget.eval_episodes > 0)
     ):
         compare_training_kwargs = _build_compare_training_kwargs(args, budget)
-        curriculum_payload, curriculum_rows = SpiderSimulation.compare_training_regimes(
+        curriculum_payload, curriculum_rows = compare_training_regimes(
             names=requested_scenarios or None,
             **compare_training_kwargs,
         )
@@ -1226,6 +1301,19 @@ def main() -> None:
             override_penalty_weight=args.checkpoint_override_penalty,
             dominance_penalty_weight=args.checkpoint_dominance_penalty,
             penalty_mode=args.checkpoint_penalty_mode,
+        )
+
+    if args.benchmark_package is not None:
+        _build_and_record_benchmark_package(
+            output_dir=args.benchmark_package,
+            summary=summary,
+            behavior_csv=args.behavior_csv,
+            behavior_rows=behavior_rows,
+            trace=trace,
+            command_metadata={
+                "argv": list(sys.argv[1:]),
+                "entrypoint": "spider_cortex_sim",
+            },
         )
 
     if args.summary is not None:
@@ -1430,6 +1518,8 @@ def main() -> None:
             "checkpoint_interval": summary["checkpointing"]["checkpoint_interval"],
             "selected_checkpoint": summary["checkpointing"]["selected_checkpoint"],
         }
+    if "benchmark_package" in summary:
+        printable["benchmark_package"] = summary["benchmark_package"]
     print(json.dumps(printable, indent=2, ensure_ascii=False))
 
 

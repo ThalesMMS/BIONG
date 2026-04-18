@@ -7,6 +7,7 @@ from spider_cortex_sim.operational_profiles import (
     OperationalProfile,
     canonical_operational_profile_names,
     resolve_operational_profile,
+    runtime_operational_profile,
 )
 
 
@@ -39,8 +40,9 @@ class OperationalProfileRegistryTest(unittest.TestCase):
         self.assertEqual(summary["perception"]["night_vision_range_penalty"], 1.0)
         self.assertEqual(summary["perception"]["visibility_clutter_penalty"], 0.18)
         self.assertEqual(summary["perception"]["lizard_detection_threshold"], 0.45)
-        self.assertEqual(summary["perception"]["fov_half_angle"], 60.0)
-        self.assertEqual(summary["perception"]["peripheral_half_angle"], 90.0)
+        self.assertEqual(summary["perception"]["fov_half_angle"], 45.0)
+        self.assertEqual(summary["perception"]["peripheral_half_angle"], 70.0)
+        self.assertEqual(summary["perception"]["max_scan_age"], 10.0)
         self.assertEqual(summary["perception"]["peripheral_certainty_penalty"], 0.35)
         self.assertEqual(summary["perception"]["perceptual_delay_ticks"], 1.0)
         self.assertEqual(summary["perception"]["perceptual_delay_noise"], 0.5)
@@ -73,6 +75,53 @@ class ResolveOperationalProfileTest(unittest.TestCase):
 
     def test_canonical_names_nonempty(self) -> None:
         self.assertGreater(len(canonical_operational_profile_names()), 0)
+
+
+class RuntimeOperationalProfileTest(unittest.TestCase):
+    def test_runtime_none_returns_copy_of_default_profile(self) -> None:
+        profile = runtime_operational_profile(None)
+
+        self.assertEqual(profile.to_summary(), DEFAULT_OPERATIONAL_PROFILE.to_summary())
+        self.assertIsNot(profile, DEFAULT_OPERATIONAL_PROFILE)
+        self.assertIsNot(profile.perception, DEFAULT_OPERATIONAL_PROFILE.perception)
+        self.assertIsNot(profile.brain_aux_weights, DEFAULT_OPERATIONAL_PROFILE.brain_aux_weights)
+
+        profile.brain_aux_weights["alert_center"] = 0.99
+
+        self.assertEqual(DEFAULT_OPERATIONAL_PROFILE.brain_aux_weights["alert_center"], 0.32)
+        self.assertNotEqual(
+            profile.brain_aux_weights["alert_center"],
+            DEFAULT_OPERATIONAL_PROFILE.brain_aux_weights["alert_center"],
+        )
+
+    def test_runtime_name_returns_copy_of_registered_profile(self) -> None:
+        profile = runtime_operational_profile("default_v1")
+        registered_profile = OPERATIONAL_PROFILES["default_v1"]
+
+        self.assertEqual(profile.to_summary(), registered_profile.to_summary())
+        self.assertIsNot(profile, registered_profile)
+        self.assertIsNot(profile.reward, registered_profile.reward)
+        self.assertIsNot(profile.brain_reflex_thresholds, registered_profile.brain_reflex_thresholds)
+        self.assertIsNot(
+            profile.brain_reflex_thresholds["visual_cortex"],
+            registered_profile.brain_reflex_thresholds["visual_cortex"],
+        )
+
+        profile.brain_reflex_thresholds["visual_cortex"]["predator_certainty"] = 0.99
+
+        self.assertEqual(
+            registered_profile.brain_reflex_thresholds["visual_cortex"]["predator_certainty"],
+            0.45,
+        )
+        self.assertNotEqual(
+            profile.brain_reflex_thresholds["visual_cortex"]["predator_certainty"],
+            registered_profile.brain_reflex_thresholds["visual_cortex"]["predator_certainty"],
+        )
+
+    def test_runtime_instance_returns_same_object(self) -> None:
+        profile = OperationalProfile.from_summary(DEFAULT_OPERATIONAL_PROFILE.to_summary())
+
+        self.assertIs(runtime_operational_profile(profile), profile)
 
 
 class OperationalProfileImmutabilityTest(unittest.TestCase):
@@ -161,8 +210,9 @@ class OperationalProfileFromSummaryTest(unittest.TestCase):
         Ensure legacy perception summaries missing optional keys receive defaults when loaded.
         
         Verifies that `OperationalProfile.from_summary()` fills missing perception keys with expected defaults:
-        - `fov_half_angle` -> 60.0
-        - `peripheral_half_angle` -> 90.0
+        - `fov_half_angle` -> 45.0
+        - `peripheral_half_angle` -> 70.0
+        - `max_scan_age` -> 10.0
         - `peripheral_certainty_penalty` -> 0.35
         - `perceptual_delay_ticks` -> 1.0
         - `perceptual_delay_noise` -> 0.5
@@ -170,14 +220,16 @@ class OperationalProfileFromSummaryTest(unittest.TestCase):
         summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
         del summary["perception"]["fov_half_angle"]
         del summary["perception"]["peripheral_half_angle"]
+        del summary["perception"]["max_scan_age"]
         del summary["perception"]["peripheral_certainty_penalty"]
         del summary["perception"]["perceptual_delay_ticks"]
         del summary["perception"]["perceptual_delay_noise"]
 
         profile = OperationalProfile.from_summary(summary)
 
-        self.assertAlmostEqual(profile.perception["fov_half_angle"], 60.0)
-        self.assertAlmostEqual(profile.perception["peripheral_half_angle"], 90.0)
+        self.assertAlmostEqual(profile.perception["fov_half_angle"], 45.0)
+        self.assertAlmostEqual(profile.perception["peripheral_half_angle"], 70.0)
+        self.assertAlmostEqual(profile.perception["max_scan_age"], 10.0)
         self.assertAlmostEqual(profile.perception["peripheral_certainty_penalty"], 0.35)
         self.assertAlmostEqual(profile.perception["perceptual_delay_ticks"], 1.0)
         self.assertAlmostEqual(profile.perception["perceptual_delay_noise"], 0.5)
@@ -239,6 +291,7 @@ class OperationalProfileDefaultKeysTest(unittest.TestCase):
             "percept_trace_decay",
             "fov_half_angle",
             "peripheral_half_angle",
+            "max_scan_age",
             "peripheral_certainty_penalty",
             "perceptual_delay_ticks",
             "perceptual_delay_noise",
@@ -296,6 +349,9 @@ class OptionalPerceptionDefaultsTest(unittest.TestCase):
     def test_contains_peripheral_half_angle(self) -> None:
         self.assertIn("peripheral_half_angle", OPTIONAL_PERCEPTION_DEFAULTS)
 
+    def test_contains_max_scan_age(self) -> None:
+        self.assertIn("max_scan_age", OPTIONAL_PERCEPTION_DEFAULTS)
+
     def test_contains_peripheral_certainty_penalty(self) -> None:
         self.assertIn("peripheral_certainty_penalty", OPTIONAL_PERCEPTION_DEFAULTS)
 
@@ -305,14 +361,17 @@ class OptionalPerceptionDefaultsTest(unittest.TestCase):
     def test_contains_perceptual_delay_noise(self) -> None:
         self.assertIn("perceptual_delay_noise", OPTIONAL_PERCEPTION_DEFAULTS)
 
-    def test_has_exactly_five_keys(self) -> None:
-        self.assertEqual(len(OPTIONAL_PERCEPTION_DEFAULTS), 5)
+    def test_has_exactly_six_keys(self) -> None:
+        self.assertEqual(len(OPTIONAL_PERCEPTION_DEFAULTS), 6)
 
-    def test_fov_half_angle_default_is_60(self) -> None:
-        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["fov_half_angle"], 60.0)
+    def test_fov_half_angle_default_is_45(self) -> None:
+        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["fov_half_angle"], 45.0)
 
-    def test_peripheral_half_angle_default_is_90(self) -> None:
-        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["peripheral_half_angle"], 90.0)
+    def test_peripheral_half_angle_default_is_70(self) -> None:
+        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["peripheral_half_angle"], 70.0)
+
+    def test_max_scan_age_default_is_10(self) -> None:
+        self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["max_scan_age"], 10.0)
 
     def test_peripheral_certainty_penalty_default_is_0_35(self) -> None:
         self.assertAlmostEqual(OPTIONAL_PERCEPTION_DEFAULTS["peripheral_certainty_penalty"], 0.35)
@@ -362,10 +421,13 @@ class OptionalPerceptionDefaultsTest(unittest.TestCase):
 
 class DefaultOperationalProfilePerceptionKeysTest(unittest.TestCase):
     def test_fov_half_angle_present_with_default_value(self) -> None:
-        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["fov_half_angle"], 60.0)
+        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["fov_half_angle"], 45.0)
 
     def test_peripheral_half_angle_present_with_default_value(self) -> None:
-        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["peripheral_half_angle"], 90.0)
+        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["peripheral_half_angle"], 70.0)
+
+    def test_max_scan_age_present_with_default_value(self) -> None:
+        self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["max_scan_age"], 10.0)
 
     def test_peripheral_certainty_penalty_present_with_default_value(self) -> None:
         self.assertAlmostEqual(DEFAULT_OPERATIONAL_PROFILE.perception["peripheral_certainty_penalty"], 0.35)

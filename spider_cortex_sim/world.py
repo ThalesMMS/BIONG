@@ -17,30 +17,23 @@ import numpy as np
 from . import stages as tick_stages
 from .interfaces import ACTION_DELTAS, ACTION_TO_INDEX, LOCOMOTION_ACTIONS, OBSERVATION_VIEW_BY_KEY, ORIENT_HEADINGS
 from .maps import BLOCKED, CLUTTER, MAP_TEMPLATE_NAMES, NARROW, build_map_template, terrain_at
-from .memory import MEMORY_TTLS, age_or_clear_memory, empty_memory_slot, escape_memory_target, memory_vector, refresh_memory, set_memory
+from .memory import MEMORY_TTLS, empty_memory_slot, refresh_all_memory
 from .noise import NoiseConfig, resolve_noise_profile
 from .perception import (
-    PerceivedTarget,
-    _compute_target_visibility_zone,
+    empty_percept_trace,
     has_line_of_sight,
     observe_world,
     predator_detects_spider,
     predator_motion_salience,
     predator_visible_to_spider,
     smell_gradient,
-    visible_object,
-    visibility_confidence,
+    trace_view,
     visible_range,
 )
 from .physiology import (
-    SLEEP_PHASE_LEVELS,
     apply_predator_contact,
-    apply_restoration,
-    apply_wakefulness,
     reset_sleep_state,
     rest_streak_norm,
-    set_sleep_state,
-    sleep_phase_from_streak,
     sleep_phase_level,
 )
 from .predator import (
@@ -49,81 +42,73 @@ from .predator import (
     PredatorController,
     PredatorProfile,
 )
-from .operational_profiles import OperationalProfile, resolve_operational_profile
-from .reward import (
-    REWARD_COMPONENT_NAMES,
-    REWARD_PROFILES,
-    copy_reward_components,
-    empty_reward_components,
-    reward_total,
-)
-from .world_types import MemorySlot, PerceptTrace, SpiderState, TickContext, TickSnapshot
+from .operational_profiles import OperationalProfile, runtime_operational_profile
+from .reward import REWARD_COMPONENT_NAMES, REWARD_PROFILES
+from .world_types import SpiderState, TickContext, TickSnapshot
 
 
 ACTIONS: Sequence[str] = tuple(LOCOMOTION_ACTIONS)
 MOVE_DELTAS = tuple(delta for delta in ACTION_DELTAS.values() if delta != (0, 0))
+MOMENTUM_DECAY_ON_STOP = 0.8
+MOMENTUM_BOOST_ON_SAME_DIR = 0.15
+MOMENTUM_FRICTION_ON_TURN = 0.5
 SHELTER_ROLE_LEVELS = {
     "outside": 0.0,
     "entrance": 1.0 / 3.0,
     "inside": 2.0 / 3.0,
     "deep": 1.0,
 }
-TERRAIN_DIFFICULTY = {
-    CLUTTER: 0.4,
-    NARROW: 0.7,
-    BLOCKED: 1.0,
+SCAN_AGE_NEVER = 100
+SCAN_TICK_FIELDS = {
+    (0, -1): "last_scan_tick_up",
+    (0, 1): "last_scan_tick_down",
+    (-1, 0): "last_scan_tick_left",
+    (1, 0): "last_scan_tick_right",
+    (-1, -1): "last_scan_tick_up_left",
+    (1, -1): "last_scan_tick_up_right",
+    (-1, 1): "last_scan_tick_down_left",
+    (1, 1): "last_scan_tick_down_right",
 }
-SLIP_ADJACENT_ACTIONS = {
-    "MOVE_UP": ("MOVE_LEFT", "MOVE_RIGHT"),
-    "MOVE_DOWN": ("MOVE_LEFT", "MOVE_RIGHT"),
-    "MOVE_LEFT": ("MOVE_UP", "MOVE_DOWN"),
-    "MOVE_RIGHT": ("MOVE_UP", "MOVE_DOWN"),
-}
 
 
-def _terrain_difficulty(terrain: str) -> float:
-    return float(np.clip(TERRAIN_DIFFICULTY.get(str(terrain), 0.0), 0.0, 1.0))
+def _scan_tick_field_for_heading(heading_dx: int, heading_dy: int) -> str | None:
+    """Return the SpiderState scan field for a tracked heading."""
+    return SCAN_TICK_FIELDS.get((int(heading_dx), int(heading_dy)))
 
 
-def compute_execution_difficulty(
-    heading: tuple[float, float],
-    intended_direction: tuple[float, float],
-    terrain: str,
-    fatigue: float,
-) -> tuple[float, dict[str, float]]:
+def _scan_age_never_for_world(world: "SpiderWorld") -> int:
+    """Return a never-scanned age that is stale for this world's profile."""
+    max_scan_age = float(world.operational_profile.perception.get("max_scan_age", SCAN_AGE_NEVER))
+    if not np.isfinite(max_scan_age):
+        return SCAN_AGE_NEVER
+    return max(SCAN_AGE_NEVER, int(np.ceil(max_scan_age)))
+
+
+def _scan_age_for_heading(world: "SpiderWorld", heading_dx: int, heading_dy: int) -> int:
+    """Return ticks since a tracked heading was actively scanned."""
+    never_scanned_age = _scan_age_never_for_world(world)
+    field_name = _scan_tick_field_for_heading(heading_dx, heading_dy)
+    if field_name is None:
+        return never_scanned_age
+    last_scan_tick = int(getattr(world.state, field_name))
+    if last_scan_tick < 0:
+        return never_scanned_age
+    return max(0, int(world.tick) - last_scan_tick)
+
+
+def _refresh_perception_for_active_scan(world: "SpiderWorld") -> dict[str, object]:
     """
-    Compute how difficult a movement is to execute from heading, direction, terrain, and fatigue.
+    Refresh the current tick's raw perception after an active heading scan.
 
-    Returns a float difficulty and a dict of diagnostics.
-    Diagnostics keys: heading_dx, heading_dy, move_dx, move_dy, orientation_alignment,
-    orientation_mismatch, terrain_difficulty, fatigue_factor, raw_difficulty.
+    This updates only the perceptual buffer entry for ``world.tick``. It does
+    not advance the tick counter or run memory, reward, predator, or physiology
+    stages.
     """
-    heading_dx, heading_dy = float(heading[0]), float(heading[1])
-    move_dx, move_dy = float(intended_direction[0]), float(intended_direction[1])
-    heading_norm = float(np.hypot(heading_dx, heading_dy))
-    move_norm = float(np.hypot(move_dx, move_dy))
-    if heading_norm <= 0.0 or move_norm <= 0.0:
-        orientation_alignment = 1.0
-    else:
-        dot = heading_dx * move_dx + heading_dy * move_dy
-        cosine = float(np.clip(dot / (heading_norm * move_norm), -1.0, 1.0))
-        orientation_alignment = float(np.clip((cosine + 1.0) / 2.0, 0.0, 1.0))
-    terrain_factor = _terrain_difficulty(terrain)
-    fatigue_factor = float(np.clip(fatigue, 0.0, 1.0))
-    orientation_mismatch = float(np.clip(1.0 - orientation_alignment, 0.0, 1.0))
-    raw_difficulty = terrain_factor * orientation_mismatch * (1.0 + fatigue_factor)
-    difficulty = float(np.clip(raw_difficulty, 0.0, 1.0))
-    return difficulty, {
-        "heading_dx": heading_dx,
-        "heading_dy": heading_dy,
-        "move_dx": move_dx,
-        "move_dy": move_dy,
-        "orientation_alignment": orientation_alignment,
-        "orientation_mismatch": orientation_mismatch,
-        "terrain_difficulty": terrain_factor,
-        "fatigue_factor": fatigue_factor,
-        "raw_difficulty": float(raw_difficulty),
-    }
+    delay_ticks = world._perceptual_delay_ticks()
+    raw_observation = world._raw_observation()
+    world._ensure_perceptual_buffer(delay_ticks)
+    world._perceptual_buffer.push(int(world.tick), raw_observation)
+    return raw_observation
 
 
 def _copy_observation_payload(observation: dict[str, object]) -> dict[str, object]:
@@ -220,7 +205,7 @@ def _is_temporal_direction_field(field_name: str) -> bool:
     """
     Determine whether an observation field name represents a temporal direction component.
     
-    A field is considered temporal direction if it ends with `_dx` or `_dy` but is not one of `heading_dx`, `heading_dy`, `last_move_dx`, `last_move_dy`, and does not contain `_memory_`.
+    A field is considered temporal direction if it ends with `_dx` or `_dy` but is not one of `heading_dx`, `heading_dy`, `last_move_dx`, `last_move_dy`, does not contain `_memory_`, and is not trace-heading context.
     
     Returns:
         `true` if the name denotes a temporal direction component, `false` otherwise.
@@ -228,6 +213,8 @@ def _is_temporal_direction_field(field_name: str) -> bool:
     if not (field_name.endswith("_dx") or field_name.endswith("_dy")):
         return False
     if field_name in {"heading_dx", "heading_dy", "last_move_dx", "last_move_dy"}:
+        return False
+    if "_trace_heading_" in field_name:
         return False
     if "_memory_" in field_name:
         return False
@@ -309,7 +296,7 @@ class SpiderWorld:
         self.lizard_move_interval = max(1, int(lizard_move_interval))
         self.reward_profile = reward_profile
         self.reward_config = REWARD_PROFILES[reward_profile]
-        self.operational_profile = resolve_operational_profile(operational_profile)
+        self.operational_profile = runtime_operational_profile(operational_profile)
         self.noise_profile = resolve_noise_profile(noise_profile)
         self.map_template_name = map_template
         self.map_template = build_map_template(map_template, width=width, height=height)
@@ -379,28 +366,32 @@ class SpiderWorld:
         self.shelter_cells = self.map_template.shelter_cells
         self.blocked_cells = set(self.map_template.blocked_cells)
 
-    def _empty_memory_slot(self) -> MemorySlot:
-        """
-        Create a new empty memory slot for the spider.
-        
-        Returns:
-            MemorySlot: A freshly initialized memory slot with default (empty) contents.
-        """
-        return empty_memory_slot()
-
-    @staticmethod
-    def _empty_percept_trace() -> PerceptTrace:
-        """
-        Create a new empty short-lived percept trace slot.
-        """
-        return PerceptTrace(target=None, age=0, certainty=0.0)
-
     @staticmethod
     def _heading_components_from_delta(dx: int, dy: int) -> tuple[int, int]:
         """
         Convert an arbitrary delta into a compact signed heading vector.
         """
         return int(np.sign(dx)), int(np.sign(dy))
+
+    def _record_scan_for_heading(self, heading_dx: int, heading_dy: int) -> None:
+        """
+        Mark a tracked heading as actively scanned on the current world tick.
+        """
+        field_name = _scan_tick_field_for_heading(heading_dx, heading_dy)
+        if field_name is not None:
+            setattr(self.state, field_name, int(self.tick))
+
+    def _scan_age_for_heading(self, heading_dx: int, heading_dy: int) -> int:
+        """
+        Return ticks since the given tracked heading was actively scanned.
+        """
+        return _scan_age_for_heading(self, heading_dx, heading_dy)
+
+    def _refresh_perception_for_active_scan(self) -> dict[str, object]:
+        """
+        Refresh the current tick's perceptual buffer after an ORIENT action.
+        """
+        return _refresh_perception_for_active_scan(self)
 
     def _heading_toward(
         self,
@@ -426,128 +417,7 @@ class SpiderWorld:
         )
         self.state.heading_dx = heading_dx
         self.state.heading_dy = heading_dy
-
-    def _percept_trace_ttl(self) -> int:
-        """
-        Return the configured TTL for short percept traces.
-        """
-        return max(1, round(self.operational_profile.perception["percept_trace_ttl"]))
-
-    def _percept_trace_decay(self) -> float:
-        """
-        Return the configured multiplicative decay for short percept traces.
-        """
-        return float(np.clip(self.operational_profile.perception["percept_trace_decay"], 0.0, 1.0))
-
-    def _trace_strength(self, trace: PerceptTrace) -> float:
-        """
-        Compute the current decayed strength of a short percept trace.
-        """
-        if trace.target is None or trace.age >= self._percept_trace_ttl():
-            return 0.0
-        return float(np.clip(trace.certainty * (self._percept_trace_decay() ** trace.age), 0.0, 1.0))
-
-    def _trace_view(self, trace: PerceptTrace) -> dict[str, object]:
-        """
-        Serialize a percept trace with derived direction and strength metadata.
-        """
-        strength = self._trace_strength(trace)
-        if trace.target is None or strength <= 0.0:
-            dx = 0.0
-            dy = 0.0
-        else:
-            dx, dy, _ = self._relative(trace.target)
-        return {
-            "target": None if trace.target is None else [int(trace.target[0]), int(trace.target[1])],
-            "age": int(trace.age),
-            "certainty": float(trace.certainty),
-            "strength": float(strength),
-            "dx": float(dx),
-            "dy": float(dy),
-            "ttl": self._percept_trace_ttl(),
-            "decay": self._percept_trace_decay(),
-        }
-
-    def _advance_percept_trace(
-        self,
-        trace: PerceptTrace,
-        percept: PerceivedTarget,
-        positions: Iterable[Tuple[int, int]],
-    ) -> PerceptTrace:
-        """
-        Refresh or age a short-lived percept trace using the latest raw percept.
-        
-        If the provided percept is visible, not occluded, supplies a concrete position that matches one of
-        the candidate positions, reports a Manhattan distance equal to the spider's distance to that
-        position, is not classified as `"outside"` by visibility zone, and there is line of sight, the
-        trace is refreshed: returned with `age = 0` and `certainty` clipped to the interval [0.0, 1.0].
-        Otherwise the existing trace is aged by 1 (and its certainty clipped); if the aged trace has
-        non-positive strength the function returns an empty percept trace.
-        
-        Parameters:
-            trace (PerceptTrace): Current short-lived trace to refresh or age.
-            percept (PerceivedTarget): Latest raw percept used to attempt a refresh.
-            positions (Iterable[Tuple[int, int]]): Candidate positions that a valid percept position must match.
-        
-        Returns:
-            PerceptTrace: The refreshed trace when refresh conditions are met, the aged trace when still
-            active, or an empty percept trace when no active trace remains.
-        """
-        if percept.visible > 0.0 and percept.occluded <= 0.0 and percept.position is not None:
-            source = self.spider_pos()
-            candidate_set = {tuple(pos) for pos in positions}
-            percept_dist = int(percept.dist)
-            target = tuple(percept.position)
-            if target in candidate_set:
-                visibility_zone = _compute_target_visibility_zone(self, source, target)
-                if (
-                    self.manhattan(source, target) == percept_dist
-                    and visibility_zone != "outside"
-                    and has_line_of_sight(self, source, target)
-                ):
-                    return PerceptTrace(
-                        target=(int(target[0]), int(target[1])),
-                        age=0,
-                        certainty=float(np.clip(percept.certainty, 0.0, 1.0)),
-                    )
-
-        if trace.target is None:
-            return self._empty_percept_trace()
-        aged = PerceptTrace(
-            target=trace.target,
-            age=int(trace.age) + 1,
-            certainty=float(np.clip(trace.certainty, 0.0, 1.0)),
-        )
-        if self._trace_strength(aged) <= 0.0:
-            return self._empty_percept_trace()
-        return aged
-
-    def _refresh_perceptual_state(self) -> None:
-        """
-        Update the world's perceptual traces for food, shelter, and predators based on the current immediate perceptions.
-        
-        Compute the current visible radius and obtain immediate visibility views for food, shelter, and predators (without sensory noise), then advance each stored percept trace to reflect newly observed information or to age existing traces. For predator trace candidates, use all current predator positions; if none exist, fall back to the single lizard position.
-        """
-        radius = visible_range(self)
-        food_view = visible_object(self, self.food_positions, radius=radius, apply_noise=False)
-        shelter_view = visible_object(self, self.shelter_cells, radius=radius, apply_noise=False)
-        predator_view = predator_visible_to_spider(self, apply_noise=False)
-
-        self.state.food_trace = self._advance_percept_trace(
-            self.state.food_trace,
-            food_view,
-            self.food_positions,
-        )
-        self.state.shelter_trace = self._advance_percept_trace(
-            self.state.shelter_trace,
-            shelter_view,
-            self.shelter_cells,
-        )
-        self.state.predator_trace = self._advance_percept_trace(
-            self.state.predator_trace,
-            predator_view,
-            self.predator_positions() or [self.lizard_pos()],
-        )
+        self._record_scan_for_heading(heading_dx, heading_dy)
 
     def _initial_spider_state(self, start_x: int, start_y: int) -> SpiderState:
         """
@@ -566,7 +436,7 @@ class SpiderWorld:
             self.nearest_shelter_entrance(origin=(start_x, start_y)),
             origin=(start_x, start_y),
         )
-        return SpiderState(
+        state = SpiderState(
             x=start_x,
             y=start_y,
             hunger=float(self.spawn_rng.uniform(0.40, 0.60)),
@@ -592,14 +462,18 @@ class SpiderWorld:
             last_move_dy=0,
             heading_dx=initial_heading_dx,
             heading_dy=initial_heading_dy,
-            food_memory=self._empty_memory_slot(),
-            predator_memory=self._empty_memory_slot(),
-            shelter_memory=self._empty_memory_slot(),
-            escape_memory=self._empty_memory_slot(),
-            food_trace=self._empty_percept_trace(),
-            shelter_trace=self._empty_percept_trace(),
-            predator_trace=self._empty_percept_trace(),
+            food_memory=empty_memory_slot(),
+            predator_memory=empty_memory_slot(),
+            shelter_memory=empty_memory_slot(),
+            escape_memory=empty_memory_slot(),
+            food_trace=empty_percept_trace(),
+            shelter_trace=empty_percept_trace(),
+            predator_trace=empty_percept_trace(),
         )
+        field_name = _scan_tick_field_for_heading(initial_heading_dx, initial_heading_dy)
+        if field_name is not None:
+            setattr(state, field_name, int(getattr(self, "tick", 0)))
+        return state
 
     def reset(
         self,
@@ -626,6 +500,7 @@ class SpiderWorld:
         self._perceptual_buffer = PerceptualBuffer(self._perceptual_delay_ticks())
         self.tick = 0
         self.state = self._initial_spider_state(*self.map_template.spider_start)
+        reset_sleep_state(self)
         self._last_on_shelter = True
         self._last_predator_visible = False
         self._predator_threat_episode_active = False
@@ -881,117 +756,6 @@ class SpiderWorld:
         """
         return rest_streak_norm(self)
 
-    def _visible_range(self) -> int:
-        """
-        Get the visibility radius used for this world's perception.
-        
-        Returns:
-            visibility_radius (int): Maximum number of grid cells around an origin considered when computing visibility.
-        """
-        return visible_range(self)
-
-    def _visibility_confidence(
-        self,
-        *,
-        source: Tuple[int, int],
-        target: Tuple[int, int],
-        dist: int,
-        radius: int,
-        motion_bonus: float = 0.0,
-        visibility_zone: str = "foveal",
-    ) -> float:
-        """
-        Compute the visibility confidence that a target cell is visible from a source cell.
-        
-        Parameters:
-            source (Tuple[int, int]): (x, y) coordinates of the observation origin.
-            target (Tuple[int, int]): (x, y) coordinates of the target cell.
-            dist (int): Manhattan distance between source and target.
-            radius (int): Maximum visibility radius to consider.
-            motion_bonus (float): Extra confidence added for observed motion; defaults to 0.0.
-            visibility_zone (str): Foveal/peripheral/outside visual zone for the target.
-        
-        Returns:
-            float: Confidence score between 0.0 and 1.0 indicating the likelihood the target is visible from the source.
-        """
-        return visibility_confidence(
-            self,
-            source=source,
-            target=target,
-            dist=dist,
-            radius=radius,
-            motion_bonus=motion_bonus,
-            visibility_zone=visibility_zone,
-        )
-
-    @staticmethod
-    def _empty_reward_components() -> Dict[str, float]:
-        """
-        Create a new mapping of reward component names initialized to their default float values.
-        
-        Returns:
-            Dict[str, float]: A dictionary mapping each reward component key to its initial numeric value.
-        """
-        return empty_reward_components()
-
-    @staticmethod
-    def _reward_total(reward_components: Dict[str, float]) -> float:
-        """
-        Aggregate individual reward component values into a single total reward.
-        
-        Parameters:
-            reward_components (Dict[str, float]): Mapping from reward component names to their numeric values.
-        
-        Returns:
-            total (float): Total reward computed from the provided components.
-        """
-        return reward_total(reward_components)
-
-    @staticmethod
-    def _copy_reward_components(reward_components: Dict[str, float]) -> Dict[str, float]:
-        """
-        Return a shallow copy of the reward components mapping.
-        
-        Parameters:
-            reward_components (Dict[str, float]): Mapping from reward component names to their numeric values.
-        
-        Returns:
-            Dict[str, float]: A new dictionary containing the same keys and numeric values as `reward_components`.
-        """
-        return copy_reward_components(reward_components)
-
-    def _set_sleep_state(self, phase: str, rest_streak: int) -> None:
-        """
-        Update the spider's sleep phase and rest-streak counters in its state.
-        
-        Parameters:
-            phase (str): Label identifying the sleep phase to apply to the spider (for example "AWAKE" or "ASLEEP").
-            rest_streak (int): Number of consecutive ticks the spider has been resting; used to track/restoration and sleep-phase progression.
-        """
-        set_sleep_state(self, phase, rest_streak)
-
-    def _reset_sleep_state(self) -> None:
-        """
-        Reset the spider's sleep-related state to default values.
-        
-        Resets internal sleep bookkeeping (sleep phase, rest streak, and related flags) on the spider state so it begins from a neutral/default sleep configuration.
-        """
-        reset_sleep_state(self)
-
-    def _sleep_phase_from_streak(self, rest_streak: int, *, night: bool, shelter_role: str) -> str:
-        """
-        Map a rest streak and context to the corresponding sleep phase.
-        
-        Parameters:
-            rest_streak (int): Consecutive ticks the spider has been resting.
-            night (bool): Whether the current time is night.
-            shelter_role (str): One of the shelter role names (e.g., "outside", "entrance", "inside", "deep").
-        
-        Returns:
-            str: The sleep phase name for the given rest streak and context (e.g., "AWAKE", "LIGHT", "DEEP").
-        """
-        return sleep_phase_from_streak(rest_streak, night=night, shelter_role=shelter_role)
-
     def _line_cells(self, origin: Tuple[int, int], target: Tuple[int, int]) -> list[Tuple[int, int]]:
         """
         Return the ordered list of grid cells that form a straight line from origin to target, including both endpoints.
@@ -1007,84 +771,6 @@ class SpiderWorld:
 
         return line_cells(origin, target)
 
-    def _has_line_of_sight(
-        self,
-        origin: Tuple[int, int],
-        target: Tuple[int, int],
-        *,
-        block_clutter: bool = True,
-    ) -> bool:
-        """
-        Determine whether there is an unobstructed line of sight between two grid cells.
-        
-        Parameters:
-            origin (Tuple[int, int]): (x, y) coordinates of the source cell.
-            target (Tuple[int, int]): (x, y) coordinates of the destination cell.
-            block_clutter (bool): If True, treat clutter terrain as blocking sight; if False, clutter does not block sight.
-        
-        Returns:
-            bool: `True` if the target cell is visible from the origin (no blocking terrain or clutter per `block_clutter`), `False` otherwise.
-        """
-        return has_line_of_sight(self, origin, target, block_clutter=block_clutter)
-
-    def _visible_object(
-        self,
-        positions: Iterable[Tuple[int, int]],
-        *,
-        radius: int,
-        origin: Tuple[int, int] | None = None,
-        motion_bonus: float = 0.0,
-    ) -> PerceivedTarget:
-        """
-        Determine the perceived target among candidate positions from a source cell.
-        
-        Parameters:
-            positions (Iterable[Tuple[int, int]]): Candidate (x, y) positions to evaluate.
-            radius (int): Maximum sensing radius to consider.
-            origin (Tuple[int, int] | None): Source cell from which visibility is evaluated; if None, the spider's current position is used.
-            motion_bonus (float): Bonus added to visibility confidence for recently moving targets.
-        
-        Returns:
-            PerceivedTarget: Perception result for the supplied positions from the given origin (contains the selected target and associated visibility metrics).
-        """
-        return visible_object(
-            self,
-            positions,
-            radius=radius,
-            origin=origin,
-            motion_bonus=motion_bonus,
-        )
-
-    def _smell_gradient(
-        self,
-        positions: Iterable[Tuple[int, int]],
-        *,
-        radius: int,
-        origin: Tuple[int, int] | None = None,
-        apply_noise: bool = True,
-    ) -> tuple[float, float, float, int]:
-        """
-        Compute the smell gradient from the given source positions at a query origin within a search radius.
-        
-        Parameters:
-            positions (Iterable[Tuple[int, int]]): Source cell coordinates that emit the smell.
-            radius (int): Maximum Manhattan radius to consider when computing the gradient.
-            origin (tuple[int, int] | None): Query cell coordinates; if None, the spider's position is used.
-        
-        Returns:
-            tuple[float, float, float, int]: A 4-tuple containing (strength, grad_x, grad_y, distance) where
-                - strength (float): aggregated smell intensity at the origin,
-                - grad_x, grad_y (float): gradient components indicating smell direction,
-                - distance (int): Manhattan distance from the origin to the nearest source considered.
-        """
-        return smell_gradient(
-            self,
-            positions,
-            radius=radius,
-            origin=origin,
-            apply_noise=apply_noise,
-        )
-
     def lizard_detects_spider(self) -> bool:
         """
         Indicates whether the primary predator (lizard) currently detects the spider.
@@ -1094,73 +780,22 @@ class SpiderWorld:
         """
         return predator_detects_spider(self, self.lizard)
 
-    def _predator_visible_to_spider(self) -> PerceivedTarget:
-        """
-        Build a PerceivedTarget describing predator visibility from the spider's current position.
-        
-        Returns:
-            PerceivedTarget: Perception of predator(s) from the spider's viewpoint, including visibility flag, observed position, distance, certainty, and related observation metrics.
-        """
-        return predator_visible_to_spider(self)
-
-    def _memory_vector(self, slot: MemorySlot, *, ttl_name: str) -> tuple[float, float, float]:
-        """
-        Compute a fixed-length vector representation for a memory slot.
-        
-        Parameters:
-        	slot (MemorySlot): Memory slot to encode.
-        	ttl_name (str): Name of the TTL category used to normalize the memory's remaining lifetime.
-        
-        Returns:
-        	(dx_norm, dy_norm, ttl_frac) (tuple[float, float, float]): Normalized x and y components of the memory vector and the remaining time-to-live as a fraction between 0.0 and 1.0.
-        """
-        return memory_vector(self, slot, ttl_name=ttl_name)
-
-    def _age_or_clear_memory(self, slot: MemorySlot, *, ttl_name: str) -> None:
-        """
-        Age or clear a memory slot based on the named TTL policy.
-        
-        Parameters:
-            slot (MemorySlot): The memory slot to update; its internal age/TTL will be advanced and the slot cleared if it has expired.
-            ttl_name (str): The TTL category name used to look up expiration rules for the slot.
-        """
-        age_or_clear_memory(slot, ttl_name=ttl_name)
-
-    def _set_memory(self, slot: MemorySlot, target: Tuple[int, int] | None) -> None:
-        """
-        Set a memory slot to reference a target grid position or clear that memory.
-        
-        Parameters:
-            slot (MemorySlot): The memory slot to update.
-            target (Tuple[int, int] | None): Coordinates (x, y) to store in the slot, or `None` to clear it.
-        """
-        set_memory(slot, target)
-
-    def _escape_memory_target(self) -> Tuple[int, int]:
-        """
-        Get the target cell coordinates stored in the spider's escape memory.
-        
-        Returns:
-            (x, y) tuple of int: Coordinates of the escape target cell.
-        """
-        return escape_memory_target(self)
-
     def refresh_memory(self, *, predator_escape: bool = False, initial: bool = False) -> None:
         """
-        Enter the pipeline for perception-grounded memory maintenance.
+        Reset/setup convenience for perception-grounded memory maintenance.
         
         This ages and clears explicit memory slots by TTL, writes only targets
         derived from allowed perception/contact/movement sources, and advances
-        short percept traces. After updating memories it refreshes the
-        perceptual trace state and, when called with `initial=True`, clears the
-        perceptual buffer to establish a baseline.
+        short percept traces through `spider_cortex_sim.memory`. The tick
+        pipeline calls the memory subsystem directly; this method remains for
+        reset and scenario setup that also need to clear the perceptual buffer
+        baseline.
         
         Parameters:
             predator_escape (bool): If True, treat this refresh as occurring after a predator escape and update escape-related memory accordingly.
             initial (bool): If True, perform an initial/baseline refresh (used on reset) that avoids normal decay effects and clears the perceptual buffer.
         """
-        refresh_memory(self, predator_escape=predator_escape, initial=initial)
-        self._refresh_perceptual_state()
+        refresh_all_memory(self, predator_escape=predator_escape, initial=initial)
         if initial and hasattr(self, "_perceptual_buffer"):
             self._perceptual_buffer.clear()
 
@@ -1484,7 +1119,7 @@ class SpiderWorld:
                 - "occluded": list of cells (List[Tuple[int, int]]) within radius that do not have line of sight
         """
         source = origin if origin is not None else self.spider_pos()
-        radius = self._visible_range()
+        radius = visible_range(self)
         visible: List[Tuple[int, int]] = []
         occluded: List[Tuple[int, int]] = []
         for x in range(self.width):
@@ -1493,7 +1128,7 @@ class SpiderWorld:
                 dist = self.manhattan(source, pos)
                 if pos == source or dist > radius:
                     continue
-                if self._has_line_of_sight(source, pos):
+                if has_line_of_sight(self, source, pos):
                     visible.append(pos)
                 else:
                     occluded.append(pos)
@@ -1530,7 +1165,8 @@ class SpiderWorld:
         for y in range(self.height):
             row: List[float] = []
             for x in range(self.width):
-                strength, _, _, _ = self._smell_gradient(
+                strength, _, _, _ = smell_gradient(
+                    self,
                     positions,
                     radius=radius,
                     origin=(x, y),
@@ -1688,6 +1324,9 @@ class SpiderWorld:
         self.food_positions.append(self._random_food_cell())
 
     def _move(self, dx: int, dy: int) -> bool:
+        """
+        Minimal durable position mutation interface used by the action stage.
+        """
         target = (
             int(np.clip(self.state.x + dx, 0, self.width - 1)),
             int(np.clip(self.state.y + dy, 0, self.height - 1)),
@@ -1702,11 +1341,16 @@ class SpiderWorld:
         self.state.last_move_dy = dy if moved else 0
         if moved and (dx != 0 or dy != 0):
             self.state.heading_dx, self.state.heading_dy = self._heading_components_from_delta(dx, dy)
+            self._record_scan_for_heading(self.state.heading_dx, self.state.heading_dy)
         return moved
 
     def _move_spider_action(self, action_name: str) -> bool:
         """
         Set the spider's heading or execute a locomotion action.
+
+        This is the stage-facing movement mutation boundary: motor execution
+        decisions live outside `SpiderWorld`, while this method applies the
+        selected action to durable position, heading, and last-move state.
         
         For orientation actions (members of ORIENT_HEADINGS) this updates the spider's heading and clears the last-move deltas without changing position. For locomotion actions this attempts to move the spider by the corresponding ACTION_DELTAS.
         
@@ -1720,121 +1364,47 @@ class SpiderWorld:
             heading_dx, heading_dy = ORIENT_HEADINGS[action_name]
             self.state.heading_dx = int(heading_dx)
             self.state.heading_dy = int(heading_dy)
+            self._record_scan_for_heading(self.state.heading_dx, self.state.heading_dy)
+            self._refresh_perception_for_active_scan()
             self.state.last_move_dx = 0
             self.state.last_move_dy = 0
             return False
         dx, dy = ACTION_DELTAS[action_name]
         return self._move(dx, dy)
 
-    def _motor_slip_reason(self, components: Dict[str, float], *, base_slip_rate: float) -> str:
-        if base_slip_rate > 0.0 and components["raw_difficulty"] <= 0.0:
-            return "base"
-        scores = {
-            "terrain": components["terrain_difficulty"],
-            "orientation": components["orientation_mismatch"],
-            "fatigue": components["fatigue_factor"],
-        }
-        return max(scores, key=scores.get)
-
-    def _sample_slip_action(self, action_name: str) -> str:
-        adjacent = SLIP_ADJACENT_ACTIONS.get(action_name, ())
-        if not adjacent:
-            return action_name
-        candidates = ("STAY", *adjacent)
-        weights = np.array([0.6, *([0.4 / len(adjacent)] * len(adjacent))], dtype=float)
-        weights = weights / weights.sum()
-        index = int(self.motor_rng.choice(len(candidates), p=weights))
-        return candidates[index]
-
-    def _apply_motor_noise(self, action_name: str) -> Dict[str, object]:
+    def _update_momentum(
+        self,
+        action_name: str,
+        *,
+        previous_heading: tuple[int, int],
+        moved: bool,
+    ) -> None:
         """
-        Determine whether a locomotion action slips under current motor noise and which action is executed, returning diagnostics.
-        
-        Returns:
-            result (dict): A dictionary with keys:
-                - "occurred" (bool): `true` if a slip occurred, `false` otherwise.
-                - "reason" (str): Primary contributor to slip ("base", "terrain", "orientation", "fatigue", or "none").
-                - "original_action" (str): The requested action name.
-                - "executed_action" (str): The action ultimately executed (may differ if slip occurred).
-                - "slip_probability" (float): Probability in [0,1] that the action slips.
-                - "execution_difficulty" (float): Composite difficulty value in [0,1] used to scale slip pressure.
-                - "terrain" (hashable): Terrain value at the spider's current position.
-                - "components" (dict): Breakdown of intermediate difficulty components (includes keys such as "orientation_mismatch" and "fatigue_factor").
-                - "base_slip_rate" (float): Configured base flip probability clipped to [0,1].
-                - "orientation_slip_factor" (float): Configured multiplier for orientation contribution.
-                - "terrain_slip_factor" (float): Configured multiplier for terrain contribution.
-                - "fatigue_slip_factor" (float): Configured multiplier for fatigue contribution.
-        """
-        if action_name not in ACTIONS:
-            raise ValueError(f"Unknown locomotion action {action_name!r}.")
+        Update bounded execution momentum after the resolved action is applied.
 
-        cfg = self.noise_profile.motor
-        base_slip_rate = float(np.clip(cfg["action_flip_prob"], 0.0, 1.0))
-        orientation_factor = max(0.0, float(cfg["orientation_slip_factor"]))
-        terrain_factor = max(0.0, float(cfg["terrain_slip_factor"]))
-        fatigue_factor = max(0.0, float(cfg["fatigue_slip_factor"]))
+        Momentum builds only through successful aligned movement. Failed
+        movement attempts decay like interrupted locomotion instead of creating
+        movement continuity.
+        """
+        momentum = float(np.clip(self.state.momentum, 0.0, 1.0))
         if action_name in ORIENT_HEADINGS:
-            return {
-                "occurred": False,
-                "reason": "none",
-                "original_action": action_name,
-                "executed_action": action_name,
-                "slip_probability": 0.0,
-                "execution_difficulty": 0.0,
-                "terrain": "orientation_only",
-                "components": {
-                    "heading_dx": 0.0,
-                    "heading_dy": 0.0,
-                    "move_dx": 0.0,
-                    "move_dy": 0.0,
-                    "orientation_alignment": 1.0,
-                    "orientation_mismatch": 0.0,
-                    "terrain_difficulty": 0.0,
-                    "fatigue_factor": 0.0,
-                    "raw_difficulty": 0.0,
-                },
-                "base_slip_rate": base_slip_rate,
-                "orientation_slip_factor": orientation_factor,
-                "terrain_slip_factor": terrain_factor,
-                "fatigue_slip_factor": fatigue_factor,
-            }
+            self.state.momentum = 0.0
+            return
+        if action_name == "STAY" or not moved:
+            self.state.momentum = float(
+                np.clip(momentum * MOMENTUM_DECAY_ON_STOP, 0.0, 1.0)
+            )
+            return
 
-        heading = (float(self.state.heading_dx), float(self.state.heading_dy))
-        move_direction = ACTION_DELTAS.get(action_name, (0, 0))
-        terrain = self.terrain_at(self.spider_pos())
-        difficulty, components = compute_execution_difficulty(
-            heading,
-            move_direction,
-            terrain,
-            float(self.state.fatigue),
-        )
-        result: Dict[str, object] = {
-            "occurred": False,
-            "reason": "none",
-            "original_action": action_name,
-            "executed_action": action_name,
-            "slip_probability": 0.0,
-            "execution_difficulty": difficulty,
-            "terrain": terrain,
-            "components": dict(components),
-            "base_slip_rate": base_slip_rate,
-            "orientation_slip_factor": orientation_factor,
-            "terrain_slip_factor": terrain_factor,
-            "fatigue_slip_factor": fatigue_factor,
-        }
-        slip_pressure = difficulty * (
-            terrain_factor
-            + orientation_factor * components["orientation_mismatch"]
-            + fatigue_factor * components["fatigue_factor"]
-        )
-        slip_probability = float(np.clip(base_slip_rate + slip_pressure, 0.0, 1.0))
-        result["slip_probability"] = slip_probability
-        if action_name != "STAY" and slip_probability > 0.0:
-            if bool(float(self.motor_rng.random()) < slip_probability):
-                result["occurred"] = True
-                result["executed_action"] = self._sample_slip_action(action_name)
-                result["reason"] = self._motor_slip_reason(components, base_slip_rate=base_slip_rate)
-        return result
+        move_dx, move_dy = ACTION_DELTAS[action_name]
+        heading_dx, heading_dy = previous_heading
+        if (heading_dx, heading_dy) == (move_dx, move_dy):
+            momentum += MOMENTUM_BOOST_ON_SAME_DIR
+        elif (heading_dx, heading_dy) == (-move_dx, -move_dy):
+            momentum = 0.0
+        else:
+            momentum *= MOMENTUM_FRICTION_ON_TURN
+        self.state.momentum = float(np.clip(momentum, 0.0, 1.0))
 
     def _apply_predator_contact(
         self,
@@ -1855,28 +1425,6 @@ class SpiderWorld:
         apply_predator_contact(self, reward_components, info, tick_context=tick_context)
         if tick_context is not None:
             tick_context.predator_contact_applied = True
-
-    def _apply_wakefulness(self, *, night: bool, exposed: bool, interrupted_rest: bool) -> None:
-        """
-        Update the spider's wakefulness and related sleep-state fields based on current conditions.
-        
-        Parameters:
-            night (bool): True if the world is currently in the night phase.
-            exposed (bool): True if the spider is exposed to the environment (not sheltered) at this tick.
-            interrupted_rest (bool): True if the spider's ongoing rest was interrupted by action, predator threat, or movement.
-        """
-        apply_wakefulness(self, night=night, exposed=exposed, interrupted_rest=interrupted_rest)
-
-    def _apply_restoration(self, sleep_phase: str, *, night: bool, shelter_role: str) -> None:
-        """
-        Update the spider's physiological restoration state according to the current sleep phase, time of day, and shelter role.
-        
-        Parameters:
-            sleep_phase (str): Label of the spider's current sleep phase (e.g., "AWAKE", "SLEEP_PHASE_*").
-            night (bool): True if the world is currently in the night portion of the cycle.
-            shelter_role (str): Shelter role at the spider's position ("outside", "entrance", "inside", or "deep").
-        """
-        apply_restoration(self, sleep_phase, night=night, shelter_role=shelter_role)
 
     def _capture_tick_snapshot(self) -> TickSnapshot:
         """
@@ -1903,7 +1451,7 @@ class SpiderWorld:
             origin=self.spider_pos(),
         )
         visibility_threshold = self.operational_profile.reward["predator_visibility_threshold"]
-        prev_predator_visible = self._predator_visible_to_spider().visible > visibility_threshold
+        prev_predator_visible = predator_visible_to_spider(self).visible > visibility_threshold
         return TickSnapshot(
             tick=int(self.tick),
             spider_pos=self.spider_pos(),
@@ -1916,6 +1464,7 @@ class SpiderWorld:
             prev_predator_visible=bool(prev_predator_visible),
             night=bool(self.is_night()),
             rest_streak=int(self.state.rest_streak),
+            momentum=float(np.clip(self.state.momentum, 0.0, 1.0)),
         )
 
     def step(self, action_idx: int) -> tuple[Dict[str, object], float, bool, Dict[str, object]]:
@@ -1959,7 +1508,7 @@ class SpiderWorld:
             ttl_name = key.replace("_memory", "")
             state[key]["ttl"] = MEMORY_TTLS[ttl_name]
         for key in ("food_trace", "shelter_trace", "predator_trace"):
-            state[key] = self._trace_view(getattr(self.state, key))
+            state[key] = trace_view(self, getattr(self.state, key))
         predator_view = predator_visible_to_spider(self, apply_noise=False)
         state.update(
             {

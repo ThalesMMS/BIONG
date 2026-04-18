@@ -14,7 +14,10 @@ Covers:
 - build_action_context_observation / build_motor_context_observation
 """
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -22,30 +25,37 @@ import numpy as np
 
 from spider_cortex_sim.ablations import (
     BrainAblationConfig,
+    MONOLITHIC_POLICY_NAME,
     canonical_ablation_configs,
     default_brain_config,
 )
-from spider_cortex_sim.agent import ArbitrationDecision, BrainStep, SpiderBrain
+from spider_cortex_sim.agent import BrainStep, SpiderBrain
+from spider_cortex_sim.arbitration import ArbitrationDecision
 from spider_cortex_sim.bus import MessageBus
 from spider_cortex_sim.interfaces import (
     ACTION_CONTEXT_INTERFACE,
     ACTION_DELTAS,
+    ACTION_TO_INDEX,
     LOCOMOTION_ACTIONS,
     MODULE_INTERFACES,
     MOTOR_CONTEXT_INTERFACE,
+    MODULE_INTERFACE_BY_NAME,
     OBSERVATION_DIMS,
     ActionContextObservation,
     MotorContextObservation,
     architecture_signature,
 )
 from spider_cortex_sim.maps import CLUTTER, NARROW, OPEN
+from spider_cortex_sim.modules import CorticalModuleBank, ModuleResult
 from spider_cortex_sim.nn import ArbitrationNetwork, MotorNetwork, ProposalNetwork
+from spider_cortex_sim.noise import compute_execution_difficulty
+from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
 from spider_cortex_sim.perception import (
     PerceivedTarget,
     build_action_context_observation,
     build_motor_context_observation,
 )
-from spider_cortex_sim.world import SpiderWorld, compute_execution_difficulty
+from spider_cortex_sim.world import SpiderWorld
 
 
 # ---------------------------------------------------------------------------
@@ -60,11 +70,11 @@ def _null_percept() -> PerceivedTarget:
 def _blank_obs() -> dict[str, np.ndarray]:
     """
     Create a zero-filled observation mapping for every module and context interface.
-    
+
     Constructs a dict whose keys are each interface's `observation_key` (for all entries in
     `MODULE_INTERFACES`, plus `ACTION_CONTEXT_INTERFACE` and `MOTOR_CONTEXT_INTERFACE`) and
     whose values are NumPy arrays of zeros sized to the interface's `input_dim`.
-    
+
     Returns:
         dict[str, np.ndarray]: Mapping from observation key to zeroed observation vector.
     """
@@ -83,13 +93,13 @@ def _blank_obs() -> dict[str, np.ndarray]:
 def _module_interface(name: str):
     """
     Retrieve the module interface spec with the given name.
-    
+
     Parameters:
         name (str): The name of the module interface to find.
-    
+
     Returns:
         The matching module interface spec.
-    
+
     Raises:
         StopIteration: If no module interface with the given name exists.
     """
@@ -99,11 +109,11 @@ def _module_interface(name: str):
 def _vector_for(interface, **updates) -> np.ndarray:
     """
     Create a vector for the given interface by filling unspecified signals with 0.0 and applying provided signal-value updates.
-    
+
     Parameters:
         interface: An interface spec exposing `signal_names` and `vector_from_mapping(mapping)`; `signal_names` defines the ordered signal keys.
         **updates: Signal name → numeric value overrides to apply on top of zeros.
-    
+
     Returns:
         A numpy ndarray produced by `interface.vector_from_mapping(mapping)` where `mapping` contains all signals from `interface.signal_names` with unspecified signals set to 0.0 and specified signals set to the provided values.
     """
@@ -121,6 +131,14 @@ def _valence_vector(**updates: float) -> np.ndarray:
     for name, value in updates.items():
         values[index_by_name[name]] = float(value)
     return values
+
+
+def _profile_with_updates(**reward_updates: float) -> OperationalProfile:
+    summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+    summary["name"] = "action_center_test_profile"
+    summary["version"] = 21
+    summary["reward"].update({name: float(value) for name, value in reward_updates.items()})
+    return OperationalProfile.from_summary(summary)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +204,7 @@ class ArchitectureSignatureTest(unittest.TestCase):
     def test_action_center_signature_maps_module_roles(self) -> None:
         """
         Validate that the action_center arbitration configuration assigns expected valence roles to core modules and does not include the monolithic policy.
-        
+
         Asserts that:
         - "alert_center" maps to "threat"
         - "hunger_center" maps to "hunger"
@@ -231,16 +249,16 @@ class ArchitectureSignatureTest(unittest.TestCase):
     def test_motor_cortex_value_head_is_false(self) -> None:
         """
         Assert that the `motor_cortex` entry in the architecture signature does not include a value head.
-        
+
         Checks that `sig["motor_cortex"]["value_head"]` is `False`, ensuring the motor cortex is configured as a proposal-only module.
         """
         mc = self.sig["motor_cortex"]
         self.assertIs(mc["value_head"], False)
 
     def test_motor_cortex_inputs_count(self) -> None:
-        """motor_cortex must list exactly 13 input signal names."""
+        """motor_cortex must list exactly 14 input signal names."""
         mc = self.sig["motor_cortex"]
-        self.assertEqual(len(mc["inputs"]), 13)
+        self.assertEqual(len(mc["inputs"]), 14)
 
     def test_motor_cortex_inputs_match_interface(self) -> None:
         expected = [s.name for s in MOTOR_CONTEXT_INTERFACE.inputs]
@@ -340,7 +358,12 @@ class MotorContextInterfaceTest(unittest.TestCase):
         self.assertEqual(MOTOR_CONTEXT_INTERFACE.observation_key, "motor_context")
 
     def test_input_dim(self) -> None:
-        self.assertEqual(MOTOR_CONTEXT_INTERFACE.input_dim, 13)
+        self.assertEqual(MOTOR_CONTEXT_INTERFACE.input_dim, 14)
+
+    def test_motor_context_includes_momentum(self) -> None:
+        self.assertEqual(MOTOR_CONTEXT_INTERFACE.input_dim, 14)
+        self.assertEqual(OBSERVATION_DIMS["motor_context"], 14)
+        self.assertEqual(MOTOR_CONTEXT_INTERFACE.signal_names[-1], "momentum")
 
     def test_no_hunger_signal(self) -> None:
         """Motor context must NOT contain hunger (that belongs to action_center)."""
@@ -375,8 +398,8 @@ class MotorContextInterfaceTest(unittest.TestCase):
     def test_embodiment_signals_present(self) -> None:
         names = MOTOR_CONTEXT_INTERFACE.signal_names
         self.assertEqual(
-            names[-4:],
-            ("heading_dx", "heading_dy", "terrain_difficulty", "fatigue"),
+            names[-5:],
+            ("heading_dx", "heading_dy", "terrain_difficulty", "fatigue", "momentum"),
         )
 
     def test_role_context(self) -> None:
@@ -391,7 +414,7 @@ class ObservationDimsTest(unittest.TestCase):
         self.assertEqual(OBSERVATION_DIMS["action_context"], 15)
 
     def test_motor_context_dim(self) -> None:
-        self.assertEqual(OBSERVATION_DIMS["motor_context"], 13)
+        self.assertEqual(OBSERVATION_DIMS["motor_context"], 14)
 
     def test_both_present(self) -> None:
         self.assertIn("action_context", OBSERVATION_DIMS)
@@ -440,7 +463,7 @@ class ActionContextObservationCompositionTest(unittest.TestCase):
 
 
 class MotorContextObservationCompositionTest(unittest.TestCase):
-    """Tests that MotorContextObservation has the correct 13 fields."""
+    """Tests that MotorContextObservation has the correct 14 fields."""
 
     def test_observation_key(self) -> None:
         self.assertEqual(MotorContextObservation.observation_key, "motor_context")
@@ -462,19 +485,19 @@ class MotorContextObservationCompositionTest(unittest.TestCase):
 
     def test_embodiment_fields_present(self) -> None:
         names = MotorContextObservation.field_names()
-        for field in ("heading_dx", "heading_dy", "terrain_difficulty", "fatigue"):
+        for field in ("heading_dx", "heading_dy", "terrain_difficulty", "fatigue", "momentum"):
             with self.subTest(field=field):
                 self.assertIn(field, names)
 
-    def test_as_mapping_contains_all_13_fields(self) -> None:
+    def test_as_mapping_contains_all_14_fields(self) -> None:
         view = MotorContextObservation(
             on_food=0.0, on_shelter=0.0, predator_visible=0.0, predator_certainty=0.0,
             day=1.0, night=0.0, last_move_dx=0.0, last_move_dy=0.0,
             shelter_role_level=0.0, heading_dx=1.0, heading_dy=0.0,
-            terrain_difficulty=0.4, fatigue=0.2,
+            terrain_difficulty=0.4, fatigue=0.2, momentum=0.0,
         )
         mapping = view.as_mapping()
-        self.assertEqual(len(mapping), 13)
+        self.assertEqual(len(mapping), 14)
         self.assertNotIn("home_dx", mapping)
         self.assertNotIn("home_dy", mapping)
 
@@ -498,7 +521,7 @@ class BuildActionContextObservationTest(unittest.TestCase):
     def _build(self, **kwargs) -> ActionContextObservation:
         """
         Builds an ActionContextObservation for this object's world using provided overrides.
-        
+
         Parameters:
             on_food (float): 1.0 if the agent is on food, 0.0 otherwise (default 0.0).
             on_shelter (float): 1.0 if the agent is on shelter, 0.0 otherwise (default 0.0).
@@ -507,7 +530,7 @@ class BuildActionContextObservationTest(unittest.TestCase):
             night (float): Night indicator, typically 1.0 for night, 0.0 for day (default 0.0).
             shelter_role_level (float): Numeric level of shelter role influence (default 0.0).
             **kwargs: Any of the above may be passed as keyword arguments to override defaults.
-        
+
         Returns:
             ActionContextObservation: Observation object representing the action context for the current world state with the given overrides.
         """
@@ -578,7 +601,7 @@ class BuildActionContextObservationTest(unittest.TestCase):
     def test_predator_dist_not_exposed(self) -> None:
         """
         Asserts that the constructed observation object does not expose a `predator_dist` attribute.
-        
+
         This verifies the deprecated `predator_dist` signal is not present on the observation API.
         """
         result = self._build()
@@ -608,7 +631,7 @@ class BuildMotorContextObservationTest(unittest.TestCase):
     def _build(self, **kwargs) -> MotorContextObservation:
         """
         Builds a MotorContextObservation for this brain's world using optional overrides.
-        
+
         Parameters:
             on_food (float, optional): 1.0 if the agent is on food, otherwise 0.0. Defaults to 0.0.
             on_shelter (float, optional): 1.0 if the agent is on shelter, otherwise 0.0. Defaults to 0.0.
@@ -616,7 +639,7 @@ class BuildMotorContextObservationTest(unittest.TestCase):
             day (float, optional): Indicator value for daytime. Defaults to 1.0.
             night (float, optional): Indicator value for nighttime. Defaults to 0.0.
             shelter_role_level (float, optional): Role level related to shelter behavior. Defaults to 0.0.
-        
+
         Returns:
             MotorContextObservation: An observation containing execution-relevant motor context signals (e.g., on_food, on_shelter, predator visibility/certainty, last move deltas).
         """
@@ -660,7 +683,7 @@ class BuildMotorContextObservationTest(unittest.TestCase):
     def test_predator_dist_not_exposed(self) -> None:
         """
         Asserts that the constructed observation object does not expose a `predator_dist` attribute.
-        
+
         This verifies the deprecated `predator_dist` signal is not present on the observation API.
         """
         result = self._build()
@@ -686,6 +709,11 @@ class BuildMotorContextObservationTest(unittest.TestCase):
         self.world.state.fatigue = 0.42
         result = self._build()
         self.assertAlmostEqual(result.fatigue, 0.42, places=5)
+
+    def test_momentum_from_world_state(self) -> None:
+        self.world.state.momentum = 0.63
+        result = self._build()
+        self.assertAlmostEqual(result.momentum, 0.63, places=5)
 
     def test_terrain_difficulty_from_current_cell(self) -> None:
         pos = self.world.spider_pos()
@@ -743,7 +771,7 @@ class SpiderBrainArchitectureTest(unittest.TestCase):
     def setUp(self) -> None:
         """
         Initialize the test fixture by creating a deterministic SpiderBrain instance.
-        
+
         Creates a SpiderBrain with seed=42 and module_dropout=0.0 so tests run with reproducible weights and no module dropout.
         """
         self.brain = SpiderBrain(seed=42, module_dropout=0.0)
@@ -814,34 +842,6 @@ class SpiderBrainArchitectureTest(unittest.TestCase):
         self.assertIn("motor_cortex", norms)
 
 
-class SpiderBrainMonolithicArchitectureTest(unittest.TestCase):
-    def _config(self):
-        from spider_cortex_sim.ablations import BrainAblationConfig
-        return BrainAblationConfig(
-            name="monolithic_policy",
-            architecture="monolithic",
-            module_dropout=0.0,
-            enable_reflexes=False,
-            enable_auxiliary_targets=False,
-            disabled_modules=(),
-        )
-
-    def test_monolithic_module_names_includes_action_center(self) -> None:
-        brain = SpiderBrain(seed=2, config=self._config())
-        names = brain._module_names()
-        self.assertIn("monolithic_policy", names)
-        self.assertIn("arbitration_network", names)
-        self.assertIn("action_center", names)
-        self.assertIn("motor_cortex", names)
-
-    def test_monolithic_parameter_norms_includes_action_center(self) -> None:
-        brain = SpiderBrain(seed=3, config=self._config())
-        norms = brain.parameter_norms()
-        self.assertIn("arbitration_network", norms)
-        self.assertIn("action_center", norms)
-        self.assertIn("motor_cortex", norms)
-
-
 # ---------------------------------------------------------------------------
 # BrainStep new fields
 # ---------------------------------------------------------------------------
@@ -850,7 +850,7 @@ class BrainStepNewFieldsTest(unittest.TestCase):
     def setUp(self) -> None:
         """
         Prepare the test fixture by creating a SpiderBrain and a blank observation.
-        
+
         Sets:
             self.brain: a SpiderBrain instance initialized with seed 99 and module_dropout 0.0.
             self.obs: a blank observation mapping produced by _blank_obs().
@@ -861,12 +861,12 @@ class BrainStepNewFieldsTest(unittest.TestCase):
     def _obs_for_valence(self, valence: str) -> dict[str, np.ndarray]:
         """
         Construct a test observation dictionary whose module and context vectors are tuned to a specified behavioral valence.
-        
+
         This helper produces a mapping from observation keys (e.g., "action_context", "visual", "sensory", "hunger", "sleep", "alert") to numpy arrays representing interface vectors. Each returned vector encodes signal values chosen to exercise the corresponding valence so tests can validate arbitration, proposal, and downstream behaviour.
-        
+
         Parameters:
             valence (str): Target valence to simulate; expected values include "threat", "hunger", "sleep", and "exploration". The chosen valence affects which signals are elevated in the returned observation vectors.
-        
+
         Returns:
             dict[str, np.ndarray]: A mapping from observation names to their serialized numpy vector representations.
         """
@@ -997,11 +997,29 @@ class BrainStepNewFieldsTest(unittest.TestCase):
         step = self.brain.act(self.obs, bus=None, sample=False)
         self.assertIsInstance(step.orientation_alignment, float)
         self.assertIsInstance(step.terrain_difficulty, float)
+        self.assertIsInstance(step.momentum, float)
         self.assertIsInstance(step.execution_difficulty, float)
         self.assertIsInstance(step.execution_slip_occurred, bool)
         self.assertIsInstance(step.motor_noise_applied, bool)
         self.assertIsInstance(step.motor_slip_occurred, bool)
         self.assertEqual(step.slip_reason, "none")
+
+    def test_brainstep_includes_momentum_field(self) -> None:
+        step = self.brain.act(self.obs, bus=None, sample=False)
+
+        self.assertTrue(hasattr(step, "momentum"))
+        self.assertIsInstance(step.momentum, float)
+
+    def test_brain_step_momentum_comes_from_motor_context(self) -> None:
+        obs = _blank_obs()
+        obs["motor_context"] = _vector_for(
+            MOTOR_CONTEXT_INTERFACE,
+            momentum=0.73,
+        )
+
+        step = self.brain.act(obs, bus=None, sample=False)
+
+        self.assertAlmostEqual(step.momentum, 0.73)
 
     def test_motor_execution_diagnostics_follow_selected_action(self) -> None:
         obs = _blank_obs()
@@ -1025,6 +1043,25 @@ class BrainStepNewFieldsTest(unittest.TestCase):
         )
         self.assertAlmostEqual(step.terrain_difficulty, 0.7)
         self.assertAlmostEqual(step.execution_difficulty, expected_difficulty)
+
+    def test_motor_execution_diagnostics_use_momentum(self) -> None:
+        obs = _blank_obs()
+        obs["motor_context"] = _vector_for(
+            MOTOR_CONTEXT_INTERFACE,
+            heading_dx=1.0,
+            heading_dy=1.0,
+            terrain_difficulty=0.7,
+            fatigue=0.0,
+            momentum=0.8,
+        )
+
+        diagnostics = self.brain._motor_execution_diagnostics(
+            obs,
+            ACTION_TO_INDEX["MOVE_RIGHT"],
+        )
+
+        self.assertAlmostEqual(diagnostics["momentum"], 0.8)
+        self.assertLess(diagnostics["execution_difficulty"], 0.7)
 
     def test_action_center_input_has_expected_dim(self) -> None:
         """action_center_input must equal num_modules*action_dim + action_context_dim."""
@@ -1246,7 +1283,7 @@ class ObserveWorldActionContextTest(unittest.TestCase):
     def test_action_context_is_numpy_array(self) -> None:
         """
         Assert that the 'action_context' entry in the test observation is a NumPy ndarray.
-        
+
         Verifies the observation mapping includes the "action_context" key whose value is an instance of numpy.ndarray.
         """
         self.assertIsInstance(self.obs["action_context"], np.ndarray)
@@ -1254,9 +1291,9 @@ class ObserveWorldActionContextTest(unittest.TestCase):
     def test_action_context_shape(self) -> None:
         self.assertEqual(self.obs["action_context"].shape, (15,))
 
-    def test_motor_context_shape_is_13(self) -> None:
-        """After this PR, motor_context must have 13 elements."""
-        self.assertEqual(self.obs["motor_context"].shape, (13,))
+    def test_motor_context_shape_is_14(self) -> None:
+        """The motor_context vector includes momentum as field #14."""
+        self.assertEqual(self.obs["motor_context"].shape, (14,))
 
     def test_action_context_reflects_hunger(self) -> None:
         self.world.state.hunger = 0.66
@@ -1364,288 +1401,6 @@ class ActionCenterRegressionTest(unittest.TestCase):
 # ValenceScore serialization tests
 # ---------------------------------------------------------------------------
 
-class ValenceScoreSerializationTest(unittest.TestCase):
-    """Tests for ValenceScore.to_payload()."""
-
-    def _make(self, name="threat", score=0.75, evidence=None):
-        from spider_cortex_sim.agent import ValenceScore
-        if evidence is None:
-            evidence = {"predator_visible": 1.0, "recent_contact": 0.5}
-        return ValenceScore(name=name, score=score, evidence=evidence)
-
-    def test_to_payload_has_required_keys(self) -> None:
-        from spider_cortex_sim.agent import ValenceScore
-        vs = self._make()
-        payload = vs.to_payload()
-        self.assertIn("name", payload)
-        self.assertIn("score", payload)
-        self.assertIn("evidence", payload)
-
-    def test_to_payload_name_preserved(self) -> None:
-        from spider_cortex_sim.agent import ValenceScore
-        vs = self._make(name="hunger")
-        self.assertEqual(vs.to_payload()["name"], "hunger")
-
-    def test_to_payload_score_rounded_to_six_decimals(self) -> None:
-        from spider_cortex_sim.agent import ValenceScore
-        vs = self._make(score=0.123456789)
-        payload = vs.to_payload()
-        self.assertEqual(payload["score"], round(0.123456789, 6))
-
-    def test_to_payload_evidence_keys_sorted(self) -> None:
-        from spider_cortex_sim.agent import ValenceScore
-        vs = self._make(evidence={"z_key": 0.1, "a_key": 0.9, "m_key": 0.5})
-        payload = vs.to_payload()
-        keys = list(payload["evidence"].keys())
-        self.assertEqual(keys, sorted(keys))
-
-    def test_to_payload_evidence_values_rounded(self) -> None:
-        from spider_cortex_sim.agent import ValenceScore
-        vs = self._make(evidence={"k": 0.999999999})
-        payload = vs.to_payload()
-        self.assertEqual(payload["evidence"]["k"], round(0.999999999, 6))
-
-    def test_to_payload_empty_evidence(self) -> None:
-        from spider_cortex_sim.agent import ValenceScore
-        vs = self._make(evidence={})
-        payload = vs.to_payload()
-        self.assertEqual(payload["evidence"], {})
-
-    def test_to_payload_score_zero(self) -> None:
-        from spider_cortex_sim.agent import ValenceScore
-        vs = self._make(score=0.0)
-        self.assertEqual(vs.to_payload()["score"], 0.0)
-
-    def test_to_payload_is_json_serializable(self) -> None:
-        import json
-        from spider_cortex_sim.agent import ValenceScore
-        vs = self._make()
-        # Should not raise
-        json.dumps(vs.to_payload())
-
-
-# ---------------------------------------------------------------------------
-# ArbitrationDecision serialization tests
-# ---------------------------------------------------------------------------
-
-class ArbitrationDecisionSerializationTest(unittest.TestCase):
-    """Tests for ArbitrationDecision.to_payload()."""
-
-    def _make(self, winning_valence="threat", intent_before=0, intent_after=2):
-        from spider_cortex_sim.agent import ArbitrationDecision
-        return ArbitrationDecision(
-            strategy="priority_gating",
-            winning_valence=winning_valence,
-            valence_scores={"threat": 0.6, "hunger": 0.2, "sleep": 0.1, "exploration": 0.1},
-            module_gates={"alert_center": 1.0, "hunger_center": 0.18},
-            suppressed_modules=["hunger_center"],
-            evidence={
-                "threat": {"predator_visible": 1.0},
-                "hunger": {"hunger": 0.3},
-            },
-            intent_before_gating_idx=intent_before,
-            intent_after_gating_idx=intent_after,
-        )
-
-    def test_to_payload_strategy_preserved(self) -> None:
-        d = self._make()
-        payload = d.to_payload()
-        self.assertEqual(payload["strategy"], "priority_gating")
-
-    def test_to_payload_winning_valence_preserved(self) -> None:
-        d = self._make(winning_valence="hunger")
-        self.assertEqual(d.to_payload()["winning_valence"], "hunger")
-
-    def test_to_payload_has_all_required_keys(self) -> None:
-        payload = self._make().to_payload()
-        for key in ("strategy", "winning_valence", "valence_scores", "module_gates",
-                    "valence_logits", "base_gates", "gate_adjustments",
-                    "arbitration_value", "learned_adjustment",
-                    "guards_applied", "food_bias_applied", "food_bias_action",
-                    "module_contribution_share", "dominant_module", "dominant_module_share",
-                    "effective_module_count", "module_agreement_rate", "module_disagreement_rate",
-                    "suppressed_modules", "evidence", "intent_before_gating", "intent_after_gating"):
-            self.assertIn(key, payload)
-
-    def test_legacy_constructor_keeps_new_payload_fields_with_defaults(self) -> None:
-        payload = self._make().to_payload()
-        self.assertEqual(payload["valence_logits"], {})
-        self.assertEqual(payload["base_gates"], {})
-        self.assertEqual(payload["gate_adjustments"], {})
-        self.assertEqual(payload["arbitration_value"], 0.0)
-        self.assertFalse(payload["learned_adjustment"])
-        self.assertFalse(payload["guards_applied"])
-        self.assertFalse(payload["food_bias_applied"])
-        self.assertIsNone(payload["food_bias_action"])
-        self.assertEqual(payload["module_contribution_share"], {})
-        self.assertEqual(payload["dominant_module"], "")
-        self.assertEqual(payload["dominant_module_share"], 0.0)
-        self.assertEqual(payload["effective_module_count"], 0.0)
-        self.assertEqual(payload["module_agreement_rate"], 0.0)
-        self.assertEqual(payload["module_disagreement_rate"], 0.0)
-
-    def test_to_payload_module_contribution_share_sorted(self) -> None:
-        from spider_cortex_sim.agent import ArbitrationDecision
-        d = ArbitrationDecision(
-            strategy="priority_gating",
-            winning_valence="threat",
-            valence_scores={},
-            module_gates={},
-            suppressed_modules=[],
-            evidence={},
-            intent_before_gating_idx=0,
-            intent_after_gating_idx=0,
-            module_contribution_share={"visual_cortex": 0.25, "alert_center": 0.75},
-        )
-        keys = list(d.to_payload()["module_contribution_share"].keys())
-        self.assertEqual(keys, sorted(keys))
-
-    def test_to_payload_new_metrics_rounded(self) -> None:
-        from spider_cortex_sim.agent import ArbitrationDecision
-        d = ArbitrationDecision(
-            strategy="priority_gating",
-            winning_valence="threat",
-            valence_scores={},
-            module_gates={},
-            suppressed_modules=[],
-            evidence={},
-            intent_before_gating_idx=0,
-            intent_after_gating_idx=0,
-            module_contribution_share={"alert_center": 0.3333333333},
-            dominant_module="alert_center",
-            dominant_module_share=0.7777777777,
-            effective_module_count=1.6666666666,
-            module_agreement_rate=0.8888888888,
-            module_disagreement_rate=0.1111111111,
-        )
-        payload = d.to_payload()
-        self.assertEqual(payload["module_contribution_share"]["alert_center"], round(0.3333333333, 6))
-        self.assertEqual(payload["dominant_module"], "alert_center")
-        self.assertEqual(payload["dominant_module_share"], round(0.7777777777, 6))
-        self.assertEqual(payload["effective_module_count"], round(1.6666666666, 6))
-        self.assertEqual(payload["module_agreement_rate"], round(0.8888888888, 6))
-        self.assertEqual(payload["module_disagreement_rate"], round(0.1111111111, 6))
-
-    def test_to_payload_intent_before_gating_is_action_name(self) -> None:
-        d = self._make(intent_before=0)
-        payload = d.to_payload()
-        self.assertIn(payload["intent_before_gating"], LOCOMOTION_ACTIONS)
-
-    def test_to_payload_intent_after_gating_is_action_name(self) -> None:
-        d = self._make(intent_after=2)
-        payload = d.to_payload()
-        self.assertIn(payload["intent_after_gating"], LOCOMOTION_ACTIONS)
-
-    def test_to_payload_intent_names_differ_when_indices_differ(self) -> None:
-        d = self._make(intent_before=0, intent_after=1)
-        payload = d.to_payload()
-        self.assertNotEqual(payload["intent_before_gating"], payload["intent_after_gating"])
-
-    def test_to_payload_intent_names_same_when_indices_same(self) -> None:
-        d = self._make(intent_before=3, intent_after=3)
-        payload = d.to_payload()
-        self.assertEqual(payload["intent_before_gating"], payload["intent_after_gating"])
-
-    def test_to_payload_valence_scores_sorted(self) -> None:
-        d = self._make()
-        payload = d.to_payload()
-        keys = list(payload["valence_scores"].keys())
-        self.assertEqual(keys, sorted(keys))
-
-    def test_to_payload_module_gates_sorted(self) -> None:
-        d = self._make()
-        payload = d.to_payload()
-        keys = list(payload["module_gates"].keys())
-        self.assertEqual(keys, sorted(keys))
-
-    def test_to_payload_suppressed_modules_is_list(self) -> None:
-        d = self._make()
-        self.assertIsInstance(d.to_payload()["suppressed_modules"], list)
-
-    def test_to_payload_evidence_inner_keys_sorted(self) -> None:
-        from spider_cortex_sim.agent import ArbitrationDecision
-        d = ArbitrationDecision(
-            strategy="priority_gating",
-            winning_valence="threat",
-            valence_scores={},
-            module_gates={},
-            suppressed_modules=[],
-            evidence={"threat": {"z": 1.0, "a": 0.5}},
-            intent_before_gating_idx=0,
-            intent_after_gating_idx=0,
-        )
-        evidence_threat = d.to_payload()["evidence"]["threat"]
-        keys = list(evidence_threat.keys())
-        self.assertEqual(keys, sorted(keys))
-
-    def test_to_payload_is_json_serializable(self) -> None:
-        import json
-        json.dumps(self._make().to_payload())
-
-    def test_to_payload_valence_scores_rounded(self) -> None:
-        from spider_cortex_sim.agent import ArbitrationDecision
-        d = ArbitrationDecision(
-            strategy="priority_gating",
-            winning_valence="threat",
-            valence_scores={"threat": 0.1111111111},
-            module_gates={},
-            suppressed_modules=[],
-            evidence={},
-            intent_before_gating_idx=0,
-            intent_after_gating_idx=0,
-        )
-        payload = d.to_payload()
-        self.assertEqual(payload["valence_scores"]["threat"], round(0.1111111111, 6))
-
-    def test_to_payload_exports_legacy_predator_proximity_for_scorers(self) -> None:
-        d = self._make()
-        self.assertNotIn("predator_proximity", d.evidence["threat"])
-        payload = d.to_payload()
-        self.assertEqual(payload["evidence"]["threat"]["predator_proximity"], 0.0)
-
-
-# ---------------------------------------------------------------------------
-# SpiderBrain._clamp_unit tests
-# ---------------------------------------------------------------------------
-
-class ClampUnitTest(unittest.TestCase):
-    """Tests for SpiderBrain._clamp_unit."""
-
-    def test_value_below_zero_clamped_to_zero(self) -> None:
-        self.assertEqual(SpiderBrain._clamp_unit(-0.5), 0.0)
-
-    def test_value_above_one_clamped_to_one(self) -> None:
-        self.assertEqual(SpiderBrain._clamp_unit(1.5), 1.0)
-
-    def test_exact_zero_unchanged(self) -> None:
-        self.assertEqual(SpiderBrain._clamp_unit(0.0), 0.0)
-
-    def test_exact_one_unchanged(self) -> None:
-        self.assertEqual(SpiderBrain._clamp_unit(1.0), 1.0)
-
-    def test_midrange_value_unchanged(self) -> None:
-        self.assertAlmostEqual(SpiderBrain._clamp_unit(0.5), 0.5)
-
-    def test_returns_float(self) -> None:
-        result = SpiderBrain._clamp_unit(0.3)
-        self.assertIsInstance(result, float)
-
-    def test_large_negative_clamped_to_zero(self) -> None:
-        self.assertEqual(SpiderBrain._clamp_unit(-100.0), 0.0)
-
-    def test_large_positive_clamped_to_one(self) -> None:
-        self.assertEqual(SpiderBrain._clamp_unit(100.0), 1.0)
-
-    def test_very_small_positive_preserved(self) -> None:
-        result = SpiderBrain._clamp_unit(1e-10)
-        self.assertGreater(result, 0.0)
-        self.assertLessEqual(result, 1.0)
-
-
-# ---------------------------------------------------------------------------
-# SpiderBrain._bound_observation tests
-# ---------------------------------------------------------------------------
-
 class BoundObservationTest(unittest.TestCase):
     """Tests for SpiderBrain._bound_observation."""
 
@@ -1694,723 +1449,6 @@ class BoundObservationTest(unittest.TestCase):
 # SpiderBrain._compute_arbitration tests
 # ---------------------------------------------------------------------------
 
-class ComputeArbitrationTest(unittest.TestCase):
-    """Tests for SpiderBrain._compute_arbitration."""
-
-    def setUp(self) -> None:
-        self.brain = SpiderBrain(seed=3, module_dropout=0.0)
-        self.obs = _blank_obs()
-
-    def _get_arbitration(self, obs=None):
-        if obs is None:
-            obs = self.obs
-        step = self.brain.act(obs, bus=None, sample=False)
-        return step.arbitration_decision
-
-    def _make_brain_with_arbitration_winner(
-        self,
-        *,
-        seed: int,
-        winner: str,
-        config: BrainAblationConfig | None = None,
-        config_name: str | None = None,
-    ) -> SpiderBrain:
-        if config is not None and config_name is not None:
-            raise ValueError("Provide either config or config_name, not both.")
-        if config_name is not None:
-            config = canonical_ablation_configs(module_dropout=0.0)[config_name]
-        if config is None:
-            brain = SpiderBrain(seed=seed, module_dropout=0.0)
-        else:
-            brain = SpiderBrain(seed=seed, config=config)
-        brain.arbitration_network.W2_valence.fill(0.0)
-        brain.arbitration_network.b2_valence[:] = _valence_vector(**{winner: 5.0})
-        return brain
-
-    def _build_obs(
-        self,
-        *,
-        action_context_kwargs: dict[str, float],
-        module_name: str,
-        module_kwargs: dict[str, float],
-    ) -> dict[str, np.ndarray]:
-        obs = _blank_obs()
-        obs["action_context"] = _vector_for(
-            ACTION_CONTEXT_INTERFACE,
-            **action_context_kwargs,
-        )
-        iface = _module_interface(module_name)
-        obs[iface.observation_key] = _vector_for(iface, **module_kwargs)
-        return obs
-
-    def test_returns_arbitration_decision(self) -> None:
-        from spider_cortex_sim.agent import ArbitrationDecision
-        arb = self._get_arbitration()
-        self.assertIsInstance(arb, ArbitrationDecision)
-
-    def test_strategy_is_priority_gating(self) -> None:
-        arb = self._get_arbitration()
-        self.assertEqual(arb.strategy, "priority_gating")
-
-    def test_valence_scores_sum_to_one(self) -> None:
-        arb = self._get_arbitration()
-        total = sum(arb.valence_scores.values())
-        self.assertAlmostEqual(total, 1.0, places=5)
-
-    def test_valence_scores_all_non_negative(self) -> None:
-        arb = self._get_arbitration()
-        for score in arb.valence_scores.values():
-            self.assertGreaterEqual(score, 0.0)
-
-    def test_winning_valence_is_in_valence_order(self) -> None:
-        arb = self._get_arbitration()
-        self.assertIn(arb.winning_valence, SpiderBrain.VALENCE_ORDER)
-
-    def test_module_gates_contains_all_active_modules(self) -> None:
-        arb = self._get_arbitration()
-        for iface in MODULE_INTERFACES:
-            self.assertIn(iface.name, arb.module_gates)
-
-    def test_module_gate_values_in_unit_range(self) -> None:
-        arb = self._get_arbitration()
-        for weight in arb.module_gates.values():
-            self.assertGreaterEqual(weight, 0.0)
-            self.assertLessEqual(weight, 1.0)
-
-    def test_learned_arbitration_fields_are_present(self) -> None:
-        arb = self._get_arbitration()
-        self.assertEqual(set(arb.valence_logits.keys()), set(SpiderBrain.VALENCE_ORDER))
-        self.assertEqual(set(arb.base_gates.keys()), set(arb.module_gates.keys()))
-        self.assertEqual(set(arb.gate_adjustments.keys()), set(arb.module_gates.keys()))
-        self.assertTrue(arb.learned_adjustment)
-        self.assertTrue(np.isfinite(arb.arbitration_value))
-        self.assertFalse(arb.guards_applied)
-        self.assertFalse(arb.food_bias_applied)
-        self.assertIsNone(arb.food_bias_action)
-
-    def test_default_config_trace_payload_marks_scaffolding_inactive(self) -> None:
-        bus = MessageBus()
-
-        step = self.brain.act(self.obs, bus=bus, sample=False, training=False)
-        selection_messages = bus.topic_messages("action.selection")
-        self.assertTrue(selection_messages)
-        selection_payload = selection_messages[-1].payload
-
-        self.assertFalse(step.arbitration_decision.guards_applied)
-        self.assertFalse(step.arbitration_decision.food_bias_applied)
-        self.assertIsNone(step.arbitration_decision.food_bias_action)
-        self.assertIn("guards_applied", selection_payload)
-        self.assertIn("food_bias_applied", selection_payload)
-        self.assertIn("food_bias_action", selection_payload)
-        self.assertFalse(selection_payload["guards_applied"])
-        self.assertFalse(selection_payload["food_bias_applied"])
-        self.assertIsNone(selection_payload["food_bias_action"])
-
-    def test_gate_adjustments_are_constrained_before_final_clamp(self) -> None:
-        arb = self._get_arbitration()
-        for adjustment in arb.gate_adjustments.values():
-            self.assertGreaterEqual(adjustment, ArbitrationNetwork.GATE_ADJUSTMENT_MIN)
-            self.assertLessEqual(adjustment, ArbitrationNetwork.GATE_ADJUSTMENT_MAX)
-
-    def test_fixed_arbitration_config_uses_fixed_formula_path(self) -> None:
-        """
-        Verify that when learned arbitration is disabled the brain follows the fixed-formula arbitration path.
-        
-        Asserts that:
-        - the arbitration decision marks learned_adjustment as False,
-        - the arbitration network cache is None,
-        - every module's gate_adjustment equals 1.0 and module_gates equal the reported base_gates,
-        - arbitration_value equals 0.0.
-        """
-        brain = SpiderBrain(
-            seed=3,
-            module_dropout=0.0,
-            config=BrainAblationConfig(
-                name="fixed_arbitration_baseline",
-                use_learned_arbitration=False,
-            ),
-        )
-        step = brain.act(self.obs, bus=None, sample=False)
-        arb = step.arbitration_decision
-        self.assertIsNotNone(arb)
-        self.assertFalse(arb.learned_adjustment)
-        self.assertIsNone(brain.arbitration_network.cache)
-        for module_name, base_gate in arb.base_gates.items():
-            self.assertAlmostEqual(arb.gate_adjustments[module_name], 1.0)
-            self.assertAlmostEqual(arb.module_gates[module_name], base_gate)
-        self.assertAlmostEqual(arb.arbitration_value, 0.0)
-
-    def test_learned_arbitration_uses_learned_winner_under_food_predator_conflict(self) -> None:
-        """
-        Assert that the benchmark path does not force a hard threat override when strong predator signals conflict with high hunger.
-        
-        The selected valence should be the learned deterministic winner for the
-        current scores, with deterministic guards left inactive by default.
-        """
-        obs = _blank_obs()
-        obs["action_context"] = _vector_for(
-            ACTION_CONTEXT_INTERFACE,
-            hunger=0.96,
-            day=1.0,
-            predator_visible=1.0,
-            predator_certainty=0.9,
-        )
-        obs["alert"] = _vector_for(
-            _module_interface("alert_center"),
-            predator_visible=1.0,
-            predator_certainty=0.9,
-            predator_motion_salience=0.8,
-            predator_smell_strength=0.7,
-        )
-        obs["hunger"] = _vector_for(
-            _module_interface("hunger_center"),
-            hunger=0.96,
-            food_visible=1.0,
-            food_certainty=0.9,
-            food_smell_strength=0.8,
-            food_memory_age=0.0,
-        )
-
-        arb = self._get_arbitration(obs)
-
-        self.assertTrue(arb.learned_adjustment)
-        self.assertFalse(arb.guards_applied)
-        self.assertEqual(
-            arb.winning_valence,
-            self.brain._deterministic_valence_winner(arb.valence_scores),
-        )
-
-    def test_deterministic_threat_guard_disabled_by_default(self) -> None:
-        obs = self._build_obs(
-            action_context_kwargs={
-                "predator_visible": 1.0,
-                "predator_certainty": 0.9,
-            },
-            module_name="alert_center",
-            module_kwargs={
-                "predator_visible": 1.0,
-                "predator_certainty": 0.9,
-            },
-        )
-        self.brain.arbitration_network.W2_valence.fill(0.0)
-        self.brain.arbitration_network.b2_valence[:] = _valence_vector(hunger=5.0)
-        module_results = self.brain._proposal_results(
-            obs,
-            store_cache=False,
-            training=False,
-        )
-
-        arb = self.brain._compute_arbitration(
-            module_results,
-            obs,
-            training=False,
-            store_cache=False,
-        )
-
-        self.assertEqual(arb.winning_valence, "hunger")
-        self.assertFalse(arb.guards_applied)
-
-    def test_deterministic_threat_guard_can_be_enabled(self) -> None:
-        brain = self._make_brain_with_arbitration_winner(
-            seed=3,
-            winner="hunger",
-            config_name="constrained_arbitration",
-        )
-        obs = self._build_obs(
-            action_context_kwargs={
-                "predator_visible": 1.0,
-                "predator_certainty": 0.9,
-            },
-            module_name="alert_center",
-            module_kwargs={
-                "predator_visible": 1.0,
-                "predator_certainty": 0.9,
-            },
-        )
-        module_results = brain._proposal_results(
-            obs,
-            store_cache=False,
-            training=False,
-        )
-
-        arb = brain._compute_arbitration(
-            module_results,
-            obs,
-            training=False,
-            store_cache=False,
-        )
-
-        self.assertEqual(arb.winning_valence, "threat")
-        self.assertTrue(arb.guards_applied)
-
-    def test_deterministic_hunger_guard_can_be_enabled(self) -> None:
-        brain = self._make_brain_with_arbitration_winner(
-            seed=3,
-            winner="exploration",
-            config_name="constrained_arbitration",
-        )
-        obs = self._build_obs(
-            action_context_kwargs={
-                "hunger": 0.9,
-                "night": 0.0,
-            },
-            module_name="hunger_center",
-            module_kwargs={
-                "hunger": 0.9,
-            },
-        )
-        module_results = brain._proposal_results(
-            obs,
-            store_cache=False,
-            training=False,
-        )
-
-        arb = brain._compute_arbitration(
-            module_results,
-            obs,
-            training=False,
-            store_cache=False,
-        )
-
-        self.assertEqual(arb.winning_valence, "hunger")
-        self.assertTrue(arb.guards_applied)
-
-    def test_food_direction_bias_disabled_by_default(self) -> None:
-        brain = self._make_brain_with_arbitration_winner(
-            seed=5,
-            winner="hunger",
-            config=default_brain_config(module_dropout=0.0),
-        )
-        obs = self._build_obs(
-            action_context_kwargs={
-                "hunger": 0.9,
-                "day": 1.0,
-            },
-            module_name="hunger_center",
-            module_kwargs={
-                "hunger": 0.9,
-                "food_visible": 1.0,
-                "food_certainty": 1.0,
-                "food_dx": 1.0,
-                "food_dy": 0.0,
-            },
-        )
-
-        step = brain.act(obs, bus=None, sample=False, training=False)
-
-        self.assertEqual(step.arbitration_decision.winning_valence, "hunger")
-        self.assertFalse(step.arbitration_decision.food_bias_applied)
-        self.assertIsNone(step.arbitration_decision.food_bias_action)
-
-    def test_food_direction_bias_can_be_enabled(self) -> None:
-        base_brain = self._make_brain_with_arbitration_winner(
-            seed=5,
-            winner="hunger",
-            config=default_brain_config(module_dropout=0.0),
-        )
-        biased_brain = self._make_brain_with_arbitration_winner(
-            seed=5,
-            winner="hunger",
-            config_name="constrained_arbitration",
-        )
-        obs = self._build_obs(
-            action_context_kwargs={
-                "hunger": 0.9,
-                "day": 1.0,
-            },
-            module_name="hunger_center",
-            module_kwargs={
-                "hunger": 0.9,
-                "food_visible": 1.0,
-                "food_certainty": 1.0,
-                "food_dx": 1.0,
-                "food_dy": 0.0,
-            },
-        )
-
-        base_step = base_brain.act(obs, bus=None, sample=False, training=False)
-        biased_step = biased_brain.act(obs, bus=None, sample=False, training=False)
-
-        self.assertFalse(base_step.arbitration_decision.food_bias_applied)
-        self.assertTrue(biased_step.arbitration_decision.food_bias_applied)
-        self.assertEqual(biased_step.arbitration_decision.food_bias_action, "MOVE_RIGHT")
-        diff = biased_step.total_logits - base_step.total_logits
-        expected = np.zeros_like(diff)
-        expected[LOCOMOTION_ACTIONS.index("MOVE_RIGHT")] = 3.0
-        np.testing.assert_allclose(diff, expected)
-
-    def test_food_direction_bias_skips_stay_direction(self) -> None:
-        brain = self._make_brain_with_arbitration_winner(
-            seed=5,
-            winner="hunger",
-            config_name="constrained_arbitration",
-        )
-        obs = self._build_obs(
-            action_context_kwargs={
-                "hunger": 0.9,
-                "day": 1.0,
-            },
-            module_name="hunger_center",
-            module_kwargs={
-                "hunger": 0.9,
-                "food_visible": 1.0,
-                "food_certainty": 1.0,
-                "food_dx": 0.04,
-                "food_dy": 0.04,
-            },
-        )
-
-        step = brain.act(obs, bus=None, sample=False, training=False)
-
-        self.assertEqual(step.arbitration_decision.winning_valence, "hunger")
-        self.assertFalse(step.arbitration_decision.food_bias_applied)
-        self.assertIsNone(step.arbitration_decision.food_bias_action)
-
-    def test_food_bias_flip_does_not_count_as_final_reflex_override(self) -> None:
-        config = BrainAblationConfig(
-            name="food_bias_telemetry_regression",
-            module_dropout=0.0,
-            enable_reflexes=False,
-            enable_deterministic_guards=True,
-            enable_food_direction_bias=True,
-        )
-        brain = SpiderBrain(seed=5, config=config)
-        self.assertIsNotNone(brain.module_bank)
-        for network in brain.module_bank.modules.values():
-            network.W1.fill(0.0)
-            network.b1.fill(0.0)
-            network.W2.fill(0.0)
-            network.b2.fill(0.0)
-        brain.action_center.W1.fill(0.0)
-        brain.action_center.b1.fill(0.0)
-        brain.action_center.W2_policy.fill(0.0)
-        brain.action_center.b2_policy.fill(0.0)
-        brain.action_center.W2_value.fill(0.0)
-        brain.action_center.b2_value.fill(0.0)
-        brain.motor_cortex.W1.fill(0.0)
-        brain.motor_cortex.b1.fill(0.0)
-        brain.motor_cortex.W2.fill(0.0)
-        brain.motor_cortex.b2.fill(0.0)
-        brain.arbitration_network.W2_valence.fill(0.0)
-        brain.arbitration_network.b2_valence[:] = _valence_vector(hunger=5.0)
-        obs = _blank_obs()
-        obs["action_context"] = _vector_for(
-            ACTION_CONTEXT_INTERFACE,
-            hunger=0.9,
-            day=1.0,
-        )
-        obs["hunger"] = _vector_for(
-            _module_interface("hunger_center"),
-            hunger=0.9,
-            food_visible=1.0,
-            food_certainty=1.0,
-            food_dx=1.0,
-            food_dy=0.0,
-        )
-
-        step = brain.act(obs, bus=None, sample=False, training=False)
-
-        self.assertTrue(step.arbitration_decision.food_bias_applied)
-        self.assertEqual(step.arbitration_decision.food_bias_action, "MOVE_RIGHT")
-        self.assertEqual(step.motor_action_idx, LOCOMOTION_ACTIONS.index("MOVE_RIGHT"))
-        self.assertFalse(step.final_reflex_override)
-
-    def test_regularization_term_is_reported_when_enabled(self) -> None:
-        """
-        Verify that arbitration regularization metrics are included and positive when training is enabled and arbitration gate parameters are non-zero.
-        
-        This test enables a non-zero gate head bias, performs an action step in training mode, calls the learning update, and asserts that the returned statistics contain a positive "regularization_loss" and a positive "arbitration_gate_regularization_norm".
-        """
-        self.brain.arbitration_network.b2_gate.fill(1.25)
-        decision = self.brain.act(self.obs, bus=None, sample=False, training=True)
-
-        stats = self.brain.learn(
-            decision,
-            reward=0.25,
-            next_observation=self.obs,
-            done=True,
-        )
-
-        self.assertGreater(stats["regularization_loss"], 0.0)
-        self.assertGreater(stats["arbitration_gate_regularization_norm"], 0.0)
-
-    def test_suppressed_modules_is_list(self) -> None:
-        arb = self._get_arbitration()
-        self.assertIsInstance(arb.suppressed_modules, list)
-
-    def test_evidence_contains_four_valences(self) -> None:
-        arb = self._get_arbitration()
-        for valence in SpiderBrain.VALENCE_ORDER:
-            self.assertIn(valence, arb.evidence)
-
-    def test_intent_indices_are_valid_action_indices(self) -> None:
-        arb = self._get_arbitration()
-        self.assertIn(arb.intent_before_gating_idx, range(len(LOCOMOTION_ACTIONS)))
-        self.assertIn(arb.intent_after_gating_idx, range(len(LOCOMOTION_ACTIONS)))
-
-    def test_blank_obs_defaults_exploration_wins_or_has_nonzero_score(self) -> None:
-        # With blank (all-zero) observation, exploration should have score > 0
-        # because residual_drive is high when threat/hunger/sleep are zero
-        arb = self._get_arbitration()
-        self.assertGreater(arb.valence_scores["exploration"], 0.0)
-
-    def test_suppressed_modules_are_subset_of_module_gate_keys(self) -> None:
-        arb = self._get_arbitration()
-        for name in arb.suppressed_modules:
-            self.assertIn(name, arb.module_gates)
-
-    def test_suppressed_module_gates_are_less_than_one(self) -> None:
-        arb = self._get_arbitration()
-        for name in arb.suppressed_modules:
-            self.assertLess(arb.module_gates[name], 0.999)
-
-    def test_threat_evidence_has_expected_keys(self) -> None:
-        arb = self._get_arbitration()
-        for key in ("predator_visible", "predator_certainty", "predator_motion_salience",
-                    "recent_contact", "recent_pain", "predator_smell_strength"):
-            self.assertIn(key, arb.evidence["threat"])
-
-    def test_hunger_evidence_has_expected_keys(self) -> None:
-        arb = self._get_arbitration()
-        for key in ("hunger", "on_food", "food_visible", "food_certainty",
-                    "food_smell_strength", "food_memory_freshness"):
-            self.assertIn(key, arb.evidence["hunger"])
-
-    def test_sleep_evidence_has_expected_keys(self) -> None:
-        arb = self._get_arbitration()
-        for key in ("fatigue", "sleep_debt", "night", "on_shelter",
-                    "shelter_role_level", "shelter_path_confidence"):
-            self.assertIn(key, arb.evidence["sleep"])
-
-    def test_exploration_evidence_has_expected_keys(self) -> None:
-        arb = self._get_arbitration()
-        for key in ("safety_margin", "residual_drive", "day", "off_shelter",
-                    "visual_openness", "food_smell_directionality"):
-            self.assertIn(key, arb.evidence["exploration"])
-
-    def test_threat_evidence_does_not_contain_predator_proximity(self) -> None:
-        """Regression: predator_proximity was removed from threat evidence in this PR."""
-        arb = self._get_arbitration()
-        self.assertNotIn("predator_proximity", arb.evidence["threat"])
-
-    def test_decision_logic_uses_abstract_predator_evidence_only(self) -> None:
-        """Runtime arbitration evidence uses abstract predator signals, not diagnostic distances."""
-        forbidden = {"diagnostic_predator_dist", "predator_dist"}
-        obs = _blank_obs()
-        obs["action_context"] = _vector_for(
-            ACTION_CONTEXT_INTERFACE,
-            predator_visible=1.0,
-            predator_certainty=0.75,
-            recent_contact=0.25,
-            recent_pain=0.5,
-        )
-        obs["alert"] = _vector_for(
-            _module_interface("alert_center"),
-            predator_motion_salience=0.6,
-            predator_smell_strength=0.4,
-        )
-
-        arb = self._get_arbitration(obs)
-        threat = arb.evidence["threat"]
-
-        self.assertAlmostEqual(threat["predator_visible"], 1.0)
-        self.assertAlmostEqual(threat["predator_certainty"], 0.75)
-        self.assertAlmostEqual(threat["predator_motion_salience"], 0.6)
-        self.assertAlmostEqual(threat["recent_contact"], 0.25)
-        self.assertAlmostEqual(threat["recent_pain"], 0.5)
-        self.assertAlmostEqual(threat["predator_smell_strength"], 0.4)
-        for valence, evidence in arb.evidence.items():
-            with self.subTest(valence=valence):
-                self.assertTrue(all(0.0 <= float(value) <= 1.0 for value in evidence.values()))
-                for name in forbidden:
-                    self.assertNotIn(name, evidence)
-
-    def test_sleep_evidence_does_not_contain_home_pressure(self) -> None:
-        """Regression: home_pressure was removed from sleep evidence in this PR."""
-        arb = self._get_arbitration()
-        self.assertNotIn("home_pressure", arb.evidence["sleep"])
-
-    def test_threat_evidence_predator_motion_salience_in_zero_to_one(self) -> None:
-        """predator_motion_salience evidence value must be clamped to [0, 1]."""
-        arb = self._get_arbitration()
-        val = arb.evidence["threat"]["predator_motion_salience"]
-        self.assertGreaterEqual(val, 0.0)
-        self.assertLessEqual(val, 1.0)
-
-    def test_sleep_evidence_shelter_path_confidence_in_zero_to_one(self) -> None:
-        """shelter_path_confidence evidence value must be clamped to [0, 1]."""
-        arb = self._get_arbitration()
-        val = arb.evidence["sleep"]["shelter_path_confidence"]
-        self.assertGreaterEqual(val, 0.0)
-        self.assertLessEqual(val, 1.0)
-
-
-# ---------------------------------------------------------------------------
-# SpiderBrain._apply_priority_gating tests
-# ---------------------------------------------------------------------------
-
-class ApplyPriorityGatingTest(unittest.TestCase):
-    """Tests for SpiderBrain._apply_priority_gating."""
-
-    def setUp(self) -> None:
-        self.brain = SpiderBrain(seed=11, module_dropout=0.0)
-        self.obs = _blank_obs()
-
-    def test_apply_priority_gating_sets_gate_weight(self) -> None:
-        step = self.brain.act(self.obs, bus=None, sample=False)
-        for result in step.module_results:
-            self.assertIsNotNone(result.gate_weight)
-            self.assertIsInstance(result.gate_weight, float)
-
-    def test_apply_priority_gating_sets_gated_logits(self) -> None:
-        step = self.brain.act(self.obs, bus=None, sample=False)
-        for result in step.module_results:
-            self.assertIsNotNone(result.gated_logits)
-            self.assertEqual(result.gated_logits.shape, result.probs.shape)
-
-    def test_apply_priority_gating_sets_valence_role(self) -> None:
-        step = self.brain.act(self.obs, bus=None, sample=False)
-        for result in step.module_results:
-            self.assertIsNotNone(result.valence_role)
-            self.assertIsInstance(result.valence_role, str)
-
-    def test_alert_center_has_threat_valence_role(self) -> None:
-        step = self.brain.act(self.obs, bus=None, sample=False)
-        alert = next(r for r in step.module_results if r.name == "alert_center")
-        self.assertEqual(alert.valence_role, "threat")
-
-    def test_sleep_center_has_sleep_valence_role(self) -> None:
-        step = self.brain.act(self.obs, bus=None, sample=False)
-        sleep = next(r for r in step.module_results if r.name == "sleep_center")
-        self.assertEqual(sleep.valence_role, "sleep")
-
-    def test_visual_cortex_has_support_valence_role(self) -> None:
-        step = self.brain.act(self.obs, bus=None, sample=False)
-        visual = next(r for r in step.module_results if r.name == "visual_cortex")
-        self.assertEqual(visual.valence_role, "support")
-
-    def test_probs_sum_to_one_after_gating(self) -> None:
-        step = self.brain.act(self.obs, bus=None, sample=False)
-        for result in step.module_results:
-            self.assertAlmostEqual(float(np.sum(result.probs)), 1.0, places=5)
-
-    def test_gate_weight_one_for_primary_module_under_threat(self) -> None:
-        # When threat wins, alert_center should have gate_weight = 1.0
-        obs = _blank_obs()
-        obs["action_context"] = _vector_for(
-            ACTION_CONTEXT_INTERFACE,
-            predator_visible=1.0,
-            predator_certainty=1.0,
-            recent_contact=1.0,
-            recent_pain=0.8,
-        )
-        obs["alert"] = _vector_for(
-            _module_interface("alert_center"),
-            predator_visible=1.0,
-            predator_smell_strength=1.0,
-            predator_motion_salience=1.0,
-        )
-        step = self.brain.act(obs, bus=None, sample=False)
-        if step.arbitration_decision.winning_valence == "threat":
-            alert = next(r for r in step.module_results if r.name == "alert_center")
-            self.assertAlmostEqual(alert.gate_weight, 1.0, places=5)
-
-
-# ---------------------------------------------------------------------------
-# PRIORITY_GATING_WEIGHTS constant tests
-# ---------------------------------------------------------------------------
-
-class PriorityGatingWeightsTest(unittest.TestCase):
-    """Tests for SpiderBrain.PRIORITY_GATING_WEIGHTS table correctness."""
-
-    def test_all_four_valences_present(self) -> None:
-        for valence in SpiderBrain.VALENCE_ORDER:
-            self.assertIn(valence, SpiderBrain.PRIORITY_GATING_WEIGHTS)
-
-    def test_each_valence_has_all_module_entries(self) -> None:
-        expected_modules = {
-            "alert_center", "hunger_center", "sleep_center",
-            "visual_cortex", "sensory_cortex", SpiderBrain.MONOLITHIC_POLICY_NAME,
-        }
-        for valence, weights in SpiderBrain.PRIORITY_GATING_WEIGHTS.items():
-            self.assertEqual(set(weights.keys()), expected_modules,
-                             f"Missing modules for valence '{valence}'")
-
-    def test_threat_primary_module_has_weight_one(self) -> None:
-        self.assertAlmostEqual(
-            SpiderBrain.PRIORITY_GATING_WEIGHTS["threat"]["alert_center"], 1.0
-        )
-
-    def test_threat_suppresses_hunger_center(self) -> None:
-        w = SpiderBrain.PRIORITY_GATING_WEIGHTS["threat"]["hunger_center"]
-        self.assertLess(w, 0.5)
-
-    def test_hunger_primary_module_has_weight_one(self) -> None:
-        self.assertAlmostEqual(
-            SpiderBrain.PRIORITY_GATING_WEIGHTS["hunger"]["hunger_center"], 1.0
-        )
-
-    def test_sleep_primary_module_has_weight_one(self) -> None:
-        self.assertAlmostEqual(
-            SpiderBrain.PRIORITY_GATING_WEIGHTS["sleep"]["sleep_center"], 1.0
-        )
-
-    def test_exploration_visual_cortex_high_weight(self) -> None:
-        w = SpiderBrain.PRIORITY_GATING_WEIGHTS["exploration"]["visual_cortex"]
-        self.assertGreater(w, 0.9)
-
-    def test_all_gate_weights_in_unit_range(self) -> None:
-        for valence, weights in SpiderBrain.PRIORITY_GATING_WEIGHTS.items():
-            for module, weight in weights.items():
-                self.assertGreaterEqual(weight, 0.0,
-                    f"Gate weight for {valence}/{module} is negative")
-                self.assertLessEqual(weight, 1.0,
-                    f"Gate weight for {valence}/{module} exceeds 1.0")
-
-    def test_monolithic_policy_always_weight_one(self) -> None:
-        for valence in SpiderBrain.VALENCE_ORDER:
-            self.assertAlmostEqual(
-                SpiderBrain.PRIORITY_GATING_WEIGHTS[valence][SpiderBrain.MONOLITHIC_POLICY_NAME],
-                1.0,
-            )
-
-    def test_sleep_suppresses_hunger_center(self) -> None:
-        w = SpiderBrain.PRIORITY_GATING_WEIGHTS["sleep"]["hunger_center"]
-        self.assertLess(w, 0.5)
-
-    def test_missing_module_gate_weight_raises_clear_error(self) -> None:
-        incomplete_weights = {
-            valence: dict(weights)
-            for valence, weights in SpiderBrain.PRIORITY_GATING_WEIGHTS.items()
-        }
-        del incomplete_weights["threat"]["alert_center"]
-        obs = _blank_obs()
-        obs["action_context"] = _vector_for(
-            ACTION_CONTEXT_INTERFACE,
-            predator_visible=1.0,
-            predator_certainty=1.0,
-            recent_contact=1.0,
-            recent_pain=0.8,
-        )
-        obs["alert"] = _vector_for(
-            _module_interface("alert_center"),
-            predator_visible=1.0,
-            predator_smell_strength=1.0,
-            predator_motion_salience=1.0,
-        )
-        with patch.object(SpiderBrain, "PRIORITY_GATING_WEIGHTS", incomplete_weights):
-            brain = SpiderBrain(seed=5, module_dropout=0.0)
-            with self.assertRaisesRegex(
-                ValueError,
-                "Priority gating weights missing module 'alert_center'",
-            ):
-                brain.act(obs, bus=None, sample=False)
-
-
-# ---------------------------------------------------------------------------
-# MODULE_VALENCE_ROLES constant tests
-# ---------------------------------------------------------------------------
-
 class ModuleValenceRolesTest(unittest.TestCase):
     """Tests for SpiderBrain.MODULE_VALENCE_ROLES mapping."""
 
@@ -2450,9 +1488,9 @@ class ModuleResultNewFieldsDefaultsTest(unittest.TestCase):
     def _make_result(self):
         """
         Create a default ModuleResult for testing with neutral action scores and a placeholder observation.
-        
+
         The returned ModuleResult has zero `logits`, uniform `probs` across `LOCOMOTION_ACTIONS`, `name` set to "test_module", `observation_key` set to "test", a zero-valued observation of length 3, and `active` set to True.
-        
+
         Returns:
             ModuleResult: A test ModuleResult instance populated as described above.
         """
@@ -2514,7 +1552,7 @@ class ValenceNormalizationEdgeCaseTest(unittest.TestCase):
         obs = _blank_obs()
         module_results = brain._proposal_results(obs, store_cache=False, training=False)
 
-        with unittest.mock.patch.object(brain, '_clamp_unit', return_value=0.0):
+        with unittest.mock.patch("spider_cortex_sim.agent.clamp_unit", return_value=0.0):
             arb = brain._compute_arbitration(module_results, obs)
 
         for valence in SpiderBrain.VALENCE_ORDER:
@@ -2650,548 +1688,6 @@ class ArchitectureSignatureArbitrationParamShapesTest(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 # SpiderBrain._arbitration_evidence_input_dim tests
-# ---------------------------------------------------------------------------
-
-class ArbitrationEvidenceInputDimTest(unittest.TestCase):
-    """Tests for SpiderBrain._arbitration_evidence_input_dim classmethod."""
-
-    def test_returns_24(self) -> None:
-        self.assertEqual(SpiderBrain._arbitration_evidence_input_dim(), 24)
-
-    def test_is_classmethod_accessible(self) -> None:
-        # Should be callable on the class, not just an instance
-        result = SpiderBrain._arbitration_evidence_input_dim()
-        self.assertIsInstance(result, int)
-
-    def test_matches_arbitration_network_input_dim(self) -> None:
-        self.assertEqual(
-            SpiderBrain._arbitration_evidence_input_dim(),
-            ArbitrationNetwork.INPUT_DIM,
-        )
-
-    def test_equals_sum_of_evidence_fields(self) -> None:
-        total = sum(len(fields) for fields in SpiderBrain.ARBITRATION_EVIDENCE_FIELDS.values())
-        self.assertEqual(SpiderBrain._arbitration_evidence_input_dim(), total)
-
-
-# ---------------------------------------------------------------------------
-# SpiderBrain._arbitration_evidence_signal_names tests
-# ---------------------------------------------------------------------------
-
-class ArbitrationEvidenceSignalNamesTest(unittest.TestCase):
-    """Tests for SpiderBrain._arbitration_evidence_signal_names classmethod."""
-
-    def test_returns_tuple(self) -> None:
-        self.assertIsInstance(SpiderBrain._arbitration_evidence_signal_names(), tuple)
-
-    def test_length_is_24(self) -> None:
-        self.assertEqual(len(SpiderBrain._arbitration_evidence_signal_names()), 24)
-
-    def test_first_signal_is_threat_predator_visible(self) -> None:
-        names = SpiderBrain._arbitration_evidence_signal_names()
-        self.assertEqual(names[0], "threat.predator_visible")
-
-    def test_last_signal_is_exploration_food_smell_directionality(self) -> None:
-        names = SpiderBrain._arbitration_evidence_signal_names()
-        self.assertEqual(names[-1], "exploration.food_smell_directionality")
-
-    def test_all_names_have_valence_prefix(self) -> None:
-        names = SpiderBrain._arbitration_evidence_signal_names()
-        valences = set(SpiderBrain.VALENCE_ORDER)
-        for name in names:
-            prefix = name.split(".")[0]
-            self.assertIn(prefix, valences, f"Signal {name!r} has unknown valence prefix")
-
-    def test_matches_arbitration_network_evidence_signal_names(self) -> None:
-        self.assertEqual(
-            SpiderBrain._arbitration_evidence_signal_names(),
-            ArbitrationNetwork.EVIDENCE_SIGNAL_NAMES,
-        )
-
-    def test_threat_signals_come_before_hunger(self) -> None:
-        names = SpiderBrain._arbitration_evidence_signal_names()
-        threat_indices = [i for i, n in enumerate(names) if n.startswith("threat.")]
-        hunger_indices = [i for i, n in enumerate(names) if n.startswith("hunger.")]
-        self.assertLess(max(threat_indices), min(hunger_indices))
-
-    def test_hunger_signals_come_before_sleep(self) -> None:
-        names = SpiderBrain._arbitration_evidence_signal_names()
-        hunger_indices = [i for i, n in enumerate(names) if n.startswith("hunger.")]
-        sleep_indices = [i for i, n in enumerate(names) if n.startswith("sleep.")]
-        self.assertLess(max(hunger_indices), min(sleep_indices))
-
-    def test_sleep_signals_come_before_exploration(self) -> None:
-        names = SpiderBrain._arbitration_evidence_signal_names()
-        sleep_indices = [i for i, n in enumerate(names) if n.startswith("sleep.")]
-        exploration_indices = [i for i, n in enumerate(names) if n.startswith("exploration.")]
-        self.assertLess(max(sleep_indices), min(exploration_indices))
-
-    def test_each_valence_has_six_signals(self) -> None:
-        names = SpiderBrain._arbitration_evidence_signal_names()
-        for valence in SpiderBrain.VALENCE_ORDER:
-            count = sum(1 for n in names if n.startswith(f"{valence}."))
-            self.assertEqual(count, 6, f"Expected 6 signals for {valence}, got {count}")
-
-
-# ---------------------------------------------------------------------------
-# SpiderBrain._arbitration_evidence_vector tests
-# ---------------------------------------------------------------------------
-
-class ArbitrationEvidenceVectorTest(unittest.TestCase):
-    """Tests for SpiderBrain._arbitration_evidence_vector."""
-
-    def setUp(self) -> None:
-        self.brain = SpiderBrain(seed=42, module_dropout=0.0)
-
-    def _blank_evidence(self) -> dict:
-        return {
-            valence: {field: 0.0 for field in fields}
-            for valence, fields in SpiderBrain.ARBITRATION_EVIDENCE_FIELDS.items()
-        }
-
-    def test_returns_array_of_length_24(self) -> None:
-        evidence = self._blank_evidence()
-        vec = self.brain._arbitration_evidence_vector(evidence)
-        self.assertEqual(vec.shape, (24,))
-
-    def test_returns_float_array(self) -> None:
-        evidence = self._blank_evidence()
-        vec = self.brain._arbitration_evidence_vector(evidence)
-        self.assertEqual(vec.dtype, float)
-
-    def test_all_zeros_for_blank_evidence(self) -> None:
-        evidence = self._blank_evidence()
-        vec = self.brain._arbitration_evidence_vector(evidence)
-        np.testing.assert_array_equal(vec, np.zeros(24))
-
-    def test_first_element_is_threat_predator_visible(self) -> None:
-        evidence = self._blank_evidence()
-        evidence["threat"]["predator_visible"] = 0.75
-        vec = self.brain._arbitration_evidence_vector(evidence)
-        self.assertAlmostEqual(float(vec[0]), 0.75)
-
-    def test_seventh_element_is_hunger_hunger(self) -> None:
-        # threat has 6 fields, so hunger starts at index 6
-        evidence = self._blank_evidence()
-        evidence["hunger"]["hunger"] = 0.55
-        vec = self.brain._arbitration_evidence_vector(evidence)
-        self.assertAlmostEqual(float(vec[6]), 0.55)
-
-    def test_last_element_is_exploration_food_smell_directionality(self) -> None:
-        evidence = self._blank_evidence()
-        evidence["exploration"]["food_smell_directionality"] = 0.33
-        vec = self.brain._arbitration_evidence_vector(evidence)
-        self.assertAlmostEqual(float(vec[-1]), 0.33)
-
-    def test_output_matches_signal_names_ordering(self) -> None:
-        evidence = self._blank_evidence()
-        # Set each signal to a unique value based on its index
-        signal_names = SpiderBrain._arbitration_evidence_signal_names()
-        for idx, name in enumerate(signal_names):
-            valence, field = name.split(".", 1)
-            evidence[valence][field] = float(idx + 1) * 0.01
-        vec = self.brain._arbitration_evidence_vector(evidence)
-        for idx in range(24):
-            self.assertAlmostEqual(float(vec[idx]), float(idx + 1) * 0.01, places=8)
-
-
-# ---------------------------------------------------------------------------
-# SpiderBrain._fixed_formula_valence_scores_from_evidence tests
-# ---------------------------------------------------------------------------
-
-class FixedFormulaValenceScoresTest(unittest.TestCase):
-    """Tests for SpiderBrain._fixed_formula_valence_scores_from_evidence."""
-
-    def setUp(self) -> None:
-        self.brain = SpiderBrain(seed=42, module_dropout=0.0)
-
-    def _blank_evidence(self) -> dict:
-        return {
-            "threat": {
-                "predator_visible": 0.0, "predator_certainty": 0.0,
-                "predator_motion_salience": 0.0, "recent_contact": 0.0,
-                "recent_pain": 0.0, "predator_smell_strength": 0.0,
-            },
-            "hunger": {
-                "hunger": 0.0, "on_food": 0.0, "food_visible": 0.0,
-                "food_certainty": 0.0, "food_smell_strength": 0.0,
-                "food_memory_freshness": 0.0,
-            },
-            "sleep": {
-                "fatigue": 0.0, "sleep_debt": 0.0, "night": 0.0,
-                "on_shelter": 0.0, "shelter_role_level": 0.0,
-                "shelter_path_confidence": 0.0,
-            },
-            "exploration": {
-                "safety_margin": 0.0, "residual_drive": 0.0, "day": 0.0,
-                "off_shelter": 0.0, "visual_openness": 0.0,
-                "food_smell_directionality": 0.0,
-            },
-        }
-
-    def test_returns_array_of_length_4(self) -> None:
-        evidence = self._blank_evidence()
-        scores = self.brain._fixed_formula_valence_scores_from_evidence(evidence)
-        self.assertEqual(scores.shape, (4,))
-
-    def test_all_zero_evidence_returns_exploration_fallback(self) -> None:
-        evidence = self._blank_evidence()
-        scores = self.brain._fixed_formula_valence_scores_from_evidence(evidence)
-        # Fallback: [0.0, 0.0, 0.0, 1.0] = exploration
-        np.testing.assert_array_almost_equal(scores, [0.0, 0.0, 0.0, 1.0])
-
-    def test_scores_sum_to_one_for_nonzero_input(self) -> None:
-        evidence = self._blank_evidence()
-        evidence["threat"]["predator_visible"] = 0.8
-        evidence["hunger"]["hunger"] = 0.5
-        scores = self.brain._fixed_formula_valence_scores_from_evidence(evidence)
-        self.assertAlmostEqual(float(np.sum(scores)), 1.0, places=6)
-
-    def test_scores_are_non_negative(self) -> None:
-        evidence = self._blank_evidence()
-        evidence["sleep"]["fatigue"] = 0.9
-        scores = self.brain._fixed_formula_valence_scores_from_evidence(evidence)
-        self.assertTrue(np.all(scores >= 0.0))
-
-    def test_high_predator_visible_dominates_threat_score(self) -> None:
-        evidence = self._blank_evidence()
-        evidence["threat"]["predator_visible"] = 1.0
-        evidence["threat"]["predator_certainty"] = 1.0
-        scores = self.brain._fixed_formula_valence_scores_from_evidence(evidence)
-        # threat should be the largest score
-        threat_idx = SpiderBrain.VALENCE_ORDER.index("threat")
-        self.assertEqual(int(np.argmax(scores)), threat_idx)
-
-    def test_high_hunger_dominates_hunger_score(self) -> None:
-        evidence = self._blank_evidence()
-        evidence["hunger"]["hunger"] = 1.0
-        evidence["hunger"]["food_visible"] = 1.0
-        scores = self.brain._fixed_formula_valence_scores_from_evidence(evidence)
-        hunger_idx = SpiderBrain.VALENCE_ORDER.index("hunger")
-        self.assertEqual(int(np.argmax(scores)), hunger_idx)
-
-    def test_high_fatigue_and_night_dominates_sleep_score(self) -> None:
-        evidence = self._blank_evidence()
-        evidence["sleep"]["fatigue"] = 1.0
-        evidence["sleep"]["sleep_debt"] = 1.0
-        evidence["sleep"]["night"] = 1.0
-        evidence["sleep"]["on_shelter"] = 1.0
-        scores = self.brain._fixed_formula_valence_scores_from_evidence(evidence)
-        sleep_idx = SpiderBrain.VALENCE_ORDER.index("sleep")
-        self.assertEqual(int(np.argmax(scores)), sleep_idx)
-
-    def test_float_array_output(self) -> None:
-        evidence = self._blank_evidence()
-        evidence["exploration"]["residual_drive"] = 0.5
-        scores = self.brain._fixed_formula_valence_scores_from_evidence(evidence)
-        self.assertEqual(scores.dtype, float)
-
-    def test_scores_ordered_by_valence_order(self) -> None:
-        evidence = self._blank_evidence()
-        evidence["threat"]["predator_visible"] = 0.9
-        scores = self.brain._fixed_formula_valence_scores_from_evidence(evidence)
-        # First element is threat (index 0 in VALENCE_ORDER)
-        self.assertEqual(SpiderBrain.VALENCE_ORDER[0], "threat")
-        self.assertGreater(float(scores[0]), 0.0)
-
-
-# ---------------------------------------------------------------------------
-# SpiderBrain._warm_start_arbitration_network tests
-# ---------------------------------------------------------------------------
-
-def _small_arbitration_evidence_vector() -> np.ndarray:
-    return np.linspace(0.01, 0.24, ArbitrationNetwork.INPUT_DIM, dtype=float)
-
-
-def _assert_relative_scaled_logits(
-    test_case: unittest.TestCase,
-    scaled_logits: np.ndarray,
-    reference_logits: np.ndarray,
-    scale: float,
-    *,
-    max_relative_error: float = 1e-4,
-) -> None:
-    expected = scale * reference_logits
-    denominator = float(np.linalg.norm(reference_logits)) + 1e-12
-    relative_error = float(
-        np.linalg.norm(scaled_logits - expected) / denominator
-    )
-    test_case.assertLess(relative_error, max_relative_error)
-
-
-class WarmStartArbitrationNetworkTest(unittest.TestCase):
-    """Tests for SpiderBrain._warm_start_arbitration_network."""
-
-    def setUp(self) -> None:
-        self.brain = SpiderBrain(seed=42, module_dropout=0.0)
-
-    def test_warm_start_clears_network_cache(self) -> None:
-        # Force a forward pass to set cache
-        evidence_vector = np.zeros(ArbitrationNetwork.INPUT_DIM)
-        self.brain.arbitration_network.forward(evidence_vector, store_cache=True)
-        self.assertIsNotNone(self.brain.arbitration_network.cache)
-        self.brain._warm_start_arbitration_network()
-        self.assertIsNone(self.brain.arbitration_network.cache)
-
-    def test_warm_start_sets_w1_diagonal(self) -> None:
-        self.brain._warm_start_arbitration_network()
-        net = self.brain.arbitration_network
-        # W1 should have non-zero values on the diagonal (first input_dim rows)
-        for i in range(net.input_dim):
-            self.assertNotEqual(net.W1[i, i], 0.0,
-                                f"W1[{i},{i}] should be non-zero after warm start")
-
-    def test_warm_start_zeros_b1(self) -> None:
-        self.brain._warm_start_arbitration_network()
-        np.testing.assert_array_equal(self.brain.arbitration_network.b1, 0.0)
-
-    def test_warm_start_zeros_b2_valence(self) -> None:
-        self.brain._warm_start_arbitration_network()
-        np.testing.assert_array_equal(self.brain.arbitration_network.b2_valence, 0.0)
-
-    def test_warm_start_zeros_gate_head(self) -> None:
-        self.brain._warm_start_arbitration_network()
-        np.testing.assert_array_equal(self.brain.arbitration_network.W2_gate, 0.0)
-        np.testing.assert_array_equal(self.brain.arbitration_network.b2_gate, 0.0)
-
-    def test_warm_start_zeros_value_head(self) -> None:
-        self.brain._warm_start_arbitration_network()
-        np.testing.assert_array_equal(self.brain.arbitration_network.W2_value, 0.0)
-        np.testing.assert_array_equal(self.brain.arbitration_network.b2_value, 0.0)
-
-    def test_warm_started_network_produces_finite_outputs(self) -> None:
-        self.brain._warm_start_arbitration_network()
-        evidence_vector = np.linspace(0.0, 1.0, ArbitrationNetwork.INPUT_DIM)
-        valence_logits, gate_adjustments, value = self.brain.arbitration_network.forward(
-            evidence_vector, store_cache=False
-        )
-        self.assertTrue(np.all(np.isfinite(valence_logits)))
-        self.assertTrue(np.all(np.isfinite(gate_adjustments)))
-        self.assertTrue(np.isfinite(value))
-
-    def test_warm_start_valence_head_produces_nonzero_threat_logit_for_threat_input(self) -> None:
-        self.brain._warm_start_arbitration_network()
-        # Create a vector with only threat signals active
-        evidence_vector = np.zeros(ArbitrationNetwork.INPUT_DIM)
-        # First 6 slots are threat signals; set predator_visible (slot 0) to 1.0
-        evidence_vector[0] = 1.0
-        valence_logits, _, _ = self.brain.arbitration_network.forward(
-            evidence_vector, store_cache=False
-        )
-        # Threat logit (index 0) should be dominant
-        threat_idx = SpiderBrain.VALENCE_ORDER.index("threat")
-        self.assertGreater(float(valence_logits[threat_idx]), float(valence_logits[1]))
-
-    def test_warm_start_scale_reduces_forward_valence_logits(self) -> None:
-        full = SpiderBrain(seed=42, module_dropout=0.0)
-        scaled = SpiderBrain(
-            seed=42,
-            config=BrainAblationConfig(
-                name="scaled_warm_start",
-                module_dropout=0.0,
-                warm_start_scale=0.5,
-            ),
-        )
-        evidence_vector = _small_arbitration_evidence_vector()
-
-        full_logits, _, _ = full.arbitration_network.forward(
-            evidence_vector, store_cache=False
-        )
-        scaled_logits, _, _ = scaled.arbitration_network.forward(
-            evidence_vector, store_cache=False
-        )
-        _assert_relative_scaled_logits(
-            self,
-            scaled_logits,
-            full_logits,
-            0.5,
-        )
-
-    def test_warm_start_scale_zero_skips_warm_start(self) -> None:
-        no_start = SpiderBrain(
-            seed=42,
-            config=BrainAblationConfig(
-                name="no_warm_start",
-                module_dropout=0.0,
-                warm_start_scale=0.0,
-            ),
-        )
-        warmed = SpiderBrain(seed=42, module_dropout=0.0)
-
-        self.assertNotEqual(no_start.arbitration_network.W1[0, 0], 0.0)
-        self.assertNotAlmostEqual(
-            no_start.arbitration_network.W1[0, 0],
-            warmed.arbitration_network.W1[0, 0],
-        )
-
-    def test_minimal_arbitration_random_weights_follow_brain_seed(self) -> None:
-        config = BrainAblationConfig(
-            name="minimal_seed_test",
-            module_dropout=0.0,
-            warm_start_scale=0.0,
-        )
-        first = SpiderBrain(seed=42, config=config)
-        same_seed = SpiderBrain(seed=42, config=config)
-        different_seed = SpiderBrain(seed=43, config=config)
-
-        np.testing.assert_allclose(
-            first.arbitration_network.W1,
-            same_seed.arbitration_network.W1,
-        )
-        np.testing.assert_allclose(
-            first.arbitration_network.W2_gate,
-            same_seed.arbitration_network.W2_gate,
-        )
-        self.assertFalse(
-            np.allclose(
-                first.arbitration_network.W1,
-                different_seed.arbitration_network.W1,
-            )
-        )
-        self.assertFalse(
-            np.allclose(
-                first.arbitration_network.W2_gate,
-                different_seed.arbitration_network.W2_gate,
-            )
-        )
-
-    def test_arbitration_network_uses_configured_gate_adjustment_bounds(self) -> None:
-        brain = SpiderBrain(
-            seed=42,
-            config=BrainAblationConfig(
-                name="wide_gate_bounds",
-                module_dropout=0.0,
-                gate_adjustment_bounds=(0.25, 1.75),
-            ),
-        )
-
-        self.assertAlmostEqual(brain.arbitration_network.gate_adjustment_min, 0.25)
-        self.assertAlmostEqual(brain.arbitration_network.gate_adjustment_max, 1.75)
-
-
-class CanonicalArbitrationVariantIntegrationTest(unittest.TestCase):
-    """Integration tests for named arbitration-prior ablation variants."""
-
-    EXPECTED: ClassVar[dict[str, dict[str, object]]] = {
-        "constrained_arbitration": {
-            "enable_deterministic_guards": True,
-            "enable_food_direction_bias": True,
-            "warm_start_scale": 1.0,
-            "gate_adjustment_bounds": (0.5, 1.5),
-        },
-        "weaker_prior_arbitration": {
-            "enable_deterministic_guards": False,
-            "enable_food_direction_bias": False,
-            "warm_start_scale": 0.5,
-            "gate_adjustment_bounds": (0.5, 1.5),
-        },
-        "minimal_arbitration": {
-            "enable_deterministic_guards": False,
-            "enable_food_direction_bias": False,
-            "warm_start_scale": 0.0,
-            "gate_adjustment_bounds": (0.1, 2.0),
-        },
-    }
-
-    def _configs(self) -> dict[str, BrainAblationConfig]:
-        """
-        Return the canonical set of brain ablation configurations with module dropout disabled.
-        
-        Returns:
-            configs (dict[str, BrainAblationConfig]): Mapping from canonical config names to their
-            corresponding BrainAblationConfig instances (with module_dropout == 0.0).
-        """
-        return canonical_ablation_configs(module_dropout=0.0)
-
-    def test_named_arbitration_configs_have_expected_fields(self) -> None:
-        configs = self._configs()
-        for name, expected in self.EXPECTED.items():
-            with self.subTest(name=name):
-                config = configs[name]
-                self.assertTrue(config.use_learned_arbitration)
-                self.assertEqual(config.module_dropout, 0.0)
-                self.assertEqual(
-                    config.enable_deterministic_guards,
-                    expected["enable_deterministic_guards"],
-                )
-                self.assertEqual(
-                    config.enable_food_direction_bias,
-                    expected["enable_food_direction_bias"],
-                )
-                self.assertAlmostEqual(
-                    config.warm_start_scale,
-                    expected["warm_start_scale"],
-                )
-                self.assertEqual(
-                    config.gate_adjustment_bounds,
-                    expected["gate_adjustment_bounds"],
-                )
-
-    def test_named_arbitration_configs_pass_gate_bounds_to_network(self) -> None:
-        """
-        Verify that each canonical arbitration ablation configuration sets the arbitration network's gate adjustment bounds.
-        
-        For every named config, instantiate a SpiderBrain and assert that its arbitration_network.gate_adjustment_min and .gate_adjustment_max match the expected lower and upper bounds from the config.
-        """
-        configs = self._configs()
-        for name, expected in self.EXPECTED.items():
-            with self.subTest(name=name):
-                brain = SpiderBrain(seed=42, config=configs[name])
-                lower, upper = expected["gate_adjustment_bounds"]
-                self.assertAlmostEqual(
-                    brain.arbitration_network.gate_adjustment_min,
-                    lower,
-                )
-                self.assertAlmostEqual(
-                    brain.arbitration_network.gate_adjustment_max,
-                    upper,
-                )
-
-    def test_named_arbitration_warm_start_scales_forward_valence_logits(self) -> None:
-        configs = self._configs()
-        constrained = SpiderBrain(
-            seed=42,
-            config=configs["constrained_arbitration"],
-        )
-        weaker = SpiderBrain(
-            seed=42,
-            config=configs["weaker_prior_arbitration"],
-        )
-        minimal = SpiderBrain(
-            seed=42,
-            config=configs["minimal_arbitration"],
-        )
-        evidence_vector = _small_arbitration_evidence_vector()
-
-        constrained_logits, _, _ = constrained.arbitration_network.forward(
-            evidence_vector, store_cache=False
-        )
-        weaker_logits, _, _ = weaker.arbitration_network.forward(
-            evidence_vector, store_cache=False
-        )
-        _assert_relative_scaled_logits(
-            self,
-            weaker_logits,
-            constrained_logits,
-            0.5,
-        )
-        self.assertAlmostEqual(
-            constrained.arbitration_network.W2_gate[0, 0],
-            0.0,
-        )
-        self.assertAlmostEqual(
-            weaker.arbitration_network.W2_gate[0, 0],
-            0.0,
-        )
-        self.assertGreater(np.linalg.norm(minimal.arbitration_network.W2_gate), 0.0)
-        self.assertNotAlmostEqual(
-            minimal.arbitration_network.W1[0, 0],
-            constrained.arbitration_network.W1[0, 0],
-        )
-
-
-# ---------------------------------------------------------------------------
-# SpiderBrain arbitration_lr default tests
 # ---------------------------------------------------------------------------
 
 class ArbitrationLrDefaultTest(unittest.TestCase):
@@ -3337,7 +1833,6 @@ class ArbitrationDecisionPredatorProximityCompatTest(unittest.TestCase):
     """Tests that the legacy predator_proximity key is injected and sorted correctly."""
 
     def _make_with_threat(self, extra_threat_keys: dict | None = None) -> "ArbitrationDecision":
-        from spider_cortex_sim.agent import ArbitrationDecision
         threat_evidence = {"predator_visible": 1.0, "predator_certainty": 0.9}
         if extra_threat_keys:
             threat_evidence.update(extra_threat_keys)
@@ -3366,7 +1861,6 @@ class ArbitrationDecisionPredatorProximityCompatTest(unittest.TestCase):
 
     def test_predator_proximity_not_injected_when_already_present(self) -> None:
         """If the evidence dict already has predator_proximity, it must not be overwritten."""
-        from spider_cortex_sim.agent import ArbitrationDecision
         d = ArbitrationDecision(
             strategy="priority_gating",
             winning_valence="threat",
@@ -3383,7 +1877,6 @@ class ArbitrationDecisionPredatorProximityCompatTest(unittest.TestCase):
 
     def test_no_threat_evidence_no_injection(self) -> None:
         """If threat is absent from evidence, no predator_proximity is injected."""
-        from spider_cortex_sim.agent import ArbitrationDecision
         d = ArbitrationDecision(
             strategy="priority_gating",
             winning_valence="hunger",
@@ -3402,45 +1895,940 @@ class ArbitrationDecisionPredatorProximityCompatTest(unittest.TestCase):
 # SpiderBrain._compute_arbitration training mode tests
 # ---------------------------------------------------------------------------
 
-class ComputeArbitrationTrainingModeTest(unittest.TestCase):
-    """Tests for the training parameter of SpiderBrain._compute_arbitration."""
+class CorticalModuleBankResultFieldsTest(unittest.TestCase):
+    """Tests that CorticalModuleBank.forward initializes new reflex fields on ModuleResult."""
 
-    def setUp(self) -> None:
-        self.brain = SpiderBrain(seed=42, module_dropout=0.0)
-        self.obs = _blank_obs()
+    def _make_bank(self) -> CorticalModuleBank:
+        """
+        Create a CorticalModuleBank configured for deterministic test runs.
 
-    def test_training_false_clears_arbitration_cache_for_fixed_config(self) -> None:
-        config = BrainAblationConfig(name="fixed_arbitration_baseline", use_learned_arbitration=False)
-        brain = SpiderBrain(seed=42, module_dropout=0.0, config=config)
-        obs = _blank_obs()
-        module_results = brain._proposal_results(obs, store_cache=False, training=False)
-        brain._compute_arbitration(module_results, obs, training=False, store_cache=False)
-        self.assertIsNone(brain.arbitration_network.cache)
+        Returns:
+            CorticalModuleBank: instance with action_dim equal to len(LOCOMOTION_ACTIONS), an RNG seeded with 99, and module_dropout set to 0.0.
+        """
+        rng = np.random.default_rng(99)
+        return CorticalModuleBank(
+            action_dim=len(LOCOMOTION_ACTIONS),
+            rng=rng,
+            module_dropout=0.0,
+        )
 
-    def test_learned_arbitration_training_true_stores_cache(self) -> None:
-        module_results = self.brain._proposal_results(self.obs, store_cache=False, training=False)
-        self.brain._compute_arbitration(module_results, self.obs, training=True, store_cache=True)
-        self.assertIsNotNone(self.brain.arbitration_network.cache)
+    def _blank_observation(self, bank: CorticalModuleBank) -> dict:
+        """
+        Build an observation dictionary containing zeroed input vectors for every spec in the cortical module bank.
 
-    def test_learned_arbitration_training_false_returns_deterministic_result(self) -> None:
-        """Calling _compute_arbitration with training=False gives consistent winning_valence."""
-        module_results = self.brain._proposal_results(self.obs, store_cache=False, training=False)
-        arb1 = self.brain._compute_arbitration(module_results, self.obs, training=False, store_cache=False)
-        arb2 = self.brain._compute_arbitration(module_results, self.obs, training=False, store_cache=False)
-        self.assertEqual(arb1.winning_valence, arb2.winning_valence)
+        Parameters:
+            bank (CorticalModuleBank): Module bank whose specs determine observation keys and input dimensions.
 
-    def test_learned_adjustment_is_true_for_learned_brain(self) -> None:
-        module_results = self.brain._proposal_results(self.obs, store_cache=False, training=False)
-        arb = self.brain._compute_arbitration(module_results, self.obs, training=False, store_cache=False)
-        self.assertTrue(arb.learned_adjustment)
+        Returns:
+            dict: Mapping from each spec.observation_key to a NumPy float array of zeros with length equal to spec.input_dim.
+        """
+        obs = {}
+        for spec in bank.specs:
+            obs[spec.observation_key] = np.zeros(spec.input_dim, dtype=float)
+        return obs
 
-    def test_learned_adjustment_is_false_for_fixed_brain(self) -> None:
-        config = BrainAblationConfig(name="fixed_arbitration_baseline", use_learned_arbitration=False)
-        brain = SpiderBrain(seed=42, module_dropout=0.0, config=config)
-        obs = _blank_obs()
-        module_results = brain._proposal_results(obs, store_cache=False, training=False)
-        arb = brain._compute_arbitration(module_results, obs, training=False, store_cache=False)
-        self.assertFalse(arb.learned_adjustment)
+    def test_forward_sets_neural_logits_to_copy_of_logits(self) -> None:
+        bank = self._make_bank()
+        obs = self._blank_observation(bank)
+        results = bank.forward(obs, store_cache=False, training=False)
+        for result in results:
+            if result.active:
+                self.assertIsNotNone(result.neural_logits)
+                np.testing.assert_allclose(result.neural_logits, result.logits)
+
+    def test_forward_sets_reflex_delta_logits_to_zeros(self) -> None:
+        bank = self._make_bank()
+        obs = self._blank_observation(bank)
+        results = bank.forward(obs, store_cache=False, training=False)
+        for result in results:
+            if result.active:
+                self.assertIsNotNone(result.reflex_delta_logits)
+                np.testing.assert_allclose(
+                    result.reflex_delta_logits,
+                    np.zeros_like(result.logits),
+                )
+
+    def test_forward_sets_post_reflex_logits_to_copy_of_logits(self) -> None:
+        bank = self._make_bank()
+        obs = self._blank_observation(bank)
+        results = bank.forward(obs, store_cache=False, training=False)
+        for result in results:
+            if result.active:
+                self.assertIsNotNone(result.post_reflex_logits)
+                np.testing.assert_allclose(result.post_reflex_logits, result.logits)
+
+
+class SpiderBrainMonolithicArchitectureTest(unittest.TestCase):
+    """Tests for the new monolithic architecture branch in SpiderBrain."""
+
+    def _monolithic_config(
+        self,
+        *,
+        credit_strategy: str = "broadcast",
+    ) -> BrainAblationConfig:
+        return BrainAblationConfig(
+            name=MONOLITHIC_POLICY_NAME,
+            architecture="monolithic",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            credit_strategy=credit_strategy,
+            disabled_modules=(),
+        )
+
+    def _build_observation(self) -> dict:
+        """
+        Builds a baseline observation dictionary containing zeroed input vectors for every module and context.
+
+        The returned dictionary contains entries for each interface in MODULE_INTERFACES plus ACTION_CONTEXT_INTERFACE and MOTOR_CONTEXT_INTERFACE. Each key is the interface's `observation_key` and each value is a NumPy array of zeros with length equal to that interface's `input_dim`.
+
+        Returns:
+            dict: Mapping from observation_key to a zeroed NumPy array sized to the corresponding interface's input_dim.
+        """
+        obs = {}
+        for interface in MODULE_INTERFACES:
+            obs[interface.observation_key] = np.zeros(interface.input_dim, dtype=float)
+        obs[ACTION_CONTEXT_INTERFACE.observation_key] = np.zeros(
+            ACTION_CONTEXT_INTERFACE.input_dim, dtype=float
+        )
+        obs[MOTOR_CONTEXT_INTERFACE.observation_key] = np.zeros(
+            MOTOR_CONTEXT_INTERFACE.input_dim, dtype=float
+        )
+        return obs
+
+    def test_monolithic_brain_has_no_module_bank(self) -> None:
+        brain = SpiderBrain(seed=1, config=self._monolithic_config())
+        self.assertIsNone(brain.module_bank)
+
+    def test_monolithic_brain_has_monolithic_policy(self) -> None:
+        brain = SpiderBrain(seed=1, config=self._monolithic_config())
+        self.assertIsNotNone(brain.monolithic_policy)
+
+    def test_modular_brain_has_module_bank(self) -> None:
+        brain = SpiderBrain(seed=1)
+        self.assertIsNotNone(brain.module_bank)
+
+    def test_modular_brain_has_no_monolithic_policy(self) -> None:
+        brain = SpiderBrain(seed=1)
+        self.assertIsNone(brain.monolithic_policy)
+
+    def test_monolithic_act_returns_single_module_result(self) -> None:
+        brain = SpiderBrain(seed=5, config=self._monolithic_config())
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+        self.assertEqual(len(step.module_results), 1)
+        self.assertEqual(step.module_results[0].name, SpiderBrain.MONOLITHIC_POLICY_NAME)
+
+    def test_monolithic_act_result_has_none_interface(self) -> None:
+        brain = SpiderBrain(seed=5, config=self._monolithic_config())
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+        self.assertIsNone(step.module_results[0].interface)
+
+    def test_monolithic_act_result_is_active(self) -> None:
+        brain = SpiderBrain(seed=5, config=self._monolithic_config())
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+        self.assertTrue(step.module_results[0].active)
+
+    def test_monolithic_module_names_includes_monolithic_policy(self) -> None:
+        brain = SpiderBrain(seed=5, config=self._monolithic_config())
+        names = brain._module_names()
+        self.assertIn(SpiderBrain.MONOLITHIC_POLICY_NAME, names)
+        self.assertIn("arbitration_network", names)
+        self.assertIn("action_center", names)
+        self.assertIn("motor_cortex", names)
+
+    def test_modular_module_names_includes_each_module(self) -> None:
+        brain = SpiderBrain(seed=5)
+        names = brain._module_names()
+        self.assertIn("visual_cortex", names)
+        self.assertIn("alert_center", names)
+        self.assertIn("action_center", names)
+        self.assertIn("motor_cortex", names)
+        self.assertNotIn(SpiderBrain.MONOLITHIC_POLICY_NAME, names)
+
+    def test_monolithic_parameter_norms_has_monolithic_policy(self) -> None:
+        brain = SpiderBrain(seed=3, config=self._monolithic_config())
+        norms = brain.parameter_norms()
+        self.assertIn(SpiderBrain.MONOLITHIC_POLICY_NAME, norms)
+        self.assertIn("arbitration_network", norms)
+        self.assertIn("action_center", norms)
+        self.assertIn("motor_cortex", norms)
+
+    def test_modular_parameter_norms_has_module_names(self) -> None:
+        brain = SpiderBrain(seed=3)
+        norms = brain.parameter_norms()
+        self.assertIn("visual_cortex", norms)
+        self.assertIn("alert_center", norms)
+        self.assertIn("action_center", norms)
+        self.assertIn("motor_cortex", norms)
+        self.assertNotIn(SpiderBrain.MONOLITHIC_POLICY_NAME, norms)
+
+    def test_monolithic_estimate_value_returns_finite_float(self) -> None:
+        brain = SpiderBrain(seed=7, config=self._monolithic_config())
+        obs = self._build_observation()
+        value = brain.estimate_value(obs)
+        self.assertIsInstance(value, float)
+        self.assertTrue(np.isfinite(value))
+
+    def test_monolithic_action_idx_is_valid(self) -> None:
+        brain = SpiderBrain(seed=7, config=self._monolithic_config())
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+        self.assertGreaterEqual(step.action_idx, 0)
+        self.assertLess(step.action_idx, len(LOCOMOTION_ACTIONS))
+
+    def test_monolithic_step_exposes_arbitration_metadata(self) -> None:
+        brain = SpiderBrain(seed=7, config=self._monolithic_config())
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+        self.assertIsNotNone(step.arbitration_decision)
+        self.assertEqual(step.arbitration_decision.module_gates["monolithic_policy"], 1.0)
+        self.assertEqual(
+            step.arbitration_decision.module_contribution_share["monolithic_policy"],
+            1.0,
+        )
+
+    def test_monolithic_save_and_load_round_trip(self) -> None:
+        """
+        Verifies that saving then loading a monolithic SpiderBrain reproduces its policy and value outputs.
+
+        Uses a fixed observation and monolithic configuration: saves the brain to disk, loads it into a new SpiderBrain instance with the same configuration, and asserts that the resulting policy and value vectors match within a small numerical tolerance.
+        """
+        config = self._monolithic_config()
+        brain = SpiderBrain(seed=11, config=config)
+        obs = self._build_observation()
+        step_before = brain.act(obs, sample=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "mono_brain"
+            brain.save(save_path)
+
+            brain2 = SpiderBrain(seed=999, config=config)
+            brain2.load(save_path)
+            step_after = brain2.act(obs, sample=False)
+
+        np.testing.assert_allclose(step_before.policy, step_after.policy, atol=1e-5)
+        np.testing.assert_allclose(step_before.value, step_after.value, atol=1e-5)
+
+    def test_loading_mismatched_architecture_version_raises_value_error(self) -> None:
+        config = self._monolithic_config()
+        brain = SpiderBrain(seed=11, config=config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "mono_brain"
+            brain.save(save_path)
+
+            metadata_path = save_path / SpiderBrain._METADATA_FILE
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["architecture_version"] = SpiderBrain.ARCHITECTURE_VERSION - 1
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            brain2 = SpiderBrain(seed=999, config=config)
+            with self.assertRaises(ValueError):
+                brain2.load(save_path)
+
+    def test_save_metadata_contains_registry_and_fingerprint(self) -> None:
+        config = self._monolithic_config()
+        brain = SpiderBrain(seed=11, config=config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "mono_brain"
+            brain.save(save_path)
+
+            metadata_path = save_path / SpiderBrain._METADATA_FILE
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertIn("interface_registry", metadata)
+            self.assertIn("architecture_fingerprint", metadata)
+            self.assertEqual(
+                metadata["architecture_fingerprint"],
+                metadata["architecture"]["fingerprint"],
+            )
+
+    def test_save_writes_arbitration_network_weights(self) -> None:
+        config = self._monolithic_config()
+        brain = SpiderBrain(seed=11, config=config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "mono_brain"
+            brain.save(save_path)
+
+            self.assertTrue((save_path / "arbitration_network.npz").exists())
+            with np.load(save_path / "arbitration_network.npz") as arbitration_npz:
+                self.assertIn("input_dim", arbitration_npz.files)
+                self.assertIn("W2_gate", arbitration_npz.files)
+            metadata = json.loads(
+                (save_path / SpiderBrain._METADATA_FILE).read_text(encoding="utf-8")
+            )
+            self.assertIn("arbitration_network", metadata["modules"])
+            self.assertEqual(
+                metadata["modules"]["arbitration_network"]["type"],
+                "arbitration",
+            )
+
+    def test_loading_missing_arbitration_network_weights_raises_file_not_found(self) -> None:
+        config = self._monolithic_config()
+        brain = SpiderBrain(seed=11, config=config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "mono_brain"
+            brain.save(save_path)
+            (save_path / "arbitration_network.npz").unlink()
+
+            brain2 = SpiderBrain(seed=999, config=config)
+            with self.assertRaisesRegex(FileNotFoundError, "arbitration weights"):
+                brain2.load(save_path)
+
+    def test_loading_mismatched_interface_registry_raises_value_error(self) -> None:
+        config = self._monolithic_config()
+        brain = SpiderBrain(seed=11, config=config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "mono_brain"
+            brain.save(save_path)
+
+            metadata_path = save_path / SpiderBrain._METADATA_FILE
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["interface_registry"]["interfaces"]["motor_cortex_context"]["version"] = 999
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            brain2 = SpiderBrain(seed=999, config=config)
+            with self.assertRaisesRegex(ValueError, "interface registry incompatible"):
+                brain2.load(save_path)
+
+    def test_loading_monolithic_into_modular_raises_value_error(self) -> None:
+        mono_config = self._monolithic_config()
+        brain_mono = SpiderBrain(seed=13, config=mono_config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "mono_brain"
+            brain_mono.save(save_path)
+
+            brain_modular = SpiderBrain(seed=13)
+            with self.assertRaises(ValueError):
+                brain_modular.load(save_path)
+
+    def test_loading_different_modular_ablation_config_raises_value_error(self) -> None:
+        saved_brain = SpiderBrain(seed=19, config=default_brain_config(module_dropout=0.0))
+        different_config = BrainAblationConfig(
+            name="no_module_reflexes",
+            architecture="modular",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            disabled_modules=(),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "modular_brain"
+            saved_brain.save(save_path)
+
+            mismatched_brain = SpiderBrain(seed=19, config=different_config)
+            with self.assertRaises(ValueError):
+                mismatched_brain.load(save_path)
+
+    def test_loading_different_operational_profile_raises_value_error(self) -> None:
+        saved_brain = SpiderBrain(seed=23)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "profiled_brain"
+            saved_brain.save(save_path)
+
+            mismatched_brain = SpiderBrain(
+                seed=23,
+                operational_profile=_profile_with_updates(predator_threat_smell_threshold=0.01),
+            )
+            with self.assertRaises(ValueError):
+                mismatched_brain.load(save_path)
+
+    def test_monolithic_config_stored_on_brain(self) -> None:
+        config = self._monolithic_config()
+        brain = SpiderBrain(seed=7, config=config)
+        self.assertEqual(brain.config.architecture, "monolithic")
+        self.assertEqual(brain.config.name, "monolithic_policy")
+
+    def test_monolithic_learn_does_not_raise(self) -> None:
+        brain = SpiderBrain(seed=17, config=self._monolithic_config())
+        obs = self._build_observation()
+        step = brain.act(obs, sample=True)
+        next_obs = self._build_observation()
+        stats = brain.learn(step, reward=0.5, next_observation=next_obs, done=False)
+        self.assertIn("reward", stats)
+        self.assertTrue(np.isfinite(stats["td_error"]))
+
+    def test_modular_learn_routes_action_center_input_grads_to_module_aux_paths(self) -> None:
+        config = BrainAblationConfig(
+            name="modular_no_reflex_aux",
+            architecture="modular",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+        )
+        brain = SpiderBrain(seed=7, config=config)
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+
+        captured: dict[str, object] = {}
+        proposal_grads = np.arange(
+            len(step.module_results) * len(LOCOMOTION_ACTIONS),
+            dtype=float,
+        ).reshape(len(step.module_results), len(LOCOMOTION_ACTIONS))
+        upstream = np.concatenate(
+            [
+                proposal_grads.reshape(-1),
+                np.zeros(ACTION_CONTEXT_INTERFACE.input_dim, dtype=float),
+            ]
+        )
+
+        def fake_action_center_backward(*, grad_policy_logits, grad_value, lr):
+            captured["shared_grad"] = np.asarray(grad_policy_logits, dtype=float).copy()
+            captured["grad_value"] = float(grad_value)
+            captured["lr"] = float(lr)
+            return upstream
+
+        def fake_module_bank_backward(grad_logits, lr, aux_grads=None):
+            captured["bank_grad"] = np.asarray(grad_logits, dtype=float).copy()
+            captured["bank_lr"] = float(lr)
+            captured["aux_grads"] = {
+                name: np.asarray(value, dtype=float).copy()
+                for name, value in (aux_grads or {}).items()
+            }
+
+        brain.action_center.backward = fake_action_center_backward
+        brain.module_bank.backward = fake_module_bank_backward
+        brain.motor_cortex.backward = lambda grad_logits, lr: None
+        brain.estimate_value = lambda _: 0.0
+
+        expected_reflex_aux = brain._auxiliary_module_gradients(step.module_results)
+        stats = brain.learn(step, reward=0.5, next_observation=obs, done=False)
+
+        np.testing.assert_allclose(
+            captured["bank_grad"],
+            np.zeros_like(captured["shared_grad"]),
+        )
+        for idx, result in enumerate(step.module_results):
+            expected_total_grad = result.gate_weight * (
+                captured["shared_grad"] + proposal_grads[idx]
+            )
+            expected_total_grad += result.gate_weight * expected_reflex_aux.get(
+                result.name,
+                np.zeros(len(LOCOMOTION_ACTIONS), dtype=float),
+            )
+            np.testing.assert_allclose(
+                captured["aux_grads"][result.name],
+                expected_total_grad,
+            )
+            self.assertAlmostEqual(
+                stats["module_credit_weights"][result.name],
+                1.0,
+            )
+            self.assertAlmostEqual(
+                stats["module_gradient_norms"][result.name],
+                float(np.linalg.norm(expected_total_grad)),
+            )
+        self.assertEqual(stats["aux_modules"], float(len(expected_reflex_aux)))
+        self.assertEqual(stats["credit_strategy"], "broadcast")
+
+    def test_learn_projects_action_center_input_grads_to_arbitration_gates(self) -> None:
+        config = BrainAblationConfig(
+            name="modular_no_reflex_aux",
+            architecture="modular",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+        )
+        brain = SpiderBrain(
+            seed=7,
+            config=config,
+            arbitration_regularization_weight=0.25,
+            arbitration_valence_regularization_weight=0.4,
+        )
+        brain.arbitration_network.b2_gate[:] = np.log(0.7 / 0.3)
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False, training=True)
+        arbitration = step.arbitration_decision
+        self.assertIsNotNone(arbitration)
+
+        captured: dict[str, object] = {}
+        proposal_grads = np.linspace(
+            -0.2,
+            0.3,
+            len(step.module_results) * len(LOCOMOTION_ACTIONS),
+            dtype=float,
+        ).reshape(len(step.module_results), len(LOCOMOTION_ACTIONS))
+        upstream = np.concatenate(
+            [
+                proposal_grads.reshape(-1),
+                np.zeros(ACTION_CONTEXT_INTERFACE.input_dim, dtype=float),
+            ]
+        )
+
+        def fake_action_center_backward(*, grad_policy_logits, grad_value, lr):
+            """
+            Capture a copy of the policy logits gradient into the outer `captured` mapping and return the upstream gradient unchanged.
+
+            Parameters:
+                grad_policy_logits (array-like): Gradient of the policy logits to capture; converted to a float NumPy array and stored as `captured["policy_grad"]`.
+                grad_value: Ignored.
+                lr: Ignored.
+
+            Returns:
+                The upstream gradient value unchanged.
+            """
+            captured["policy_grad"] = np.asarray(grad_policy_logits, dtype=float).copy()
+            return upstream
+
+        def fake_arbitration_backward(*, grad_valence_logits, grad_gate_adjustments, grad_value, lr):
+            """
+            Record provided arbitration gradients and learning rate into the `captured` mapping and return a zeroed input-gradient vector matching the arbitration network input dimension.
+
+            Parameters:
+                grad_valence_logits (array-like): Gradients for arbitration valence logits; stored as a float NumPy array under key `"arb_valence_grad"`.
+                grad_gate_adjustments (array-like): Gradients for arbitration gate adjustments; stored as a float NumPy array under key `"arb_gate_grad"`.
+                grad_value (float): Gradient for the arbitration value output; stored as a float under key `"arb_value_grad"`.
+                lr (float): Learning rate used for this backward pass; stored as a float under key `"arb_lr"`.
+
+            Returns:
+                numpy.ndarray: A zero-filled float array whose length equals the arbitration network input dimension.
+            """
+            captured["arb_valence_grad"] = np.asarray(grad_valence_logits, dtype=float).copy()
+            captured["arb_gate_grad"] = np.asarray(grad_gate_adjustments, dtype=float).copy()
+            captured["arb_value_grad"] = float(grad_value)
+            captured["arb_lr"] = float(lr)
+            return np.zeros(brain.arbitration_network.input_dim, dtype=float)
+
+        brain.action_center.backward = fake_action_center_backward
+        brain.arbitration_network.backward = fake_arbitration_backward
+        brain.module_bank.backward = lambda grad_logits, lr, aux_grads=None: None
+        brain.motor_cortex.backward = lambda grad_logits, lr: None
+        brain.estimate_value = lambda _: 0.0
+
+        stats = brain.learn(step, reward=0.5, next_observation=obs, done=False)
+
+        td_target = 0.5
+        advantage = float(np.clip(td_target - step.value, -4.0, 4.0))
+        valence_probs = np.array(
+            [
+                float(arbitration.valence_scores[name])
+                for name in SpiderBrain.VALENCE_ORDER
+            ],
+            dtype=float,
+        )
+        fixed_targets = brain._fixed_formula_valence_scores_from_evidence(arbitration.evidence)
+        expected_valence_grad = advantage * (
+            valence_probs
+            - np.eye(len(SpiderBrain.VALENCE_ORDER))[SpiderBrain.VALENCE_ORDER.index(arbitration.winning_valence)]
+        )
+        expected_valence_grad += brain.arbitration_valence_regularization_weight * (
+            valence_probs - fixed_targets
+        )
+
+        gate_indices = {
+            name: index
+            for index, name in enumerate(SpiderBrain.ARBITRATION_GATE_MODULE_ORDER)
+        }
+        expected_final_gate_grad = np.zeros(
+            len(SpiderBrain.ARBITRATION_GATE_MODULE_ORDER),
+            dtype=float,
+        )
+        expected_gate_reg = np.zeros_like(expected_final_gate_grad)
+        expected_base = np.zeros_like(expected_final_gate_grad)
+        for idx, result in enumerate(step.module_results):
+            gate_index = gate_indices[result.name]
+            raw_logits = result.post_reflex_logits
+            self.assertIsNotNone(raw_logits)
+            expected_base[gate_index] = arbitration.base_gates[result.name]
+            expected_final_gate_grad[gate_index] += float(
+                np.dot(proposal_grads[idx], raw_logits)
+            )
+            expected_gate_reg[gate_index] += (
+                brain.arbitration_regularization_weight
+                * (arbitration.module_gates[result.name] - arbitration.base_gates[result.name])
+            )
+        expected_gate_grad = expected_base * (
+            expected_final_gate_grad + expected_gate_reg
+        )
+
+        np.testing.assert_allclose(captured["arb_valence_grad"], expected_valence_grad)
+        np.testing.assert_allclose(captured["arb_gate_grad"], expected_gate_grad)
+        self.assertAlmostEqual(captured["arb_value_grad"], arbitration.arbitration_value - td_target)
+        self.assertEqual(captured["arb_lr"], brain.arbitration_lr)
+        self.assertGreater(stats["arbitration_gate_regularization_norm"], 0.0)
+        self.assertGreater(stats["arbitration_valence_regularization_norm"], 0.0)
+        self.assertIn("arbitration_loss", stats)
+        self.assertIn("gate_adjustment_magnitude", stats)
+        self.assertIn("regularization_loss", stats)
+        self.assertGreater(stats["gate_adjustment_magnitude"], 0.0)
+        self.assertGreater(stats["regularization_loss"], 0.0)
+
+    def test_local_credit_only_learn_omits_shared_policy_broadcast(self) -> None:
+        """
+        Verifies that the "local_credit_only" ablation prevents shared policy gradients from being broadcast to module auxiliary gradient paths.
+
+        Sets up a modular brain configured for the local-credit-only variant, stubs the action-center and module-bank backward methods to capture gradients, invokes learning on a single step, and asserts each module's auxiliary gradient equals the module's gate weight multiplied by its proposal gradients (i.e., only local gate-weighted proposal gradients are applied to module auxiliary paths).
+        """
+        config = BrainAblationConfig(
+            name="local_credit_only",
+            architecture="modular",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            credit_strategy="local_only",
+        )
+        brain = SpiderBrain(seed=7, config=config)
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+
+        captured: dict[str, object] = {}
+        proposal_grads = np.arange(
+            len(step.module_results) * len(LOCOMOTION_ACTIONS),
+            dtype=float,
+        ).reshape(len(step.module_results), len(LOCOMOTION_ACTIONS))
+        upstream = np.concatenate(
+            [
+                proposal_grads.reshape(-1),
+                np.zeros(ACTION_CONTEXT_INTERFACE.input_dim, dtype=float),
+            ]
+        )
+
+        def fake_action_center_backward(*, grad_policy_logits, grad_value, lr):
+            captured["shared_grad"] = np.asarray(grad_policy_logits, dtype=float).copy()
+            return upstream
+
+        def fake_module_bank_backward(grad_logits, lr, aux_grads=None):
+            captured["aux_grads"] = {
+                name: np.asarray(value, dtype=float).copy()
+                for name, value in (aux_grads or {}).items()
+            }
+
+        brain.action_center.backward = fake_action_center_backward
+        brain.module_bank.backward = fake_module_bank_backward
+        brain.motor_cortex.backward = lambda grad_logits, lr: None
+        brain.estimate_value = lambda _: 0.0
+
+        stats = brain.learn(step, reward=0.5, next_observation=obs, done=False)
+
+        for idx, result in enumerate(step.module_results):
+            expected_total_grad = result.gate_weight * proposal_grads[idx]
+            np.testing.assert_allclose(
+                captured["aux_grads"][result.name],
+                expected_total_grad,
+            )
+            self.assertAlmostEqual(
+                stats["module_credit_weights"][result.name],
+                0.0,
+            )
+            self.assertAlmostEqual(
+                stats["module_gradient_norms"][result.name],
+                float(np.linalg.norm(expected_total_grad)),
+            )
+        self.assertEqual(stats["credit_strategy"], "local_only")
+
+    def test_counterfactual_credit_normalizes_absolute_interference(self) -> None:
+        """
+        Verifies that counterfactual credit weights normalize absolute interference between modules.
+
+        Constructs two module results with opposing effects and asserts the counterfactual credit
+        computation:
+        - returns positive weights for each contributing module,
+        - normalizes weights to sum to 1.0,
+        - assigns different weights when modules have different absolute contributions.
+        """
+        brain = SpiderBrain(
+            seed=7,
+            config=BrainAblationConfig(
+                name="counterfactual_credit",
+                architecture="modular",
+                module_dropout=0.0,
+                enable_reflexes=False,
+                enable_auxiliary_targets=False,
+                credit_strategy="counterfactual",
+            ),
+        )
+        action_dim = len(LOCOMOTION_ACTIONS)
+
+        def module_result(module_name: str, logits: np.ndarray) -> ModuleResult:
+            """
+            Create a ready-to-use active ModuleResult for the given module name using the provided logits.
+
+            Parameters:
+                module_name (str): Module identifier; its interface is looked up to set `interface` and `observation_key`.
+                logits (np.ndarray): Logits for the module's action outputs; length must match the action dimension used by the brain.
+
+            Returns:
+                ModuleResult: A ModuleResult with the resolved interface and observation_key, a zeroed observation vector sized to the interface's input dimension, the supplied `logits`, a uniform probability vector over actions, and `active=True`.
+            """
+            interface = MODULE_INTERFACE_BY_NAME[module_name]
+            return ModuleResult(
+                interface=interface,
+                name=module_name,
+                observation_key=interface.observation_key,
+                observation=np.zeros(interface.input_dim, dtype=float),
+                logits=logits,
+                probs=np.full(action_dim, 1.0 / action_dim, dtype=float),
+                active=True,
+            )
+
+        visual_logits = np.zeros(action_dim, dtype=float)
+        sensory_logits = np.zeros(action_dim, dtype=float)
+        visual_logits[0] = 1.0
+        sensory_logits[0] = -1.0
+        visual = module_result("visual_cortex", visual_logits)
+        sensory = module_result("sensory_cortex", sensory_logits)
+        def fake_action_center_forward(x, *, store_cache=False):
+            """
+            Compute a small corrective action logits vector from a concatenated visual+sensory input and return it with a zero baseline value.
+
+            Parameters:
+                x (array-like): Flattened input whose first `action_dim` entries are the visual segment and the next `action_dim` entries are the sensory segment; length must be at least 2 * action_dim.
+
+            Returns:
+                tuple:
+                    correction (numpy.ndarray): 1D float array of length `action_dim` containing the corrective logits.
+                    baseline (float): A scalar baseline value (always 0.0).
+            """
+            action_input = np.asarray(x, dtype=float)
+            visual_segment = action_input[:action_dim]
+            sensory_segment = action_input[action_dim : 2 * action_dim]
+            correction = np.zeros(action_dim, dtype=float)
+            correction[0] = (
+                0.75 * visual_segment[0]
+                - 0.50 * sensory_segment[0]
+            )
+            correction[1] = (
+                -0.25 * visual_segment[0]
+                + 0.25 * sensory_segment[0]
+            )
+            return correction, 0.0
+
+        brain.action_center.forward = fake_action_center_forward
+
+        weights = brain._compute_counterfactual_credit(
+            [visual, sensory],
+            self._build_observation(),
+            action_idx=0,
+        )
+
+        self.assertEqual(set(weights), {"visual_cortex", "sensory_cortex"})
+        self.assertAlmostEqual(sum(weights.values()), 1.0)
+        self.assertGreater(weights["visual_cortex"], 0.0)
+        self.assertGreater(weights["sensory_cortex"], 0.0)
+        self.assertNotAlmostEqual(
+            weights["visual_cortex"],
+            weights["sensory_cortex"],
+        )
+
+    def test_counterfactual_learn_scales_shared_policy_broadcast(self) -> None:
+        config = BrainAblationConfig(
+            name="counterfactual_credit",
+            architecture="modular",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            credit_strategy="counterfactual",
+        )
+        brain = SpiderBrain(seed=7, config=config)
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+        weights = {
+            result.name: float(index + 1)
+            for index, result in enumerate(step.module_results)
+        }
+        weight_total = float(sum(weights.values()))
+        weights = {
+            name: value / weight_total
+            for name, value in weights.items()
+        }
+
+        captured: dict[str, object] = {}
+        proposal_grads = np.arange(
+            len(step.module_results) * len(LOCOMOTION_ACTIONS),
+            dtype=float,
+        ).reshape(len(step.module_results), len(LOCOMOTION_ACTIONS))
+        upstream = np.concatenate(
+            [
+                proposal_grads.reshape(-1),
+                np.zeros(ACTION_CONTEXT_INTERFACE.input_dim, dtype=float),
+            ]
+        )
+
+        def fake_action_center_backward(*, grad_policy_logits, grad_value, lr):
+            """
+            Stub backward function used in tests to capture the shared policy gradient.
+
+            Stores a copy of `grad_policy_logits` (as a float numpy array) into `captured["shared_grad"]` and returns the incoming `upstream` value unchanged.
+
+            Parameters:
+                grad_policy_logits: array-like
+                    Gradients for the policy logits to be captured.
+                grad_value:
+                    Ignored by this stub.
+                lr:
+                    Ignored by this stub.
+
+            Returns:
+                upstream: the unchanged upstream value passed through by the stub.
+            """
+            captured["shared_grad"] = np.asarray(grad_policy_logits, dtype=float).copy()
+            return upstream
+
+        def fake_module_bank_backward(grad_logits, lr, aux_grads=None):
+            """
+            Capture and store a copy of auxiliary gradients into the outer `captured` mapping.
+
+            Parameters:
+                grad_logits: Unused in this helper; present to match the real backward signature.
+                lr: Unused learning-rate parameter; present to match the real backward signature.
+                aux_grads (dict[str, array_like] | None): Mapping from module name to gradient array. Each value is converted to a NumPy float array and stored as a copy in `captured["aux_grads"]`.
+            """
+            captured["aux_grads"] = {
+                name: np.asarray(value, dtype=float).copy()
+                for name, value in (aux_grads or {}).items()
+            }
+
+        brain._compute_counterfactual_credit = lambda module_results, observation, action_idx: dict(weights)
+        brain.action_center.backward = fake_action_center_backward
+        brain.module_bank.backward = fake_module_bank_backward
+        brain.motor_cortex.backward = lambda grad_logits, lr: None
+        brain.estimate_value = lambda _: 0.0
+
+        stats = brain.learn(step, reward=0.5, next_observation=obs, done=False)
+
+        shared_grad = np.asarray(captured["shared_grad"], dtype=float)
+        for idx, result in enumerate(step.module_results):
+            expected_total_grad = result.gate_weight * (
+                weights[result.name] * shared_grad + proposal_grads[idx]
+            )
+            np.testing.assert_allclose(
+                captured["aux_grads"][result.name],
+                expected_total_grad,
+            )
+            self.assertAlmostEqual(
+                stats["module_gradient_norms"][result.name],
+                float(np.linalg.norm(expected_total_grad)),
+            )
+        self.assertEqual(stats["credit_strategy"], "counterfactual")
+        self.assertEqual(stats["module_credit_weights"], weights)
+        self.assertEqual(stats["counterfactual_credit_weights"], weights)
+
+    def test_monolithic_learn_adds_action_center_input_grads_to_policy_update(self) -> None:
+        """
+        Test that monolithic learning adds action-center input gradients to the monolithic policy update and records credit diagnostics.
+
+        Sets up a monolithic SpiderBrain with stubbed backward methods to capture gradients, runs a single learn step, and asserts:
+        - the monolithic policy backward receives the elementwise sum of the shared policy gradient and action-center input gradients,
+        - the motor cortex receives only the shared policy gradient,
+        - learning stats include `credit_strategy == "broadcast"`,
+        - `module_credit_weights` contains the monolithic policy with weight 1.0,
+        - `module_gradient_norms` contains the norm of the monolithic policy gradient.
+        """
+        brain = SpiderBrain(seed=11, config=self._monolithic_config())
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+
+        captured: dict[str, object] = {}
+        extra_grad = np.linspace(0.1, 0.5, len(LOCOMOTION_ACTIONS), dtype=float)
+        upstream = np.concatenate(
+            [
+                extra_grad,
+                np.zeros(ACTION_CONTEXT_INTERFACE.input_dim, dtype=float),
+            ]
+        )
+
+        def fake_action_center_backward(*, grad_policy_logits, grad_value, lr):
+            captured["shared_grad"] = np.asarray(grad_policy_logits, dtype=float).copy()
+            return upstream
+
+        def fake_monolithic_backward(grad_logits, lr):
+            captured["mono_grad"] = np.asarray(grad_logits, dtype=float).copy()
+            captured["mono_lr"] = float(lr)
+
+        def fake_motor_backward(grad_logits, lr):
+            captured["motor_grad"] = np.asarray(grad_logits, dtype=float).copy()
+            captured["motor_lr"] = float(lr)
+
+        brain.action_center.backward = fake_action_center_backward
+        brain.monolithic_policy.backward = fake_monolithic_backward
+        brain.motor_cortex.backward = fake_motor_backward
+        brain.estimate_value = lambda _: 0.0
+
+        stats = brain.learn(step, reward=0.5, next_observation=obs, done=False)
+
+        np.testing.assert_allclose(
+            captured["mono_grad"],
+            captured["shared_grad"] + extra_grad,
+        )
+        self.assertEqual(stats["credit_strategy"], "broadcast")
+        self.assertEqual(
+            stats["module_credit_weights"],
+            {SpiderBrain.MONOLITHIC_POLICY_NAME: 1.0},
+        )
+        self.assertAlmostEqual(
+            stats["module_gradient_norms"][SpiderBrain.MONOLITHIC_POLICY_NAME],
+            float(np.linalg.norm(captured["mono_grad"])),
+        )
+        np.testing.assert_allclose(
+            captured["motor_grad"],
+            captured["shared_grad"],
+        )
+
+    def _assert_monolithic_non_broadcast_credit_coerces_to_broadcast(
+        self,
+        credit_strategy: str,
+    ) -> None:
+        brain = SpiderBrain(
+            seed=13,
+            config=self._monolithic_config(credit_strategy=credit_strategy),
+        )
+        obs = self._build_observation()
+        step = brain.act(obs, sample=False)
+
+        captured: dict[str, object] = {}
+        extra_grad = np.linspace(0.1, 0.5, len(LOCOMOTION_ACTIONS), dtype=float)
+        upstream = np.concatenate(
+            [
+                extra_grad,
+                np.zeros(ACTION_CONTEXT_INTERFACE.input_dim, dtype=float),
+            ]
+        )
+
+        def fake_action_center_backward(*, grad_policy_logits, grad_value, lr):
+            captured["shared_grad"] = np.asarray(grad_policy_logits, dtype=float).copy()
+            return upstream
+
+        def fake_monolithic_backward(grad_logits, lr):
+            captured["mono_grad"] = np.asarray(grad_logits, dtype=float).copy()
+
+        brain.action_center.backward = fake_action_center_backward
+        brain.monolithic_policy.backward = fake_monolithic_backward
+        brain.motor_cortex.backward = lambda grad_logits, lr: None
+        brain.estimate_value = lambda _: 0.0
+
+        stats = brain.learn(step, reward=0.5, next_observation=obs, done=False)
+
+        np.testing.assert_allclose(
+            captured["mono_grad"],
+            captured["shared_grad"] + extra_grad,
+        )
+        self.assertEqual(stats["credit_strategy"], "broadcast")
+        self.assertEqual(
+            stats["module_credit_weights"],
+            {SpiderBrain.MONOLITHIC_POLICY_NAME: 1.0},
+        )
+        self.assertEqual(stats["counterfactual_credit_weights"], {})
+        self.assertAlmostEqual(
+            stats["module_gradient_norms"][SpiderBrain.MONOLITHIC_POLICY_NAME],
+            float(np.linalg.norm(captured["mono_grad"])),
+        )
+
+    def test_monolithic_local_only_credit_reports_effective_broadcast(self) -> None:
+        self._assert_monolithic_non_broadcast_credit_coerces_to_broadcast("local_only")
+
+    def test_monolithic_counterfactual_credit_reports_effective_broadcast(self) -> None:
+        self._assert_monolithic_non_broadcast_credit_coerces_to_broadcast(
+            "counterfactual"
+        )
 
 
 if __name__ == "__main__":

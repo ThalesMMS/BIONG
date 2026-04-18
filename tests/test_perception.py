@@ -7,6 +7,7 @@ import numpy as np
 
 from spider_cortex_sim.interfaces import (
     ACTION_CONTEXT_INTERFACE,
+    ACTION_TO_INDEX,
     MOTOR_CONTEXT_INTERFACE,
     OBSERVATION_INTERFACE_BY_KEY,
     AlertObservation,
@@ -28,11 +29,16 @@ from spider_cortex_sim.perception import (
     _apply_visibility_zone_certainty,
     _compute_target_visibility_zone,
     _fov_thresholds,
+    _percept_trace_decay,
+    _percept_trace_ttl,
+    _perception_category,
+    advance_percept_trace,
     build_action_context_observation,
     build_alert_observation,
     build_hunger_observation,
     build_motor_context_observation,
     compute_per_type_threats,
+    empty_percept_trace,
     observation_leakage_audit,
     build_sensory_observation,
     build_sleep_observation,
@@ -45,6 +51,8 @@ from spider_cortex_sim.perception import (
     predators_visible_to_spider,
     serialize_observation_view,
     smell_gradient,
+    trace_strength,
+    trace_view,
     visible_object,
     visibility_confidence,
     visible_range,
@@ -56,6 +64,393 @@ from spider_cortex_sim.predator import (
     VISUAL_HUNTER_PROFILE,
 )
 from spider_cortex_sim.world import SpiderWorld
+from spider_cortex_sim.world_types import PerceptTrace
+
+
+class PerceptTraceFunctionsTest(unittest.TestCase):
+    def test_percept_trace_ttl_minimum_is_one(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.operational_profile.perception["percept_trace_ttl"] = 0.3
+
+        self.assertEqual(_percept_trace_ttl(world), 1)
+
+    def test_percept_trace_ttl_rounds_to_nearest_integer(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.operational_profile.perception["percept_trace_ttl"] = 3.6
+
+        self.assertEqual(_percept_trace_ttl(world), 4)
+
+    def test_percept_trace_decay_clips_to_unit_interval(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.operational_profile.perception["percept_trace_decay"] = 1.5
+        self.assertAlmostEqual(_percept_trace_decay(world), 1.0)
+        world.operational_profile.perception["percept_trace_decay"] = -0.2
+        self.assertAlmostEqual(_percept_trace_decay(world), 0.0)
+
+    def test_trace_strength_empty_trace_returns_zero(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+
+        self.assertAlmostEqual(trace_strength(world, empty_percept_trace()), 0.0)
+
+    def test_trace_strength_at_ttl_boundary_returns_zero(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        ttl = _percept_trace_ttl(world)
+        trace = PerceptTrace(target=(5, 5), age=ttl, certainty=1.0)
+
+        self.assertAlmostEqual(trace_strength(world, trace), 0.0)
+
+    def test_trace_strength_age_zero_equals_certainty(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        trace = PerceptTrace(target=(5, 5), age=0, certainty=0.8)
+
+        self.assertAlmostEqual(trace_strength(world, trace), 0.8)
+
+    def test_trace_strength_decays_over_age(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        decay = _percept_trace_decay(world)
+        trace_age0 = PerceptTrace(target=(5, 5), age=0, certainty=1.0)
+        trace_age1 = PerceptTrace(target=(5, 5), age=1, certainty=1.0)
+        if _percept_trace_ttl(world) > 1:
+            expected_age1 = min(max(1.0 * (decay ** 1), 0.0), 1.0)
+            self.assertAlmostEqual(trace_strength(world, trace_age1), expected_age1, places=6)
+        self.assertGreaterEqual(
+            trace_strength(world, trace_age0),
+            trace_strength(world, trace_age1),
+        )
+
+    def test_trace_view_empty_trace_produces_zero_fields(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+
+        view = trace_view(world, empty_percept_trace())
+
+        self.assertIsNone(view["target"])
+        self.assertEqual(view["age"], 0)
+        self.assertAlmostEqual(view["strength"], 0.0)
+        self.assertAlmostEqual(view["dx"], 0.0)
+        self.assertAlmostEqual(view["dy"], 0.0)
+        self.assertEqual(view["heading_dx"], 0)
+        self.assertEqual(view["heading_dy"], 0)
+
+    def test_trace_view_has_all_required_keys(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+
+        view = trace_view(world, empty_percept_trace())
+
+        for key in (
+            "target",
+            "age",
+            "certainty",
+            "strength",
+            "dx",
+            "dy",
+            "heading_dx",
+            "heading_dy",
+            "ttl",
+            "decay",
+        ):
+            self.assertIn(key, view)
+
+    def test_trace_view_active_trace_has_nonzero_strength_and_direction(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        trace = PerceptTrace(target=(8, 5), age=0, certainty=1.0, heading_dx=1, heading_dy=0)
+
+        view = trace_view(world, trace)
+
+        self.assertEqual(view["target"], [8, 5])
+        self.assertGreater(view["strength"], 0.0)
+        self.assertNotEqual(view["dx"], 0.0)
+        self.assertEqual(view["heading_dx"], 1)
+        self.assertEqual(view["heading_dy"], 0)
+
+    def test_trace_view_preserves_heading_from_capture_time(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        world.state.heading_dx = 0
+        world.state.heading_dy = -1
+        visible_percept = PerceivedTarget(
+            visible=1.0,
+            certainty=0.9,
+            occluded=0.0,
+            dx=0.0,
+            dy=-0.25,
+            dist=3,
+            position=(5, 2),
+        )
+
+        updated = advance_percept_trace(
+            world,
+            PerceptTrace(target=None, age=0, certainty=0.0),
+            visible_percept,
+            [(5, 2)],
+        )
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        view = trace_view(world, updated)
+
+        self.assertEqual((updated.heading_dx, updated.heading_dy), (0, -1))
+        self.assertEqual(view["heading_dx"], 0)
+        self.assertEqual(view["heading_dy"], -1)
+
+    def test_trace_view_expired_trace_has_zero_direction(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        ttl = _percept_trace_ttl(world)
+        expired = PerceptTrace(target=(8, 5), age=ttl, certainty=1.0)
+
+        view = trace_view(world, expired)
+
+        self.assertIsNone(view["target"])
+        self.assertAlmostEqual(view["strength"], 0.0)
+        self.assertAlmostEqual(view["dx"], 0.0)
+        self.assertAlmostEqual(view["dy"], 0.0)
+        self.assertEqual(view["heading_dx"], 0)
+        self.assertEqual(view["heading_dy"], 0)
+
+    def test_advance_percept_trace_visible_target_resets_trace(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        old_trace = PerceptTrace(target=(3, 3), age=2, certainty=0.4)
+        visible_percept = PerceivedTarget(
+            visible=1.0,
+            certainty=0.9,
+            occluded=0.0,
+            dx=1.0,
+            dy=0.0,
+            dist=3,
+            position=(8, 5),
+        )
+
+        updated = advance_percept_trace(world, old_trace, visible_percept, [(8, 5)])
+
+        self.assertEqual(updated.target, (8, 5))
+        self.assertEqual(updated.age, 0)
+        self.assertAlmostEqual(updated.certainty, 0.9)
+        self.assertEqual((updated.heading_dx, updated.heading_dy), (1, 0))
+
+    def test_advance_percept_trace_uses_same_target_selected_by_visible_object(self) -> None:
+        world = SpiderWorld(seed=89, vision_range=8, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        positions = [(2, 5), (8, 5)]
+        percept = visible_object(world, positions, radius=visible_range(world), apply_noise=False)
+
+        updated = advance_percept_trace(
+            world,
+            PerceptTrace(target=None, age=0, certainty=0.0),
+            percept,
+            positions,
+        )
+
+        self.assertEqual(updated.target, (8, 5))
+
+    def test_advance_percept_trace_heading_check_blocks_update_when_position_is_not_none(self) -> None:
+        world = SpiderWorld(seed=89, vision_range=8, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        world.state.heading_dx = -1
+        world.state.heading_dy = 0
+        opposed_percept = PerceivedTarget(
+            visible=1.0,
+            certainty=0.9,
+            occluded=0.0,
+            dx=1.0,
+            dy=0.0,
+            dist=3,
+            position=(8, 5),
+        )
+        old_trace = PerceptTrace(target=(3, 3), age=1, certainty=0.5)
+
+        updated = advance_percept_trace(world, old_trace, opposed_percept, [(8, 5)])
+
+        self.assertEqual(updated.age, 2)
+        self.assertEqual(updated.target, (3, 3))
+
+    def test_advance_percept_trace_refreshes_peripheral_target(self) -> None:
+        world = SpiderWorld(seed=89, vision_range=8, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        peripheral_percept = PerceivedTarget(
+            visible=1.0,
+            certainty=0.7,
+            occluded=0.0,
+            dx=0.25,
+            dy=0.5,
+            dist=3,
+            position=(6, 7),
+        )
+        self.assertEqual(
+            _compute_target_visibility_zone(world, world.spider_pos(), (6, 7)),
+            "peripheral",
+        )
+
+        updated = advance_percept_trace(
+            world,
+            PerceptTrace(target=None, age=0, certainty=0.0),
+            peripheral_percept,
+            [(6, 7)],
+        )
+
+        self.assertEqual(updated.target, (6, 7))
+        self.assertEqual(updated.age, 0)
+        self.assertAlmostEqual(updated.certainty, 0.7)
+
+    def test_advance_percept_trace_positions_as_list_of_lists_is_handled(self) -> None:
+        world = SpiderWorld(seed=89, vision_range=8, lizard_move_interval=999999)
+        world.reset(seed=89)
+        world.state.x, world.state.y = 5, 5
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        positions = [[8, 5]]
+        percept = PerceivedTarget(
+            visible=1.0,
+            certainty=0.9,
+            occluded=0.0,
+            dx=1.0,
+            dy=0.0,
+            dist=3,
+            position=(8, 5),
+        )
+
+        updated = advance_percept_trace(
+            world,
+            PerceptTrace(target=None, age=0, certainty=0.0),
+            percept,
+            positions,
+        )
+
+        self.assertEqual(updated.target, (8, 5))
+        self.assertEqual(updated.age, 0)
+
+    def test_advance_percept_trace_occluded_target_does_not_reset(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        old_trace = PerceptTrace(target=(3, 3), age=1, certainty=0.5)
+        occluded_percept = PerceivedTarget(
+            visible=0.0,
+            certainty=0.5,
+            occluded=1.0,
+            dx=0.0,
+            dy=0.0,
+            dist=3,
+        )
+
+        updated = advance_percept_trace(world, old_trace, occluded_percept, [(3, 3)])
+
+        self.assertEqual(updated.age, 2)
+        self.assertEqual(updated.target, (3, 3))
+
+    def test_advance_percept_trace_no_target_no_visible_returns_empty(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        invisible_percept = PerceivedTarget(
+            visible=0.0,
+            certainty=0.0,
+            occluded=0.0,
+            dx=0.0,
+            dy=0.0,
+            dist=0,
+        )
+
+        updated = advance_percept_trace(world, empty_percept_trace(), invisible_percept, [(5, 5)])
+
+        self.assertIsNone(updated.target)
+        self.assertEqual(updated.age, 0)
+
+    def test_advance_percept_trace_ages_and_expires_at_ttl(self) -> None:
+        world = SpiderWorld(seed=89, lizard_move_interval=999999)
+        world.reset(seed=89)
+        ttl = _percept_trace_ttl(world)
+        invisible = PerceivedTarget(
+            visible=0.0,
+            certainty=0.0,
+            occluded=0.0,
+            dx=0.0,
+            dy=0.0,
+            dist=0,
+        )
+        trace = PerceptTrace(target=(5, 5), age=0, certainty=1.0)
+
+        for _ in range(ttl):
+            trace = advance_percept_trace(world, trace, invisible, [(5, 5)])
+
+        self.assertIsNone(trace.target)
+
+    def test_visible_perceived_target_requires_position(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Visible PerceivedTarget requires position"):
+            PerceivedTarget(
+                visible=1.0,
+                certainty=0.9,
+                occluded=0.0,
+                dx=1.0,
+                dy=0.0,
+                dist=3,
+            )
+
+
+class PerceptionCategoryTest(unittest.TestCase):
+    def test_fresh_high_certainty_is_direct(self) -> None:
+        self.assertEqual(
+            _perception_category(
+                certainty=0.8,
+                trace_strength=0.0,
+                scan_age=1,
+                is_delayed=False,
+            ),
+            "direct",
+        )
+
+    def test_trace_takes_precedence_over_delayed(self) -> None:
+        self.assertEqual(
+            _perception_category(
+                certainty=0.2,
+                trace_strength=0.3,
+                scan_age=5,
+                is_delayed=True,
+            ),
+            "trace",
+        )
+
+    def test_delayed_when_not_direct_or_trace(self) -> None:
+        self.assertEqual(
+            _perception_category(
+                certainty=0.2,
+                trace_strength=0.0,
+                scan_age=5,
+                is_delayed=True,
+            ),
+            "delayed",
+        )
+
+    def test_uncertain_when_no_category_matches(self) -> None:
+        self.assertEqual(
+            _perception_category(
+                certainty=0.2,
+                trace_strength=0.0,
+                scan_age=5,
+                is_delayed=False,
+            ),
+            "uncertain",
+        )
 
 
 class PerceptionBuildersTest(unittest.TestCase):
@@ -131,7 +526,7 @@ class PerceptionBuildersTest(unittest.TestCase):
         """
         Verify that serializing a VisualObservation produces the expected flattened vector length.
         
-        Asserts that a VisualObservation containing visual, trace, heading, day/night and predator-threat fields serializes to a numpy array of shape (25,).
+        Asserts that a VisualObservation containing visual, scan recency, trace, heading, day/night and predator-threat fields serializes to a numpy array of shape (32,).
         """
         view = VisualObservation(
             food_visible=1.0,
@@ -151,9 +546,16 @@ class PerceptionBuildersTest(unittest.TestCase):
             predator_dy=0.0,
             heading_dx=1.0,
             heading_dy=0.0,
+            foveal_scan_age=0.0,
             food_trace_strength=0.1,
+            food_trace_heading_dx=1.0,
+            food_trace_heading_dy=0.0,
             shelter_trace_strength=0.0,
+            shelter_trace_heading_dx=0.0,
+            shelter_trace_heading_dy=0.0,
             predator_trace_strength=0.0,
+            predator_trace_heading_dx=0.0,
+            predator_trace_heading_dy=0.0,
             predator_motion_salience=0.0,
             visual_predator_threat=0.0,
             olfactory_predator_threat=0.0,
@@ -161,7 +563,7 @@ class PerceptionBuildersTest(unittest.TestCase):
             night=0.0,
         )
         vector = serialize_observation_view("visual", view)
-        self.assertEqual(vector.shape, (25,))
+        self.assertEqual(vector.shape, (32,))
 
     def test_serialize_observation_view_values_match_as_mapping(self) -> None:
         view = VisualObservation(
@@ -182,9 +584,16 @@ class PerceptionBuildersTest(unittest.TestCase):
             predator_dy=0.0,
             heading_dx=0.0,
             heading_dy=1.0,
+            foveal_scan_age=0.4,
             food_trace_strength=0.0,
+            food_trace_heading_dx=0.0,
+            food_trace_heading_dy=0.0,
             shelter_trace_strength=0.3,
+            shelter_trace_heading_dx=0.0,
+            shelter_trace_heading_dy=1.0,
             predator_trace_strength=0.0,
+            predator_trace_heading_dx=0.0,
+            predator_trace_heading_dy=0.0,
             predator_motion_salience=0.0,
             visual_predator_threat=0.1,
             olfactory_predator_threat=0.2,
@@ -211,6 +620,7 @@ class PerceptionBuildersTest(unittest.TestCase):
             predator_view=self.predator_percept,
             heading_dx=1.0,
             heading_dy=0.0,
+            foveal_scan_age=0.3,
             food_trace_strength=0.25,
             shelter_trace_strength=0.0,
             predator_trace_strength=0.5,
@@ -227,6 +637,7 @@ class PerceptionBuildersTest(unittest.TestCase):
         self.assertAlmostEqual(visual.predator_visible, self.predator_percept.visible)
         self.assertAlmostEqual(visual.predator_dx, self.predator_percept.dx)
         self.assertAlmostEqual(visual.heading_dx, 1.0)
+        self.assertAlmostEqual(visual.foveal_scan_age, 0.3)
         self.assertAlmostEqual(visual.predator_trace_strength, 0.5)
         self.assertAlmostEqual(visual.visual_predator_threat, 0.3)
         self.assertAlmostEqual(visual.olfactory_predator_threat, 0.2)
@@ -238,6 +649,7 @@ class PerceptionBuildersTest(unittest.TestCase):
             predator_view=self.null_percept,
             heading_dx=0.0,
             heading_dy=1.0,
+            foveal_scan_age=1.0,
             food_trace_strength=0.0,
             shelter_trace_strength=0.0,
             predator_trace_strength=0.0,
@@ -252,6 +664,63 @@ class PerceptionBuildersTest(unittest.TestCase):
         self.assertAlmostEqual(visual.predator_visible, 0.0)
         self.assertAlmostEqual(visual.visual_predator_threat, 0.0)
         self.assertAlmostEqual(visual.olfactory_predator_threat, 0.0)
+
+    def test_build_visual_observation_derives_scan_age_from_world(self) -> None:
+        self.world._move_spider_action("ORIENT_RIGHT")
+        visual = build_visual_observation(
+            food_view=self.null_percept,
+            shelter_view=self.null_percept,
+            predator_view=self.null_percept,
+            world=self.world,
+            heading_dx=1.0,
+            heading_dy=0.0,
+            food_trace_strength=0.0,
+            shelter_trace_strength=0.0,
+            predator_trace_strength=0.0,
+            predator_motion_salience_value=0.0,
+            visual_predator_threat=0.0,
+            olfactory_predator_threat=0.0,
+            day=1.0,
+            night=0.0,
+        )
+
+        self.assertAlmostEqual(visual.foveal_scan_age, 0.0)
+
+    def test_observe_exposes_foveal_scan_age_signal_and_meta(self) -> None:
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        summary["perception"]["perceptual_delay_ticks"] = 0.0
+        summary["perception"]["max_scan_age"] = 10.0
+        profile = OperationalProfile.from_summary(summary)
+        world = SpiderWorld(seed=7, operational_profile=profile, lizard_move_interval=999999)
+        world.reset(seed=7)
+        world._move_spider_action("ORIENT_RIGHT")
+
+        obs = world.observe()
+        visual_mapping = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(obs["visual"])
+
+        self.assertAlmostEqual(visual_mapping["foveal_scan_age"], 0.0)
+        self.assertAlmostEqual(obs["meta"]["active_sensing"]["foveal_scan_age"], 0.0)
+        self.assertEqual(obs["meta"]["active_sensing"]["raw_foveal_scan_age"], 0)
+
+    def test_foveal_scan_age_increments_without_rescanning_heading(self) -> None:
+        summary = DEFAULT_OPERATIONAL_PROFILE.to_summary()
+        summary["perception"]["perceptual_delay_ticks"] = 0.0
+        summary["perception"]["max_scan_age"] = 10.0
+        profile = OperationalProfile.from_summary(summary)
+        world = SpiderWorld(seed=7, operational_profile=profile, lizard_move_interval=999999)
+        world.reset(seed=7)
+        world._move_spider_action("ORIENT_RIGHT")
+        fresh_obs = world.observe()
+        fresh_visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(fresh_obs["visual"])
+
+        one_tick_obs, _, _, _ = world.step(ACTION_TO_INDEX["STAY"])
+        two_tick_obs, _, _, _ = world.step(ACTION_TO_INDEX["STAY"])
+        one_tick_visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(one_tick_obs["visual"])
+        two_tick_visual = OBSERVATION_INTERFACE_BY_KEY["visual"].bind_values(two_tick_obs["visual"])
+
+        self.assertAlmostEqual(fresh_visual["foveal_scan_age"], 0.0)
+        self.assertAlmostEqual(one_tick_visual["foveal_scan_age"], 0.1)
+        self.assertAlmostEqual(two_tick_visual["foveal_scan_age"], 0.2)
 
     def test_build_sensory_observation_maps_state_fields(self) -> None:
         self.world.state.recent_pain = 0.3
@@ -297,12 +766,14 @@ class PerceptionBuildersTest(unittest.TestCase):
             food_smell_strength=0.5,
             food_smell_dx=0.3,
             food_smell_dy=-0.1,
-            food_trace=(0.4, -0.2, 0.6),
+            food_trace=(0.4, -0.2, 0.6, 1.0, 0.0),
             food_memory=(0.6, -0.2, 0.4),
         )
         self.assertIsInstance(hunger, HungerObservation)
         self.assertAlmostEqual(hunger.hunger, 0.75)
         self.assertAlmostEqual(hunger.food_trace_dx, 0.4)
+        self.assertAlmostEqual(hunger.food_trace_heading_dx, 1.0)
+        self.assertAlmostEqual(hunger.food_trace_heading_dy, 0.0)
         self.assertAlmostEqual(hunger.food_memory_dx, 0.6)
         self.assertAlmostEqual(hunger.food_memory_age, 0.4)
 
@@ -314,7 +785,7 @@ class PerceptionBuildersTest(unittest.TestCase):
             food_smell_strength=0.0,
             food_smell_dx=0.0,
             food_smell_dy=0.0,
-            food_trace=(0.0, 0.0, 0.0),
+            food_trace=(0.0, 0.0, 0.0, 0.0, 0.0),
             food_memory=(0.0, 0.0, 1.0),
         )
         self.assertAlmostEqual(hunger.food_memory_age, 1.0)
@@ -345,8 +816,8 @@ class PerceptionBuildersTest(unittest.TestCase):
         for name in low_risk:
             self.assertIn(
                 audit[name]["classification"],
-                {"direct_perception", "plausible_memory"},
-                f"Low-risk entry {name!r} should be direct perception or plausible memory",
+                {"direct_perception", "plausible_memory", "self_knowledge"},
+                f"Low-risk entry {name!r} should be direct perception, plausible memory, or self-knowledge",
             )
 
     def test_observation_leakage_audit_all_entries_have_required_fields(self) -> None:
@@ -384,6 +855,12 @@ class PerceptionBuildersTest(unittest.TestCase):
                 f"Entry {key!r} has unexpected risk level {metadata['risk']!r}",
             )
 
+    def test_observation_leakage_audit_scan_age_is_self_knowledge(self) -> None:
+        audit = observation_leakage_audit()
+        self.assertEqual(audit["foveal_scan_age"]["classification"], "self_knowledge")
+        self.assertEqual(audit["foveal_scan_age"]["risk"], "low")
+        self.assertIn("visual", audit["foveal_scan_age"]["modules"])
+
     def test_observation_leakage_audit_memory_vectors_are_plausible_low_risk(self) -> None:
         audit = observation_leakage_audit()
         self.assert_memory_vector_audit_entries(
@@ -393,7 +870,7 @@ class PerceptionBuildersTest(unittest.TestCase):
         )
 
     def test_observation_leakage_audit_no_world_owned_memory_classification(self) -> None:
-        """Reclassified memory-vector entries should not be world-owned memory."""
+        """Reclassified memory-vector entries should not be classified as world_owned_memory."""
         audit = observation_leakage_audit()
         for key in self.memory_vector_audit_keys:
             with self.subTest(memory_vector=key):
@@ -474,12 +951,14 @@ class PerceptionBuildersTest(unittest.TestCase):
             sleep_phase_level=0.7,
             rest_streak_norm=0.5,
             shelter_role_level=0.8,
-            shelter_trace=(0.1, -0.2, 0.55),
+            shelter_trace=(0.1, -0.2, 0.55, 0.0, -1.0),
             shelter_memory=(0.2, -0.1, 0.3),
         )
         self.assertIsInstance(sleep, SleepObservation)
         self.assertAlmostEqual(sleep.sleep_debt, 0.5)
         self.assertAlmostEqual(sleep.shelter_trace_strength, 0.55)
+        self.assertAlmostEqual(sleep.shelter_trace_heading_dx, 0.0)
+        self.assertAlmostEqual(sleep.shelter_trace_heading_dy, -1.0)
         self.assertAlmostEqual(sleep.shelter_memory_dx, 0.2)
         self.assertFalse(hasattr(sleep, "home_dx"))
         self.assertFalse(hasattr(sleep, "home_dy"))
@@ -493,10 +972,10 @@ class PerceptionBuildersTest(unittest.TestCase):
             sleep_phase_level=0.0,
             rest_streak_norm=0.0,
             shelter_role_level=0.0,
-            shelter_trace=(0.0, 0.0, 0.0),
+            shelter_trace=(0.0, 0.0, 0.0, 0.0, 0.0),
             shelter_memory=(0.0, 0.0, 1.0),
         )
-        self.assertEqual(serialize_observation_view("sleep", sleep).shape, (16,))
+        self.assertEqual(serialize_observation_view("sleep", sleep).shape, (18,))
 
     def test_sleep_observation_excludes_removed_home_fields(self) -> None:
         sleep = build_sleep_observation(
@@ -506,7 +985,7 @@ class PerceptionBuildersTest(unittest.TestCase):
             sleep_phase_level=0.0,
             rest_streak_norm=0.0,
             shelter_role_level=0.0,
-            shelter_trace=(0.0, 0.0, 0.0),
+            shelter_trace=(0.0, 0.0, 0.0, 0.0, 0.0),
             shelter_memory=(0.0, 0.0, 1.0),
         )
         self.assertNotIn("home_dx", sleep.as_mapping())
@@ -526,12 +1005,14 @@ class PerceptionBuildersTest(unittest.TestCase):
             dominant_predator_type=DOMINANT_PREDATOR_TYPE_VISUAL,
             on_shelter=0.0,
             night=0.0,
-            predator_trace=(0.2, -0.4, 0.7),
+            predator_trace=(0.2, -0.4, 0.7, -1.0, 0.0),
             predator_memory=(0.7, -0.2, 0.5),
             escape_memory=(0.0, 0.0, 1.0),
         )
         self.assertIsInstance(alert, AlertObservation)
         self.assertAlmostEqual(alert.predator_trace_strength, 0.7)
+        self.assertAlmostEqual(alert.predator_trace_heading_dx, -1.0)
+        self.assertAlmostEqual(alert.predator_trace_heading_dy, 0.0)
         self.assertAlmostEqual(alert.predator_memory_dx, 0.7)
         self.assertAlmostEqual(alert.dominant_predator_none, 0.0)
         self.assertAlmostEqual(alert.dominant_predator_visual, 1.0)
@@ -551,7 +1032,7 @@ class PerceptionBuildersTest(unittest.TestCase):
             dominant_predator_type=0.0,
             on_shelter=0.0,
             night=0.0,
-            predator_trace=(0.0, 0.0, 0.0),
+            predator_trace=(0.0, 0.0, 0.0, 0.0, 0.0),
             predator_memory=(0.0, 0.0, 1.0),
             escape_memory=(0.0, 0.0, 1.0),
         )
@@ -571,11 +1052,11 @@ class PerceptionBuildersTest(unittest.TestCase):
             dominant_predator_type=0.0,
             on_shelter=0.0,
             night=0.0,
-            predator_trace=(0.0, 0.0, 0.0),
+            predator_trace=(0.0, 0.0, 0.0, 0.0, 0.0),
             predator_memory=(0.0, 0.0, 1.0),
             escape_memory=(0.0, 0.0, 1.0),
         )
-        self.assertEqual(serialize_observation_view("alert", alert).shape, (25,))
+        self.assertEqual(serialize_observation_view("alert", alert).shape, (27,))
 
     def test_build_action_context_observation_maps_state_fields(self) -> None:
         self.world.state.hunger = 0.4
@@ -653,6 +1134,7 @@ class PerceptionBuildersTest(unittest.TestCase):
         self.world.state.heading_dx = 0
         self.world.state.heading_dy = -1
         self.world.state.fatigue = 0.37
+        self.world.state.momentum = 0.58
         self.world.map_template.terrain[self.world.spider_pos()] = NARROW
 
         mc = build_motor_context_observation(
@@ -669,6 +1151,32 @@ class PerceptionBuildersTest(unittest.TestCase):
         self.assertAlmostEqual(mc.heading_dy, -1.0)
         self.assertAlmostEqual(mc.terrain_difficulty, TERRAIN_DIFFICULTY[NARROW])
         self.assertAlmostEqual(mc.fatigue, 0.37)
+        self.assertAlmostEqual(mc.momentum, 0.58)
+
+    def test_build_motor_context_observation_clamps_momentum(self) -> None:
+        self.world.state.momentum = 1.5
+        high = build_motor_context_observation(
+            self.world,
+            on_food=0.0,
+            on_shelter=0.0,
+            predator_view=self.null_percept,
+            day=1.0,
+            night=0.0,
+            shelter_role_level=0.0,
+        )
+        self.world.state.momentum = -0.5
+        low = build_motor_context_observation(
+            self.world,
+            on_food=0.0,
+            on_shelter=0.0,
+            predator_view=self.null_percept,
+            day=1.0,
+            night=0.0,
+            shelter_role_level=0.0,
+        )
+
+        self.assertAlmostEqual(high.momentum, 1.0)
+        self.assertAlmostEqual(low.momentum, 0.0)
 
     def test_observe_all_modalities_match_interface_dims(self) -> None:
         obs = self.world.observe()
@@ -678,11 +1186,11 @@ class PerceptionBuildersTest(unittest.TestCase):
 
     def test_observe_world_uses_reduced_observation_dims(self) -> None:
         obs = self.world.observe()
-        self.assertEqual(obs["visual"].shape, (25,))
-        self.assertEqual(obs["sleep"].shape, (16,))
-        self.assertEqual(obs["alert"].shape, (25,))
+        self.assertEqual(obs["visual"].shape, (32,))
+        self.assertEqual(obs["sleep"].shape, (18,))
+        self.assertEqual(obs["alert"].shape, (27,))
         self.assertEqual(obs["action_context"].shape, (15,))
-        self.assertEqual(obs["motor_context"].shape, (13,))
+        self.assertEqual(obs["motor_context"].shape, (14,))
 
     def test_observe_motor_extra_equals_motor_context(self) -> None:
         obs = self.world.observe()
@@ -726,6 +1234,7 @@ class PerceptionBuildersTest(unittest.TestCase):
             predator_view=self.null_percept,
             heading_dx=1.0,
             heading_dy=0.0,
+            foveal_scan_age=0.0,
             food_trace_strength=0.3,
             shelter_trace_strength=0.0,
             predator_trace_strength=0.0,
@@ -754,7 +1263,18 @@ class PerceptionBuildersTest(unittest.TestCase):
             trace = obs["meta"]["percept_traces"][key]
             self.assertEqual(
                 set(trace.keys()),
-                {"target", "age", "certainty", "strength", "dx", "dy", "ttl", "decay"},
+                {
+                    "target",
+                    "age",
+                    "certainty",
+                    "strength",
+                    "dx",
+                    "dy",
+                    "heading_dx",
+                    "heading_dy",
+                    "ttl",
+                    "decay",
+                },
             )
         self.assertIn("predator_motion_salience", obs["meta"])
 
@@ -852,7 +1372,8 @@ class HeadingAwarePerceptionTest(unittest.TestCase):
 
         self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (5, 3)), "foveal")
         self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (5, 5)), "foveal")
-        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (3, 5)), "peripheral")
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (4, 5)), "peripheral")
+        self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (3, 5)), "outside")
         self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (1, 5)), "outside")
         self.assertEqual(_compute_target_visibility_zone(world, (3, 3), (1, 3)), "outside")
 
@@ -1254,13 +1775,13 @@ class NoiseAwarePerceptionTest(unittest.TestCase):
         world = SpiderWorld(seed=9, noise_profile="high", lizard_move_interval=999999)
         obs = world.reset(seed=9)
 
-        self.assertEqual(obs["visual"].shape, (25,))
+        self.assertEqual(obs["visual"].shape, (32,))
         self.assertEqual(obs["sensory"].shape, (12,))
-        self.assertEqual(obs["hunger"].shape, (16,))
-        self.assertEqual(obs["sleep"].shape, (16,))
-        self.assertEqual(obs["alert"].shape, (25,))
+        self.assertEqual(obs["hunger"].shape, (18,))
+        self.assertEqual(obs["sleep"].shape, (18,))
+        self.assertEqual(obs["alert"].shape, (27,))
         self.assertEqual(obs["action_context"].shape, (15,))
-        self.assertEqual(obs["motor_context"].shape, (13,))
+        self.assertEqual(obs["motor_context"].shape, (14,))
 
 
 class VisibilityConfidenceTest(unittest.TestCase):
@@ -1420,6 +1941,8 @@ class LizardDetectsSpiderTest(unittest.TestCase):
         world = SpiderWorld(seed=5, vision_range=4, lizard_move_interval=999999)
         world.reset(seed=5)
         world.state.x, world.state.y = 2, 2
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
         world.lizard.x = 3
         world.lizard.y = 2
         percept = predator_visible_to_spider(world)
@@ -1920,11 +2443,54 @@ class FovThresholdsTest(unittest.TestCase):
         world.reset(seed=77)
         return world
 
-    def test_default_thresholds_are_sixty_and_ninety(self) -> None:
+    def _zone_for_angle(self, angle_degrees: float, **perception_overrides: float) -> str:
+        world = self._make_world(**perception_overrides)
+        world.state.x = 0
+        world.state.y = 0
+        world.state.heading_dx = 1
+        world.state.heading_dy = 0
+        radians = np.deg2rad(angle_degrees)
+        target = (float(np.cos(radians)), float(np.sin(radians)))
+        return _compute_target_visibility_zone(world, world.spider_pos(), target)
+
+    def test_default_thresholds_are_forty_five_and_seventy(self) -> None:
         world = self._make_world()
         foveal, peripheral = _fov_thresholds(world)
-        self.assertAlmostEqual(foveal, 60.0)
-        self.assertAlmostEqual(peripheral, 90.0)
+        self.assertAlmostEqual(foveal, 45.0)
+        self.assertAlmostEqual(peripheral, 70.0)
+
+    def test_default_fov_half_angle_is_forty_five(self) -> None:
+        world = self._make_world()
+        foveal, _ = _fov_thresholds(world)
+        self.assertAlmostEqual(foveal, 45.0)
+
+    def test_default_peripheral_half_angle_is_seventy(self) -> None:
+        world = self._make_world()
+        _, peripheral = _fov_thresholds(world)
+        self.assertAlmostEqual(peripheral, 70.0)
+
+    def test_angle_between_new_and_old_foveal_limits_is_now_peripheral(self) -> None:
+        self.assertEqual(
+            self._zone_for_angle(50.0, fov_half_angle=60.0, peripheral_half_angle=90.0),
+            "foveal",
+        )
+        self.assertEqual(self._zone_for_angle(50.0), "peripheral")
+
+    def test_angle_between_new_and_old_peripheral_limits_is_now_outside(self) -> None:
+        self.assertEqual(
+            self._zone_for_angle(80.0, fov_half_angle=60.0, peripheral_half_angle=90.0),
+            "peripheral",
+        )
+        self.assertEqual(self._zone_for_angle(80.0), "outside")
+
+    def test_exact_foveal_boundary_is_foveal(self) -> None:
+        self.assertEqual(self._zone_for_angle(45.0), "foveal")
+
+    def test_exact_peripheral_boundary_is_peripheral(self) -> None:
+        self.assertEqual(self._zone_for_angle(70.0), "peripheral")
+
+    def test_just_outside_peripheral_boundary_is_outside(self) -> None:
+        self.assertEqual(self._zone_for_angle(70.1), "outside")
 
     def test_custom_fov_half_angle_is_returned(self) -> None:
         world = self._make_world(fov_half_angle=45.0)

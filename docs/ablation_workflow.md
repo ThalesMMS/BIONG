@@ -370,7 +370,7 @@ Practical reading:
 - `summary["reward_audit"]["reward_profiles"][profile]["disposition_summary"]` reports how much weight proxy each profile applies to defended, weakened, removed, outcome-signal, and under-investigation components
 - `summary["reward_audit"]["comparison"]["deltas_vs_minimal"]` uses `austere` as the minimal-shaping baseline
 - `summary["reward_audit"]["comparison"]["behavior_survival"]` reports which scenarios survive under `austere`
-- `predator_dist`, `home_vector`, and `shelter_memory` appear explicitly as higher-risk signals because they depend on world-owned derivation
+- `predator_dist`, `home_vector`, and `shelter_memory` appear explicitly as higher-risk signals because their derivation paths historically included privileged access to unperceived world state
 
 Profile intent:
 
@@ -427,6 +427,22 @@ PYTHONPATH=. python3 -m spider_cortex_sim.offline_analysis \
   --output-dir spider_ablation_report
 ```
 
+For the benchmark-of-record path, write the package during the simulation run:
+
+```bash
+PYTHONPATH=. python3 -m spider_cortex_sim \
+  --budget-profile paper \
+  --checkpoint-selection best \
+  --ablation-suite \
+  --summary spider_architecture_paper_summary.json \
+  --trace spider_architecture_paper_trace.jsonl \
+  --behavior-csv spider_architecture_paper_rows.csv \
+  --benchmark-package spider_architecture_paper_package \
+  --full-summary
+```
+
+`--benchmark-package` is intentionally restricted to `--budget-profile paper --checkpoint-selection best`. The package contains the same offline report bundle plus `benchmark_manifest.json`, `resolved_config.json`, `seed_level_rows.csv`, uncertainty-aware aggregate tables, claim-test uncertainty tables, effect-size tables, supporting CSVs, plots, and `limitations.txt`.
+
 Expected outputs in `spider_ablation_report/`:
 
 - `report.md`
@@ -443,12 +459,15 @@ Practical reading:
 - `ablation_comparison.svg` summarizes `scenario_success_rate` by variant when `behavior_evaluation.ablations` exists or can be reconstructed from the CSV
 - `report.json["primary_benchmark"]` and the `report.md` Primary Benchmark table feature the no-reflex `scenario_success_rate`; the Ablations table includes `eval_reflex_scale` so `0.0` rows are visible
 - `report.md` includes `## Shaping Minimization Program`, which surfaces the dense-vs-minimal gap, component dispositions, behavior survival under `austere`, and a warning banner when shaping dependence is high
+- benchmark packages add `## Benchmark-of-Record Summary`, `## Claim Test Results with Uncertainty`, and `## Effect Sizes Against Baselines` to the Markdown report
 - `scenario_success.svg` and `scenario_checks.csv` help localize regressions by scenario and check without opening the full JSON
 - `reward_components.csv` cross-references reward components aggregated from the summary with observed totals from the trace
 - `trace[*].event_log` records the explicit tick order, making causal inspection possible without reconstructing implicit mutations
 - `reflex_frequency.svg` uses `trace.messages[*].payload.reflex` as its source and becomes richer when the trace was generated with `--debug-trace`
 
 If a block is missing, the runner does not fail. It records the absence in `report.md` and `report.json`.
+
+Confidence intervals are seed-level percentile bootstrap intervals, reported at the confidence level stored in the package manifest and defaulting to 95%. Interpret a wide interval as limited seed evidence, not as a different pass/fail rule: claim tests still pass or fail on point estimates. Effect-size rows report Cohen's d against the named baseline; `negligible`, `small`, `medium`, and `large` labels describe the absolute standardized effect size, while the sign of Cohen's d indicates the direction of the comparison.
 
 ## Workflow Notes
 
@@ -723,19 +742,31 @@ illustrative snapshot did not retain those per-scenario rows.
 
 ## Reading the `0.00` Cases
 
-Those four weak-signal scenarios now include `diagnostics`, `progress_band`, and `outcome_band` so every `0.00` is not interpreted as the same failure.
+The weak-signal scenarios are now formal capability probes. Read them through the
+scenario-owned `probe_type`, `target_skill`, `geometry_assumptions`, and
+`acceptable_partial_progress` fields in `scenarios.py`, not as undifferentiated
+benchmark failures. A `0.00` score on a capability probe is interpretable when
+`failure_mode`, `progress_band`, and `outcome_band` are present.
 
-- `open_field_foraging`: the named diagnosis is the **No-Food-Vector Egress Hypothesis**. The old setup started at `(4,5)` with food at `(10,9)`, distance `10`, exactly zero food-smell strength, outside visual range, behind the initial shelter-facing FOV, and behind a blocked direct east move. A no-reflex diagnostic showed `success_rate=0.0`, mean `food_distance_delta=-4.67`, `partial_progress_rate=0.0`, `died_without_contact_rate=1.0`, and `primary_outcome=regressed_and_died`, so the failure is geometry/perception-signal calibration rather than predator contact or check calibration.
-- `corridor_gauntlet`: `failure_mode` separates frozen-in-shelter, contact failure, survived-without-progress, progress-then-died, and scoring-mismatch cases; `outcome_band` still distinguishes safe stalling from death after partial progress
-- `exposed_day_foraging`: `progress_band=regressed` usually indicates retreat or defensive movement that never turned into food progress
-- `food_deprivation`: `approaches_food` can pass while the scenario still remains `0.00`; that now appears as `partial_progress_died`, which signals real approach without enough homeostatic recovery
+| Scenario | Experimental purpose | Failure-mode interpretation |
+| --- | --- | --- |
+| `open_field_foraging` | Probe `food_vector_acquisition_exposed`: can the spider acquire a food vector after leaving shelter into exposed terrain? | `left_without_food_signal` or `regressed_and_died` points to food-signal or geometry calibration. Positive `food_distance_delta` or shelter exit with a food signal counts as partial acquisition evidence. |
+| `corridor_gauntlet` | Probe `corridor_navigation_under_threat`: can the spider exit shelter and commit directionally through a corridor with a lizard on the row? | `frozen_in_shelter`, contact failures, `survived_no_progress`, and `progress_then_died` separate shelter exit, threat handling, navigation, and survival timing. Positive food progress without contact is capability evidence. |
+| `exposed_day_foraging` | Probe `daytime_foraging_under_patrol`: can the spider make food progress during daytime with a nearby patrol after frontier-separated placement? | `cautious_inert` means arbitration chose safety over food, while `partial_progress` is acceptable probe behavior showing foraging capability under pressure. Remaining failures should be interpreted as arbitration limits rather than predator-on-food geometry bugs. |
+| `food_deprivation` | Probe `hunger_driven_commitment`: can acute hunger drive shelter exit, food approach, and recovery before the homeostatic timer wins? | `no_commitment`, `orientation_failure`, and `timing_failure` distinguish missing hunger commitment, wrong direction, and a calibrated race lost after commitment. `commits_to_foraging=True` with `approaches_food=True` is partial commitment evidence. |
+
+These scenarios are not claim tests. Claim tests target emergence hypotheses:
+learning without privileged support, no-reflex escape, memory benefit, noise
+stability, and predator-type specialization. The capability probes instead map
+capability boundaries, geometry assumptions, and calibration failures. They stay
+in the full benchmark with `benchmark_tier="capability"` and
+`is_capability_probe=True`, but they are excluded from `ClaimTestSpec.scenarios`.
 
 In practice:
 
 - `suite[scenario]["diagnostics"]["primary_outcome"]` summarizes the dominant outcome
 - `suite[scenario]["diagnostics"]["outcome_distribution"]` shows the mix of episode outcomes
 - `suite[scenario]["diagnostics"]["primary_failure_mode"]` and `failure_mode_distribution` separate commitment, missing food signal, orientation, timing, and scoring failures when a scenario emits `failure_mode`
+- `suite[scenario]["probe_type"]`, `target_skill`, `benchmark_tier`, and `acceptable_partial_progress` record the formal probe framing
 - `partial_progress_rate` helps separate a poorly calibrated scenario from one that truly has no useful signal
-- In the CSV, use `scenario_focus`, `metric_progress_band`, `metric_outcome_band`, and `metric_failure_mode` to filter these cases without opening the full JSON
-
-For `open_field_foraging`, the immediate improvement path is to keep the original checks while calibrating the target food to a reachable exposed cell with a positive initial food cue. Under the strong/report benchmark profile, this scenario should now show nonzero food progress and should not collapse into `left_without_food_signal` or `regressed_and_died`.
+- In the CSV, use `is_capability_probe`, `scenario_focus`, `metric_progress_band`, `metric_outcome_band`, and `metric_failure_mode` to filter these cases without opening the full JSON

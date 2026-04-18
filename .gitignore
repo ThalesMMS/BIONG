@@ -180,3 +180,5 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .DS_Store
+AGENTS.md
+/spider_brain

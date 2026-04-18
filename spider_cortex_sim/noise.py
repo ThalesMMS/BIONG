@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Dict, Iterator, Mapping, Tuple
+
+import numpy as np
+
+from .maps import BLOCKED, CLUTTER, NARROW
+
+if TYPE_CHECKING:
+    from .world import SpiderWorld
 
 
 _NOISE_SECTION_KEYS: dict[str, tuple[str, ...]] = {
@@ -30,6 +37,192 @@ _NOISE_SECTION_DEFAULTS: dict[str, dict[str, float]] = {
         "direction_jitter_per_tick": 0.0,
     },
 }
+
+TERRAIN_DIFFICULTY: Dict[str, float] = {
+    CLUTTER: 0.4,
+    NARROW: 0.7,
+    BLOCKED: 1.0,
+}
+SLIP_ADJACENT_ACTIONS: Dict[str, Tuple[str, ...]] = {
+    "MOVE_UP": ("MOVE_LEFT", "MOVE_RIGHT"),
+    "MOVE_DOWN": ("MOVE_LEFT", "MOVE_RIGHT"),
+    "MOVE_LEFT": ("MOVE_UP", "MOVE_DOWN"),
+    "MOVE_RIGHT": ("MOVE_UP", "MOVE_DOWN"),
+}
+
+
+def _terrain_difficulty(terrain: str) -> float:
+    return float(np.clip(TERRAIN_DIFFICULTY.get(terrain, 0.0), 0.0, 1.0))
+
+
+def _compute_execution_difficulty_core(
+    heading: tuple[float, float],
+    intended_direction: tuple[float, float],
+    *,
+    terrain_difficulty: float,
+    fatigue: float,
+    momentum: float = 0.0,
+) -> tuple[float, dict[str, float]]:
+    heading_dx, heading_dy = float(heading[0]), float(heading[1])
+    move_dx, move_dy = float(intended_direction[0]), float(intended_direction[1])
+    heading_norm = float(np.hypot(heading_dx, heading_dy))
+    move_norm = float(np.hypot(move_dx, move_dy))
+    if heading_norm <= 0.0 or move_norm <= 0.0:
+        orientation_alignment = 1.0
+    else:
+        dot = heading_dx * move_dx + heading_dy * move_dy
+        cosine = float(np.clip(dot / (heading_norm * move_norm), -1.0, 1.0))
+        orientation_alignment = float(np.clip((cosine + 1.0) / 2.0, 0.0, 1.0))
+    terrain_factor = float(np.clip(terrain_difficulty, 0.0, 1.0))
+    fatigue_factor = float(np.clip(fatigue, 0.0, 1.0))
+    momentum_factor = float(np.clip(momentum, 0.0, 1.0))
+    orientation_mismatch = float(np.clip(1.0 - orientation_alignment, 0.0, 1.0))
+    raw_difficulty = terrain_factor * orientation_mismatch * (1.0 + fatigue_factor)
+    if orientation_alignment > 0.7:
+        raw_difficulty *= 1.0 - momentum_factor * 0.5
+    difficulty = float(np.clip(raw_difficulty, 0.0, 1.0))
+    return difficulty, {
+        "heading_dx": heading_dx,
+        "heading_dy": heading_dy,
+        "move_dx": move_dx,
+        "move_dy": move_dy,
+        "orientation_alignment": orientation_alignment,
+        "orientation_mismatch": orientation_mismatch,
+        "terrain_difficulty": terrain_factor,
+        "fatigue_factor": fatigue_factor,
+        "momentum": momentum_factor,
+        "raw_difficulty": float(raw_difficulty),
+    }
+
+
+def compute_execution_difficulty(
+    heading: tuple[float, float],
+    intended_direction: tuple[float, float],
+    terrain: str,
+    fatigue: float,
+    momentum: float = 0.0,
+) -> tuple[float, dict[str, float]]:
+    """
+    Compute motor execution difficulty from heading, action direction, terrain,
+    fatigue, and bounded execution momentum.
+    """
+    return _compute_execution_difficulty_core(
+        heading,
+        intended_direction,
+        terrain_difficulty=_terrain_difficulty(terrain),
+        fatigue=fatigue,
+        momentum=momentum,
+    )
+
+
+def sample_slip_action(action_name: str, motor_rng: Any) -> str:
+    """
+    Sample the substitute action for a slipped movement action.
+    """
+    adjacent = SLIP_ADJACENT_ACTIONS.get(action_name, ())
+    if not adjacent:
+        return action_name
+    candidates = ("STAY", *adjacent)
+    weights = np.array([0.6, *([0.4 / len(adjacent)] * len(adjacent))], dtype=float)
+    index = int(motor_rng.choice(len(candidates), p=weights))
+    return candidates[index]
+
+
+def motor_slip_reason(components: Mapping[str, float], *, base_slip_rate: float) -> str:
+    """
+    Return the primary diagnostic reason for a sampled motor slip.
+    """
+    if base_slip_rate > 0.0 and components["raw_difficulty"] <= 0.0:
+        return "base"
+    scores = {
+        "terrain": components["terrain_difficulty"],
+        "orientation": components["orientation_mismatch"],
+        "fatigue": components["fatigue_factor"],
+    }
+    return max(scores, key=scores.get)
+
+
+def apply_motor_noise(world: "SpiderWorld", action_name: str) -> dict[str, object]:
+    """
+    Determine whether a requested action slips and return execution diagnostics.
+    """
+    from .interfaces import ACTION_DELTAS, LOCOMOTION_ACTIONS, ORIENT_HEADINGS
+
+    if action_name not in tuple(LOCOMOTION_ACTIONS):
+        raise ValueError(f"Unknown locomotion action {action_name!r}.")
+
+    cfg = world.noise_profile.motor
+    base_slip_rate = float(np.clip(cfg["action_flip_prob"], 0.0, 1.0))
+    orientation_factor = max(0.0, float(cfg["orientation_slip_factor"]))
+    terrain_factor = max(0.0, float(cfg["terrain_slip_factor"]))
+    fatigue_factor = max(0.0, float(cfg["fatigue_slip_factor"]))
+    if action_name in ORIENT_HEADINGS:
+        return {
+            "occurred": False,
+            "reason": "none",
+            "original_action": action_name,
+            "executed_action": action_name,
+            "slip_probability": 0.0,
+            "execution_difficulty": 0.0,
+            "terrain": "orientation_only",
+            "components": {
+                "heading_dx": 0.0,
+                "heading_dy": 0.0,
+                "move_dx": 0.0,
+                "move_dy": 0.0,
+                "orientation_alignment": 1.0,
+                "orientation_mismatch": 0.0,
+                "terrain_difficulty": 0.0,
+                "fatigue_factor": 0.0,
+                "momentum": float(np.clip(world.state.momentum, 0.0, 1.0)),
+                "raw_difficulty": 0.0,
+            },
+            "base_slip_rate": base_slip_rate,
+            "orientation_slip_factor": orientation_factor,
+            "terrain_slip_factor": terrain_factor,
+            "fatigue_slip_factor": fatigue_factor,
+        }
+
+    heading = (float(world.state.heading_dx), float(world.state.heading_dy))
+    move_direction = ACTION_DELTAS.get(action_name, (0, 0))
+    terrain = world.terrain_at(world.spider_pos())
+    difficulty, components = compute_execution_difficulty(
+        heading,
+        move_direction,
+        terrain,
+        float(world.state.fatigue),
+        float(world.state.momentum),
+    )
+    result: dict[str, object] = {
+        "occurred": False,
+        "reason": "none",
+        "original_action": action_name,
+        "executed_action": action_name,
+        "slip_probability": 0.0,
+        "execution_difficulty": difficulty,
+        "terrain": terrain,
+        "components": dict(components),
+        "base_slip_rate": base_slip_rate,
+        "orientation_slip_factor": orientation_factor,
+        "terrain_slip_factor": terrain_factor,
+        "fatigue_slip_factor": fatigue_factor,
+    }
+    slip_pressure = difficulty * (
+        terrain_factor
+        + orientation_factor * components["orientation_mismatch"]
+        + fatigue_factor * components["fatigue_factor"]
+    )
+    if action_name == "STAY":
+        slip_probability = 0.0
+    else:
+        slip_probability = float(np.clip(base_slip_rate + slip_pressure, 0.0, 1.0))
+    result["slip_probability"] = slip_probability
+    if action_name != "STAY" and slip_probability > 0.0:
+        if world.motor_rng.random() < slip_probability:
+            result["occurred"] = True
+            result["executed_action"] = sample_slip_action(action_name, world.motor_rng)
+            result["reason"] = motor_slip_reason(components, base_slip_rate=base_slip_rate)
+    return result
 
 
 def _copy_float_mapping(values: Mapping[str, float]) -> dict[str, float]:

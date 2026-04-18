@@ -1,5 +1,7 @@
 # Biologically-Inspired Organism, Not a Game
 
+![Screenshot](screenshot.png)
+
 This project implements a simulated spider with a modular brain, explicit predator pressure, standardized neural interfaces, online learning, deterministic behavioral scenarios, and reproducible evaluation workflows.
 
 The current version centers on three structural changes:
@@ -87,7 +89,7 @@ Recurrent memory is opt-in per proposer. Set `BrainAblationConfig(recurrent_modu
 
 Layer responsibilities:
 
-- `spider_cortex_sim/world.py`: ecological dynamics, body state, and explicit observable memory
+- `spider_cortex_sim/world.py`: ecological dynamics, body state, and management of explicit observable memory
 - `spider_cortex_sim/interfaces.py`: named contracts between world and brain
 - `spider_cortex_sim/modules.py`: proposer networks only
 - `spider_cortex_sim/agent.py`: local reflexes, auxiliary targets, valence gating, and final motor correction
@@ -237,6 +239,104 @@ Reward profiles:
 - `ecological`: less direct shaping and more pressure from world dynamics
 - `austere`: minimal-progress baseline for shaping audits and contrast
 
+## Shaping Reduction Program
+
+The shaping-reduction program treats dense rewards as scaffolding unless they
+survive an explicit audit. The working philosophy is simple: trust a behavior
+more when it still appears under `austere`, where direct progress rewards,
+shelter-entry bonuses, predator-escape bonuses, and day-exploration guidance
+are removed or reduced. `classic` and `ecological` remain useful training and
+comparison profiles, but claims should increasingly rest on behavior that
+survives the austere profile.
+
+The reduction roadmap in `spider_cortex_sim/reward.py` tracks the next reward
+terms to defend, weaken, or investigate:
+
+- `resting`: high priority, kept weakened while rest outcome evidence is
+  separated from configurable rest bonuses.
+- `sleep_debt_pressure`: high priority, defended only while it behaves like
+  physiological pressure rather than indirect shelter guidance.
+- `night_exposure`, `hunger_pressure`, and `fatigue_pressure`: medium priority,
+  currently defended as ecological or physiological costs, with bounded gap
+  requirements.
+- `homeostasis_penalty` and `terrain_cost`: medium priority, under
+  investigation because they mix legitimate ecological pressure with possible
+  hidden steering.
+- `action_cost`: low priority, defended as a small universal energy cost.
+
+Gap policy defines when dense profiles are too far ahead of austere. The hard
+limits are:
+
+- `classic_minus_austere` scenario success delta <= `0.20`
+- `ecological_minus_austere` scenario success delta <= `0.15`
+- `classic_minus_austere` mean reward gap <= `0.50`
+- `ecological_minus_austere` mean reward gap <= `0.40`
+- austere survival rate >= `0.50`
+
+Warnings fire before gates. For upper-bound gaps, the warning threshold is
+`0.80 * hard_limit`. For austere survival, the warning band starts below
+`0.50 / 0.80 = 0.625` and becomes a gate violation below `0.50`.
+
+Evidence criteria classify reward terms as follows:
+
+- `removed` or removable: austere survival reaches the threshold on all
+  relevant scenarios and claim tests do not regress.
+- `weakened`: austere survival reaches the threshold on a majority of relevant
+  scenarios, while remaining classic/ecological gaps stay bounded.
+- `defended`: the term has documented physiological or ecological necessity,
+  not just behavioral convenience.
+- `under_investigation`: more scenario evidence is needed before the term can
+  be defended, weakened, or removed.
+- `outcome_signal`: sparse outcome anchors such as feeding, predator contact,
+  and death are tracked separately from dense progress shaping.
+
+Scenario requirements decide how austere survival affects reports:
+
+- Gate scenarios: `night_rest`, `predator_edge`, `entrance_ambush`,
+  `shelter_blockade`, `two_shelter_tradeoff`,
+  `visual_olfactory_pincer`, `olfactory_ambush`, and
+  `visual_hunter_open_field`.
+- Warning scenarios: `recover_after_failed_chase`,
+  `food_vs_predator_conflict`, and `sleep_vs_exploration_conflict`.
+- Diagnostic scenarios: `open_field_foraging`, `corridor_gauntlet`,
+  `exposed_day_foraging`, and `food_deprivation`.
+
+Primary claim tests now depend on austere survival. If a primary claim has
+`austere_survival_required=True`, every gate scenario in that claim must pass
+the austere survival threshold before the claim can pass. This applies to
+`learning_without_privileged_signals`, `escape_without_reflex_support`, and
+`specialization_emerges_with_multiple_predators`.
+
+When a benchmark summary includes austere comparison data, read these fields
+first:
+
+```json
+{
+  "austere_survival_summary": {
+    "overall_survival_rate": 0.75,
+    "gate_pass_count": 6,
+    "gate_fail_count": 2,
+    "warning_scenarios": [],
+    "gap_policy_violations": []
+  },
+  "austere_survival_gate_passed": false,
+  "shaping_dependent_behaviors": [
+    {
+      "scenario": "night_rest",
+      "profile": "classic",
+      "success_rate_delta": 0.35,
+      "limit": 0.20
+    }
+  ]
+}
+```
+
+In this example, the overall austere rate is informative but not sufficient:
+two gate scenarios failed, so primary claims that rely on those gates cannot be
+treated as valid. The `shaping_dependent_behaviors` entry says `classic`
+outperformed `austere` on `night_rest` beyond the policy limit, so the roadmap
+should treat the relevant rest or sleep terms as reduction risks.
+
 ## Deterministic Scenarios
 
 Run a single scenario:
@@ -334,6 +434,31 @@ The scenario diagnostics block also summarizes:
 - `outcome_distribution`
 - `partial_progress_rate`
 - `died_without_contact_rate`
+
+### Capability Probes
+
+Behavioral scenarios are split between emergence gates and capability probes.
+Emergence gates support claim tests: they ask whether learned behavior remains
+present without privileged support, improves with memory, survives noise, or
+specializes by predator type. Capability probes map narrower behavioral
+boundaries inside the full benchmark. They can score `0.00` while still
+producing interpretable evidence through `failure_mode`, `progress_band`, and
+`outcome_band`.
+
+The explicit capability probes are:
+
+| Scenario | Target skill | Acceptable partial progress |
+| --- | --- | --- |
+| `open_field_foraging` | `food_vector_acquisition_exposed` | Any positive `food_distance_delta` or `left_shelter` with food signal present indicates food-vector acquisition capability even if `foraging_viable` fails. |
+| `corridor_gauntlet` | `corridor_navigation_under_threat` | Any positive `food_distance_delta` without contact indicates corridor navigation capability; `survived_no_progress` indicates shelter-exit failure distinct from navigation failure. |
+| `exposed_day_foraging` | `daytime_foraging_under_patrol` | Any positive `food_distance_delta` indicates foraging capability even under threat; `cautious_inert` indicates arbitration chose safety over food. |
+| `food_deprivation` | `hunger_driven_commitment` | `commits_to_foraging=True` with `approaches_food=True` indicates commitment capability even if `timing_failure` prevents full success. |
+
+These four scenarios remain in the full behavioral benchmark with
+`benchmark_tier="capability"` and `is_capability_probe=True`. They are excluded
+from claim tests because their role is to expose capability boundaries and
+calibration outcomes, not to serve as pass/fail evidence for the repository's
+emergence hypotheses.
 
 ## Emergence Hypothesis
 
@@ -490,7 +615,7 @@ The `summary` and `trace` include:
 - `config.budget`, including resolved profile, benchmark strength, seeds, and explicit overrides
 - `checkpointing` when `--checkpoint-selection best` is used
 - explicit certainty and occlusion fields per visual channel
-- world-owned `heading` and decayed percept traces in trace metadata
+- world-layer maintained `heading` and decayed percept traces in trace metadata
 - explicit `predator_motion_salience`
 - normalized memory vectors in trace metadata
 - predator occupancy by state (`PATROL`, `ORIENT`, `INVESTIGATE`, `CHASE`, `WAIT`, `RECOVER`)
@@ -522,6 +647,7 @@ The CLI exposes explicit budget profiles:
 - `smoke`: quick sanity or CI profile (`6` episodes, `1` evaluation run, `60` steps, seed `7`)
 - `dev`: short reproducible local benchmark (`12` episodes, `2` evaluation runs, `90` steps, seeds `7/17/29`)
 - `report`: stronger reporting workflow (`24` episodes, `4` evaluation runs, `120` steps, `2` repetitions per scenario, seeds `7/17/29/41/53`)
+- `paper`: publication-grade benchmark-of-record workflow; requires `--checkpoint-selection best` and records the resolved seed and checkpoint budget in the summary
 
 Canonical commands:
 
@@ -544,6 +670,25 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 ```
 
 Without `--budget-profile`, the run still works in `custom` mode and records the effective values and overrides in `summary["config"]["budget"]`.
+
+## Benchmark Of Record
+
+Use the `paper` budget with best-checkpoint selection for publication-facing architecture claims. Add `--benchmark-package` to write a reproducible package containing the manifest, resolved configuration, seed-level rows, uncertainty-aware aggregate tables, claim-test tables, effect-size tables, reports, plots, supporting CSVs, and limitations.
+
+```bash
+PYTHONPATH=. python3 -m spider_cortex_sim \
+  --budget-profile paper \
+  --checkpoint-selection best \
+  --ablation-suite \
+  --summary spider_architecture_paper_summary.json \
+  --behavior-csv spider_architecture_paper_rows.csv \
+  --benchmark-package spider_architecture_paper_package \
+  --full-summary
+```
+
+The package manifest records file hashes, seed count, confidence level, resolved budget metadata, and checkpoint-selection metadata. The CLI rejects `--benchmark-package` unless both `--budget-profile paper` and `--checkpoint-selection best` are present.
+
+Uncertainty reporting is seed-level. Confidence intervals are percentile bootstrap intervals over seed-level metric values and default to 95%. Claim-test pass/fail logic remains based on point estimates; the package adds `reference_uncertainty`, `comparison_uncertainty`, `delta_uncertainty`, and `effect_size_uncertainty` for reporting. Effect-size tables report Cohen's d with `negligible`, `small`, `medium`, and `large` magnitude labels.
 
 ## Comparison Workflows
 
@@ -653,6 +798,8 @@ The detailed ablation workflow, variant definitions, and canonical check-in tabl
 ## Natural Extensions
 
 1. implemented: multiple predators with different sensory niches
-2. model a more strongly oriented field of view rather than a short omnidirectional one
+2. implemented: a more strongly oriented field of view with active sensing
 3. separate locomotion into gait, speed, and body orientation
 4. migrate the networks to PyTorch while preserving the same modular interface signature
+
+Active sensing now uses a tightened `45` degree foveal cone and `70` degree peripheral cone. `ORIENT_*` actions refresh current-tick perception immediately after the heading change, and scan recency is tracked so observations can distinguish fresh inspection from stale or never-scanned headings.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -58,6 +59,48 @@ def reset_sleep_state(world: "SpiderWorld") -> None:
     Reset the world's sleep state to the "AWAKE" phase and set the rest streak to 0.
     """
     set_sleep_state(world, "AWAKE", 0)
+
+
+def heading_change_angle(
+    previous_heading: tuple[int, int] | tuple[float, float],
+    new_heading: tuple[int, int] | tuple[float, float],
+) -> float:
+    """
+    Return the heading-change angle in degrees between two heading vectors.
+    """
+    prev_dx, prev_dy = float(previous_heading[0]), float(previous_heading[1])
+    new_dx, new_dy = float(new_heading[0]), float(new_heading[1])
+    prev_norm = math.hypot(prev_dx, prev_dy)
+    new_norm = math.hypot(new_dx, new_dy)
+    if prev_norm <= 0.0 or new_norm <= 0.0:
+        return 0.0
+    cosine = (prev_dx * new_dx + prev_dy * new_dy) / (prev_norm * new_norm)
+    cosine = max(-1.0, min(1.0, cosine))
+    return float(math.degrees(math.acos(cosine)))
+
+
+def apply_turn_fatigue(
+    world: "SpiderWorld",
+    previous_heading: tuple[int, int],
+    new_heading: tuple[int, int],
+) -> dict[str, float]:
+    """
+    Apply minor fatigue cost for sharp body-heading changes.
+
+    Reversals use the larger reverse cost instead of stacking both turn costs.
+    """
+    angle = heading_change_angle(previous_heading, new_heading)
+    fatigue_cost = 0.0
+    if math.isclose(angle, 180.0, abs_tol=1e-6):
+        fatigue_cost = float(world.reward_config["reverse_fatigue_cost"])
+    elif angle >= 90.0:
+        fatigue_cost = float(world.reward_config["turn_fatigue_cost"])
+    if fatigue_cost > 0.0:
+        world.state.fatigue += fatigue_cost
+    return {
+        "turn_angle": float(angle),
+        "turn_fatigue_applied": float(fatigue_cost),
+    }
 
 
 def sleep_phase_from_streak(rest_streak: int, *, night: bool, shelter_role: str) -> str:
@@ -156,11 +199,14 @@ def apply_restoration(
     *,
     night: bool,
     shelter_role: str,
-) -> None:
+) -> dict[str, object]:
     """
     Apply restorative effects to the world's physiological state based on the current sleep phase.
     
-    Modifies world.state.fatigue, world.state.sleep_debt, and world.state.health according to `sleep_phase`, with different magnitudes depending on `night` and `shelter_role`. Intended phases: "SETTLING", "RESTING", and "DEEP_SLEEP".
+    Modifies world.state.fatigue, world.state.sleep_debt, world.state.health, and
+    world.state.momentum according to `sleep_phase`, with different magnitudes
+    depending on `night` and `shelter_role`. Intended phases: "SETTLING",
+    "RESTING", and "DEEP_SLEEP".
     
     Parameters:
         world (SpiderWorld): Environment and mutable state that will be updated.
@@ -169,6 +215,7 @@ def apply_restoration(
         shelter_role (str): Role of the shelter at the spider's position (e.g., "entrance", "inside", "deep") which influences restoration during "RESTING".
     """
     cfg = world.reward_config
+    momentum_before = float(world.state.momentum)
     if sleep_phase == "RESTING":
         if shelter_role == "entrance":
             fatigue_restore = 0.12 if night else 0.06
@@ -188,6 +235,14 @@ def apply_restoration(
         settle_restore = 0.10 if night else 0.05
         world.state.fatigue = max(0.0, world.state.fatigue - settle_restore)
         world.state.health = min(1.0, world.state.health + (0.02 if night else 0.0))
+    if sleep_phase in {"SETTLING", "RESTING", "DEEP_SLEEP"}:
+        world.state.momentum = 0.0
+    momentum_after = float(world.state.momentum)
+    return {
+        "momentum_before": momentum_before,
+        "momentum_after": momentum_after,
+        "momentum_reset": bool(momentum_before > 0.0 and momentum_after == 0.0),
+    }
 
 
 def resolve_autonomic_behaviors(
@@ -265,7 +320,8 @@ def resolve_autonomic_behaviors(
         new_rest_streak = world.state.rest_streak + 1
         phase = sleep_phase_from_streak(new_rest_streak, night=night, shelter_role=shelter_role)
         set_sleep_state(world, phase, new_rest_streak)
-        apply_restoration(world, phase, night=night, shelter_role=shelter_role)
+        restoration = apply_restoration(world, phase, night=night, shelter_role=shelter_role)
+        info["restoration"] = dict(restoration)
         if tick_context is not None:
             tick_context.record_event(
                 "autonomic",
@@ -274,6 +330,9 @@ def resolve_autonomic_behaviors(
                 rest_streak=int(world.state.rest_streak),
                 sleep_drive=round(float(sleep_drive), 6),
                 shelter_role=shelter_role,
+                momentum_before=round(float(restoration["momentum_before"]), 6),
+                momentum_after=round(float(restoration["momentum_after"]), 6),
+                momentum_reset=bool(restoration["momentum_reset"]),
             )
 
         if phase == "SETTLING":
@@ -354,3 +413,4 @@ def clip_state(world: "SpiderWorld") -> None:
     world.state.health = max(0.0, min(1.0, world.state.health))
     world.state.recent_pain = max(0.0, min(1.0, world.state.recent_pain))
     world.state.recent_contact = max(0.0, min(1.0, world.state.recent_contact))
+    world.state.momentum = max(0.0, min(1.0, world.state.momentum))

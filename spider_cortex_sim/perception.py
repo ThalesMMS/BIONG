@@ -20,6 +20,7 @@ from .interfaces import (
     VisualObservation,
 )
 from .maps import BLOCKED, CLUTTER, NARROW, OPEN
+from .world_types import PerceptTrace
 
 if TYPE_CHECKING:
     from .world import SpiderWorld
@@ -156,6 +157,13 @@ OBSERVATION_LEAKAGE_AUDIT = {
         "source": "spider_cortex_sim.memory.refresh_memory + spider_cortex_sim.memory.memory_vector",
         "notes": "Derived from movement history and world-boundary clamping without walkability or shelter-policy queries.",
     },
+    "foveal_scan_age": {
+        "classification": "self_knowledge",
+        "risk": "low",
+        "modules": ["visual"],
+        "source": "spider_cortex_sim.world._scan_age_for_heading",
+        "notes": "Derived from the spider's own heading-change history and does not expose hidden target locations.",
+    },
 }
 
 
@@ -188,15 +196,30 @@ def _fov_thresholds(world: "SpiderWorld") -> tuple[float, float]:
     """
     Compute configured field-of-view half-angle thresholds.
     
-    Reads `fov_half_angle` (default 60.0) and `peripheral_half_angle` (default 90.0) from the world's perception configuration, clips each to the range [0.0, 180.0], and returns the foveal half-angle and the peripheral half-angle (the latter is at least the foveal value).
+    Reads `fov_half_angle` (default 45.0) and `peripheral_half_angle` (default 70.0) from the world's perception configuration, clips each to the range [0.0, 180.0], and returns the foveal half-angle and the peripheral half-angle (the latter is at least the foveal value).
     
     Returns:
         tuple[float, float]: (foveal_half_angle, peripheral_half_angle) in degrees.
     """
     cfg = world.operational_profile.perception
-    foveal_half_angle = float(np.clip(cfg.get("fov_half_angle", 60.0), 0.0, 180.0))
-    peripheral_half_angle = float(np.clip(cfg.get("peripheral_half_angle", 90.0), 0.0, 180.0))
+    foveal_half_angle = float(np.clip(cfg.get("fov_half_angle", 45.0), 0.0, 180.0))
+    peripheral_half_angle = float(np.clip(cfg.get("peripheral_half_angle", 70.0), 0.0, 180.0))
     return foveal_half_angle, max(foveal_half_angle, peripheral_half_angle)
+
+
+def _max_scan_age(world: "SpiderWorld") -> float:
+    """Return the scan-age normalization horizon in ticks."""
+    return max(1.0, float(world.operational_profile.perception.get("max_scan_age", 10.0)))
+
+
+def _normalized_scan_age(
+    world: "SpiderWorld",
+    heading_dx: float,
+    heading_dy: float,
+) -> float:
+    """Return normalized age for the current foveal heading."""
+    scan_age = world._scan_age_for_heading(int(heading_dx), int(heading_dy))
+    return float(np.clip(float(scan_age) / _max_scan_age(world), 0.0, 1.0))
 
 
 def _compute_target_visibility_zone(
@@ -242,6 +265,101 @@ def _heading_allows_target(
         bool: True if the target is classified as inside the visual field, False if classified as "outside".
     """
     return _compute_target_visibility_zone(world, source, target) != "outside"
+
+
+def empty_percept_trace() -> PerceptTrace:
+    """
+    Create a new empty short-lived percept trace slot.
+    """
+    return PerceptTrace(target=None, age=0, certainty=0.0, heading_dx=0, heading_dy=0)
+
+
+def _percept_trace_ttl(world: "SpiderWorld") -> int:
+    """
+    Return the configured TTL for short percept traces.
+    """
+    return max(1, round(world.operational_profile.perception["percept_trace_ttl"]))
+
+
+def _percept_trace_decay(world: "SpiderWorld") -> float:
+    """
+    Return the configured multiplicative decay for short percept traces.
+    """
+    return float(np.clip(world.operational_profile.perception["percept_trace_decay"], 0.0, 1.0))
+
+
+def trace_strength(world: "SpiderWorld", trace: PerceptTrace) -> float:
+    """
+    Compute the current decayed strength of a short percept trace.
+    """
+    if trace.target is None or trace.age >= _percept_trace_ttl(world):
+        return 0.0
+    return float(np.clip(trace.certainty * (_percept_trace_decay(world) ** trace.age), 0.0, 1.0))
+
+
+def trace_view(world: "SpiderWorld", trace: PerceptTrace) -> dict[str, object]:
+    """
+    Serialize a percept trace with derived direction and strength metadata.
+    """
+    strength = trace_strength(world, trace)
+    if trace.target is None or strength <= 0.0:
+        dx = 0.0
+        dy = 0.0
+        heading_dx = 0
+        heading_dy = 0
+    else:
+        dx, dy, _ = world._relative(trace.target)
+        heading_dx = int(trace.heading_dx)
+        heading_dy = int(trace.heading_dy)
+    return {
+        "target": (
+            [int(trace.target[0]), int(trace.target[1])]
+            if trace.target is not None and strength > 0.0
+            else None
+        ),
+        "age": int(trace.age),
+        "certainty": float(trace.certainty),
+        "strength": float(strength),
+        "dx": float(dx),
+        "dy": float(dy),
+        "heading_dx": int(heading_dx),
+        "heading_dy": int(heading_dy),
+        "ttl": _percept_trace_ttl(world),
+        "decay": _percept_trace_decay(world),
+    }
+
+
+PERCEPTION_CATEGORY_CERTAINTY_THRESHOLD = 0.5
+
+
+def _perception_category(
+    certainty: float,
+    trace_strength: float,
+    scan_age: float,
+    is_delayed: bool,
+) -> str:
+    """
+    Classify a perception sample for debug and audit output.
+
+    The helper is intentionally not part of any observation interface. It
+    returns:
+    - ``"direct"`` when ``certainty`` is above the debug threshold and the
+      foveal scan is fresh (``scan_age < 2`` ticks).
+    - ``"trace"`` when a short percept trace is active.
+    - ``"delayed"`` when the caller reports that perceptual delay is active and
+      the current payload was not refreshed by an active scan.
+    - ``"uncertain"`` when none of those conditions applies.
+
+    ``is_delayed`` should be passed as the already-resolved condition
+    ``perceptual_delay_ticks > 0 and not refreshed``.
+    """
+    if float(certainty) > PERCEPTION_CATEGORY_CERTAINTY_THRESHOLD and float(scan_age) < 2.0:
+        return "direct"
+    if float(trace_strength) > 0.0:
+        return "trace"
+    if bool(is_delayed):
+        return "delayed"
+    return "uncertain"
 
 
 def _apply_visibility_zone_certainty(
@@ -533,6 +651,55 @@ def has_line_of_sight(
         if block_clutter and terrain == CLUTTER:
             return False
     return True
+
+
+def advance_percept_trace(
+    world: "SpiderWorld",
+    trace: PerceptTrace,
+    percept: PerceivedTarget,
+    positions: Iterable[tuple[int, int]],
+) -> PerceptTrace:
+    """
+    Refresh or age a short-lived percept trace using the latest raw percept.
+
+    Visible, non-occluded percepts reset the trace only when their position is
+    one of the candidate positions, still matches the reported distance from
+    the spider, lies inside the current visual field, and has line of sight.
+    Otherwise the existing trace ages and expires through configured trace TTL
+    and decay.
+    """
+    if percept.visible > 0.0 and percept.occluded <= 0.0 and percept.position is not None:
+        source = world.spider_pos()
+        candidate_set = {tuple(pos) for pos in positions}
+        percept_dist = int(percept.dist)
+        target = tuple(percept.position)
+        if target in candidate_set:
+            visibility_zone = _compute_target_visibility_zone(world, source, target)
+            if (
+                world.manhattan(source, target) == percept_dist
+                and visibility_zone != "outside"
+                and has_line_of_sight(world, source, target)
+            ):
+                return PerceptTrace(
+                    target=(int(target[0]), int(target[1])),
+                    age=0,
+                    certainty=float(np.clip(percept.certainty, 0.0, 1.0)),
+                    heading_dx=int(world.state.heading_dx),
+                    heading_dy=int(world.state.heading_dy),
+                )
+
+    if trace.target is None:
+        return empty_percept_trace()
+    aged = PerceptTrace(
+        target=trace.target,
+        age=int(trace.age) + 1,
+        certainty=float(np.clip(trace.certainty, 0.0, 1.0)),
+        heading_dx=int(trace.heading_dx),
+        heading_dy=int(trace.heading_dy),
+    )
+    if trace_strength(world, aged) <= 0.0:
+        return empty_percept_trace()
+    return aged
 
 
 def visible_object(
@@ -1221,17 +1388,25 @@ def compute_per_type_threats(
     return threats
 
 
-def _unpack_trace_view(trace_view: dict[str, float]) -> tuple[float, float, float]:
+def _unpack_trace_view(trace_view: Mapping[str, object]) -> tuple[float, float, float, float, float]:
     """
-    Return the (dx, dy, strength) components from a trace-view mapping.
+    Return the direction, strength, and scan-heading components from a trace-view mapping.
     
     Parameters:
-        trace_view (dict[str, float]): Mapping containing keys "dx", "dy", and "strength".
+        trace_view (Mapping[str, object]): Mapping containing keys "dx", "dy", "strength",
+            "heading_dx", and "heading_dy".
     
     Returns:
-        tuple[float, float, float]: A tuple (dx, dy, strength) converted to floats.
+        tuple[float, float, float, float, float]: A tuple
+        (dx, dy, strength, heading_dx, heading_dy) converted to floats.
     """
-    return float(trace_view["dx"]), float(trace_view["dy"]), float(trace_view["strength"])
+    return (
+        float(trace_view["dx"]),
+        float(trace_view["dy"]),
+        float(trace_view["strength"]),
+        float(trace_view["heading_dx"]),
+        float(trace_view["heading_dy"]),
+    )
 
 
 def serialize_observation_view(observation_key: str, view: ObservationView) -> np.ndarray:
@@ -1254,11 +1429,16 @@ def build_visual_observation(
     food_view: PerceivedTarget,
     shelter_view: PerceivedTarget,
     predator_view: PerceivedTarget,
+    world: "SpiderWorld" | None = None,
     heading_dx: float,
     heading_dy: float,
+    foveal_scan_age: float | None = None,
     food_trace_strength: float,
+    food_trace_heading: tuple[float, float] = (0.0, 0.0),
     shelter_trace_strength: float,
+    shelter_trace_heading: tuple[float, float] = (0.0, 0.0),
     predator_trace_strength: float,
+    predator_trace_heading: tuple[float, float] = (0.0, 0.0),
     predator_motion_salience_value: float,
     visual_predator_threat: float,
     olfactory_predator_threat: float,
@@ -1266,17 +1446,22 @@ def build_visual_observation(
     night: float,
 ) -> VisualObservation:
     """
-    Constructs a VisualObservation from perceived food, shelter, and predator targets plus heading, trace strengths, predator salience/threats, and day/night flags.
+    Constructs a VisualObservation from perceived food, shelter, and predator targets plus heading, scan recency, trace strengths, predator salience/threats, and day/night flags.
     
     Parameters:
         food_view (PerceivedTarget): Perception for the nearest food target; populates food_* fields.
         shelter_view (PerceivedTarget): Perception for the nearest shelter target; populates shelter_* fields.
         predator_view (PerceivedTarget): Perception for the predator; populates predator_* fields.
+        world (SpiderWorld | None): Optional world used to derive foveal_scan_age when it is not provided.
         heading_dx (float): Heading x component included as heading_dx.
         heading_dy (float): Heading y component included as heading_dy.
+        foveal_scan_age (float | None): Normalized scan age in [0, 1], or None to derive it from world.
         food_trace_strength (float): Trace strength value for food_trace_strength.
+        food_trace_heading (tuple[float, float]): Heading active when the food trace was refreshed.
         shelter_trace_strength (float): Trace strength value for shelter_trace_strength.
+        shelter_trace_heading (tuple[float, float]): Heading active when the shelter trace was refreshed.
         predator_trace_strength (float): Trace strength value for predator_trace_strength.
+        predator_trace_heading (tuple[float, float]): Heading active when the predator trace was refreshed.
         predator_motion_salience_value (float): Motion salience value included as predator_motion_salience.
         visual_predator_threat (float): Visual predator threat score included as visual_predator_threat.
         olfactory_predator_threat (float): Olfactory predator threat score included as olfactory_predator_threat.
@@ -1284,8 +1469,13 @@ def build_visual_observation(
         night (float): Night indicator value included as night.
     
     Returns:
-        VisualObservation: Observation whose food_*, shelter_*, and predator_* perception fields are taken from the corresponding PerceivedTarget inputs, and which includes heading, trace strengths, predator salience/threats, and day/night values.
+        VisualObservation: Observation whose food_*, shelter_*, and predator_* perception fields are taken from the corresponding PerceivedTarget inputs, and which includes heading, scan recency, trace strengths, predator salience/threats, and day/night values.
     """
+    if foveal_scan_age is None:
+        foveal_scan_age = _normalized_scan_age(world, heading_dx, heading_dy) if world is not None else 1.0
+    food_trace_heading_dx, food_trace_heading_dy = food_trace_heading
+    shelter_trace_heading_dx, shelter_trace_heading_dy = shelter_trace_heading
+    predator_trace_heading_dx, predator_trace_heading_dy = predator_trace_heading
     return VisualObservation(
         food_visible=food_view.visible,
         food_certainty=food_view.certainty,
@@ -1304,9 +1494,16 @@ def build_visual_observation(
         predator_dy=predator_view.dy,
         heading_dx=heading_dx,
         heading_dy=heading_dy,
+        foveal_scan_age=float(np.clip(foveal_scan_age, 0.0, 1.0)),
         food_trace_strength=food_trace_strength,
+        food_trace_heading_dx=food_trace_heading_dx,
+        food_trace_heading_dy=food_trace_heading_dy,
         shelter_trace_strength=shelter_trace_strength,
+        shelter_trace_heading_dx=shelter_trace_heading_dx,
+        shelter_trace_heading_dy=shelter_trace_heading_dy,
         predator_trace_strength=predator_trace_strength,
+        predator_trace_heading_dx=predator_trace_heading_dx,
+        predator_trace_heading_dy=predator_trace_heading_dy,
         predator_motion_salience=predator_motion_salience_value,
         visual_predator_threat=visual_predator_threat,
         olfactory_predator_threat=olfactory_predator_threat,
@@ -1367,11 +1564,17 @@ def build_hunger_observation(
     food_smell_strength: float,
     food_smell_dx: float,
     food_smell_dy: float,
-    food_trace: tuple[float, float, float],
+    food_trace: tuple[float, float, float, float, float],
     food_memory: tuple[float, float, float],
 ) -> HungerObservation:
     """Build the hunger observation from food perception, smell, trace, and memory signals."""
-    food_trace_dx, food_trace_dy, food_trace_strength = food_trace
+    (
+        food_trace_dx,
+        food_trace_dy,
+        food_trace_strength,
+        food_trace_heading_dx,
+        food_trace_heading_dy,
+    ) = food_trace
     food_mem_dx, food_mem_dy, food_mem_age = food_memory
     return HungerObservation(
         hunger=world.state.hunger,
@@ -1387,6 +1590,8 @@ def build_hunger_observation(
         food_trace_dx=food_trace_dx,
         food_trace_dy=food_trace_dy,
         food_trace_strength=food_trace_strength,
+        food_trace_heading_dx=food_trace_heading_dx,
+        food_trace_heading_dy=food_trace_heading_dy,
         food_memory_dx=food_mem_dx,
         food_memory_dy=food_mem_dy,
         food_memory_age=food_mem_age,
@@ -1401,11 +1606,17 @@ def build_sleep_observation(
     sleep_phase_level: float,
     rest_streak_norm: float,
     shelter_role_level: float,
-    shelter_trace: tuple[float, float, float],
+    shelter_trace: tuple[float, float, float, float, float],
     shelter_memory: tuple[float, float, float],
 ) -> SleepObservation:
     """Build the sleep observation from shelter state, circadian state, trace, and memory."""
-    shelter_trace_dx, shelter_trace_dy, shelter_trace_strength = shelter_trace
+    (
+        shelter_trace_dx,
+        shelter_trace_dy,
+        shelter_trace_strength,
+        shelter_trace_heading_dx,
+        shelter_trace_heading_dy,
+    ) = shelter_trace
     shelter_mem_dx, shelter_mem_dy, shelter_mem_age = shelter_memory
     return SleepObservation(
         fatigue=world.state.fatigue,
@@ -1421,6 +1632,8 @@ def build_sleep_observation(
         shelter_trace_dx=shelter_trace_dx,
         shelter_trace_dy=shelter_trace_dy,
         shelter_trace_strength=shelter_trace_strength,
+        shelter_trace_heading_dx=shelter_trace_heading_dx,
+        shelter_trace_heading_dy=shelter_trace_heading_dy,
         shelter_memory_dx=shelter_mem_dx,
         shelter_memory_dy=shelter_mem_dy,
         shelter_memory_age=shelter_mem_age,
@@ -1438,7 +1651,7 @@ def build_alert_observation(
     dominant_predator_type: float,
     on_shelter: float,
     night: float,
-    predator_trace: tuple[float, float, float],
+    predator_trace: tuple[float, float, float, float, float],
     predator_memory: tuple[float, float, float],
     escape_memory: tuple[float, float, float],
 ) -> AlertObservation:
@@ -1454,14 +1667,21 @@ def build_alert_observation(
         dominant_predator_type (float): Numeric encoding of the dominant predator detection type (none/visual/olfactory).
         on_shelter (float): Indicator that the spider is on shelter (0 or 1).
         night (float): Night indicator (0 or 1).
-        predator_trace (tuple[float, float, float]): Trace vector from predator sensing as (dx, dy, strength).
+        predator_trace (tuple[float, float, float, float, float]): Trace vector from predator sensing as
+            (dx, dy, strength, heading_dx, heading_dy).
         predator_memory (tuple[float, float, float]): Stored predator memory as (dx, dy, age).
         escape_memory (tuple[float, float, float]): Stored escape memory as (dx, dy, age).
     
     Returns:
         AlertObservation: A populated AlertObservation containing predator perception fields, threat values, internal pain/contact state, shelter/night flags, predator trace and memory, and escape memory.
     """
-    predator_trace_dx, predator_trace_dy, predator_trace_strength = predator_trace
+    (
+        predator_trace_dx,
+        predator_trace_dy,
+        predator_trace_strength,
+        predator_trace_heading_dx,
+        predator_trace_heading_dy,
+    ) = predator_trace
     predator_mem_dx, predator_mem_dy, predator_mem_age = predator_memory
     escape_mem_dx, escape_mem_dy, escape_mem_age = escape_memory
     dominant_predator_none = 1.0 if dominant_predator_type == DOMINANT_PREDATOR_TYPE_NONE else 0.0
@@ -1487,6 +1707,8 @@ def build_alert_observation(
         predator_trace_dx=predator_trace_dx,
         predator_trace_dy=predator_trace_dy,
         predator_trace_strength=predator_trace_strength,
+        predator_trace_heading_dx=predator_trace_heading_dx,
+        predator_trace_heading_dy=predator_trace_heading_dy,
         predator_memory_dx=predator_mem_dx,
         predator_memory_dy=predator_mem_dy,
         predator_memory_age=predator_mem_age,
@@ -1539,7 +1761,7 @@ def build_motor_context_observation(
     """Build the motor execution context used to execute the action-center intent.
 
     The context includes local embodiment signals so the motor stage can see
-    body orientation, terrain movement cost, and fatigue.
+    body orientation, terrain movement cost, fatigue, and momentum.
     """
     terrain_difficulty = TERRAIN_DIFFICULTY.get(
         world.terrain_at(world.spider_pos()),
@@ -1559,6 +1781,7 @@ def build_motor_context_observation(
         heading_dy=float(world.state.heading_dy),
         terrain_difficulty=terrain_difficulty,
         fatigue=world.state.fatigue,
+        momentum=float(np.clip(world.state.momentum, 0.0, 1.0)),
     )
 
 
@@ -1592,12 +1815,30 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
     rest_norm = world.rest_streak_norm()
     heading_dx = float(world.state.heading_dx)
     heading_dy = float(world.state.heading_dy)
-    food_trace_view = world._trace_view(world.state.food_trace)
-    shelter_trace_view = world._trace_view(world.state.shelter_trace)
-    predator_trace_view = world._trace_view(world.state.predator_trace)
-    food_trace_dx, food_trace_dy, food_trace_strength = _unpack_trace_view(food_trace_view)
-    shelter_trace_dx, shelter_trace_dy, shelter_trace_strength = _unpack_trace_view(shelter_trace_view)
-    predator_trace_dx, predator_trace_dy, predator_trace_strength = _unpack_trace_view(predator_trace_view)
+    food_trace_view = trace_view(world, world.state.food_trace)
+    shelter_trace_view = trace_view(world, world.state.shelter_trace)
+    predator_trace_view = trace_view(world, world.state.predator_trace)
+    (
+        food_trace_dx,
+        food_trace_dy,
+        food_trace_strength,
+        food_trace_heading_dx,
+        food_trace_heading_dy,
+    ) = _unpack_trace_view(food_trace_view)
+    (
+        shelter_trace_dx,
+        shelter_trace_dy,
+        shelter_trace_strength,
+        shelter_trace_heading_dx,
+        shelter_trace_heading_dy,
+    ) = _unpack_trace_view(shelter_trace_view)
+    (
+        predator_trace_dx,
+        predator_trace_dy,
+        predator_trace_strength,
+        predator_trace_heading_dx,
+        predator_trace_heading_dy,
+    ) = _unpack_trace_view(predator_trace_view)
 
     vision_radius = visible_range(world)
     food_view = visible_object(world, world.food_positions, radius=vision_radius)
@@ -1635,11 +1876,15 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         food_view=food_view,
         shelter_view=shelter_view,
         predator_view=predator_view,
+        world=world,
         heading_dx=heading_dx,
         heading_dy=heading_dy,
         food_trace_strength=food_trace_strength,
+        food_trace_heading=(food_trace_heading_dx, food_trace_heading_dy),
         shelter_trace_strength=shelter_trace_strength,
+        shelter_trace_heading=(shelter_trace_heading_dx, shelter_trace_heading_dy),
         predator_trace_strength=predator_trace_strength,
+        predator_trace_heading=(predator_trace_heading_dx, predator_trace_heading_dy),
         predator_motion_salience_value=motion_salience,
         visual_predator_threat=per_type_threats["visual_predator_threat"],
         olfactory_predator_threat=per_type_threats["olfactory_predator_threat"],
@@ -1663,7 +1908,13 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         food_smell_strength=food_smell_strength,
         food_smell_dx=food_smell_dx,
         food_smell_dy=food_smell_dy,
-        food_trace=(food_trace_dx, food_trace_dy, food_trace_strength),
+        food_trace=(
+            food_trace_dx,
+            food_trace_dy,
+            food_trace_strength,
+            food_trace_heading_dx,
+            food_trace_heading_dy,
+        ),
         food_memory=(food_mem_dx, food_mem_dy, food_mem_age),
     )
     sleep_observation = build_sleep_observation(
@@ -1673,7 +1924,13 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         sleep_phase_level=sleep_phase,
         rest_streak_norm=rest_norm,
         shelter_role_level=shelter_role_level,
-        shelter_trace=(shelter_trace_dx, shelter_trace_dy, shelter_trace_strength),
+        shelter_trace=(
+            shelter_trace_dx,
+            shelter_trace_dy,
+            shelter_trace_strength,
+            shelter_trace_heading_dx,
+            shelter_trace_heading_dy,
+        ),
         shelter_memory=(shelter_mem_dx, shelter_mem_dy, shelter_mem_age),
     )
     alert_observation = build_alert_observation(
@@ -1686,7 +1943,13 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         dominant_predator_type=per_type_threats["dominant_predator_type"],
         on_shelter=on_shelter,
         night=night,
-        predator_trace=(predator_trace_dx, predator_trace_dy, predator_trace_strength),
+        predator_trace=(
+            predator_trace_dx,
+            predator_trace_dy,
+            predator_trace_strength,
+            predator_trace_heading_dx,
+            predator_trace_heading_dy,
+        ),
         predator_memory=(predator_mem_dx, predator_mem_dy, predator_mem_age),
         escape_memory=(escape_mem_dx, escape_mem_dy, escape_mem_age),
     )
@@ -1776,6 +2039,13 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         "reward_profile": world.reward_profile,
         "noise_profile": world.noise_profile.name,
         "heading": {"dx": int(world.state.heading_dx), "dy": int(world.state.heading_dy)},
+        "active_sensing": {
+            "foveal_scan_age": float(visual_observation.foveal_scan_age),
+            "raw_foveal_scan_age": int(
+                world._scan_age_for_heading(world.state.heading_dx, world.state.heading_dy)
+            ),
+            "max_scan_age": _max_scan_age(world),
+        },
         "predator_motion_salience": motion_salience,
         "visual_predator_threat": per_type_threats["visual_predator_threat"],
         "olfactory_predator_threat": per_type_threats["olfactory_predator_threat"],
