@@ -1,0 +1,805 @@
+"""CLI command dispatch and workflow orchestration."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+from ..ablations import BrainAblationConfig
+from ..benchmark_package import (
+    BenchmarkManifest,
+    assemble_benchmark_package,
+    summarize_benchmark_manifest,
+)
+from ..budget_profiles import ResolvedBudget, resolve_budget, resolve_budget_profile
+from ..checkpointing import build_checkpointing_summary
+from ..claim_evaluation import run_claim_test_suite
+from ..comparison import (
+    compare_ablation_suite,
+    compare_behavior_suite,
+    compare_configurations,
+    compare_learning_evidence,
+    compare_noise_robustness,
+    compare_training_regimes,
+)
+from ..maps import MAP_TEMPLATE_NAMES
+from ..scenarios import SCENARIO_NAMES
+from ..simulation import (
+    EXPERIMENT_OF_RECORD_REGIME,
+    SpiderSimulation,
+    default_behavior_evaluation,
+    ensure_behavior_evaluation,
+)
+from ..world import REWARD_PROFILES
+from .formatting import format_run_summary
+from .parser import collect_requested_scenarios, parse_module_reflex_scales
+
+EXPERIMENT_OF_RECORD_CHECKPOINT_OVERRIDE_PENALTY = 1.0
+EXPERIMENT_OF_RECORD_CHECKPOINT_DOMINANCE_PENALTY = 1.0
+
+_benchmark_package_manifest_summary = summarize_benchmark_manifest
+_default_behavior_evaluation = default_behavior_evaluation
+_default_checkpointing_summary = build_checkpointing_summary
+_ensure_behavior_evaluation = ensure_behavior_evaluation
+
+
+def _build_and_record_benchmark_package(
+    *,
+    output_dir: Path,
+    summary: dict[str, object],
+    behavior_csv: Path | None,
+    behavior_rows: Sequence[Mapping[str, object]],
+    command_metadata: Mapping[str, object],
+    trace: Sequence[Mapping[str, object]] = (),
+) -> BenchmarkManifest:
+    manifest = assemble_benchmark_package(
+        output_dir,
+        summary,
+        behavior_csv,
+        behavior_rows=behavior_rows,
+        trace=trace,
+        command_metadata=command_metadata,
+    )
+    summary["benchmark_package"] = _benchmark_package_manifest_summary(
+        manifest,
+        output_dir=output_dir,
+    )
+    return manifest
+
+
+def _build_compare_training_kwargs(
+    args: argparse.Namespace,
+    budget: ResolvedBudget,
+) -> dict[str, object]:
+    """
+    Builds a dictionary of shared training and evaluation keyword arguments used for comparing training regimes.
+
+    Parameters:
+        args (argparse.Namespace): Parsed CLI arguments providing world dimensions, learning hyperparameters, profiles, and checkpoint options.
+        budget: Budget-like object with attributes `max_steps`, `episodes`, `eval_episodes`, `behavior_seeds`, `scenario_episodes`, and `checkpoint_interval` describing runtime sizing.
+
+    Returns:
+        dict[str, object]: Mapping of runtime kwargs including world size (`width`, `height`, `food_count`, `day_length`, `night_length`, `max_steps`), training/evaluation sizing (`episodes`, `evaluation_episodes`, `episodes_per_scenario`, `checkpoint_interval`), learning hyperparameters (`gamma`, `module_lr`, `motor_lr`, `module_dropout`), profile selections (`reward_profile`, `map_template`, `operational_profile`, `noise_profile`, `budget_profile`, `curriculum_profile`), checkpoint controls (`checkpoint_selection`, `checkpoint_metric`, `checkpoint_override_penalty`, `checkpoint_dominance_penalty`, `checkpoint_penalty_mode`, `checkpoint_dir`), and `seeds` as a tuple of behavior seeds.
+    """
+    return {
+        "width": args.width,
+        "height": args.height,
+        "food_count": args.food_count,
+        "day_length": args.day_length,
+        "night_length": args.night_length,
+        "max_steps": budget.max_steps,
+        "episodes": budget.episodes,
+        "evaluation_episodes": budget.eval_episodes,
+        "gamma": args.gamma,
+        "module_lr": args.module_lr,
+        "motor_lr": args.motor_lr,
+        "module_dropout": args.module_dropout,
+        "reward_profile": args.reward_profile,
+        "map_template": args.map_template,
+        "operational_profile": args.operational_profile,
+        "noise_profile": args.noise_profile,
+        "budget_profile": args.budget_profile,
+        "seeds": tuple(budget.behavior_seeds),
+        "episodes_per_scenario": budget.scenario_episodes,
+        "checkpoint_selection": args.checkpoint_selection,
+        "checkpoint_metric": args.checkpoint_metric,
+        "checkpoint_override_penalty": args.checkpoint_override_penalty,
+        "checkpoint_dominance_penalty": args.checkpoint_dominance_penalty,
+        "checkpoint_penalty_mode": args.checkpoint_penalty_mode,
+        "checkpoint_interval": budget.checkpoint_interval,
+        "checkpoint_dir": args.checkpoint_dir,
+        "curriculum_profile": args.curriculum_profile,
+    }
+
+
+def _argument_error(args: argparse.Namespace, message: str) -> None:
+    parser = getattr(args, "_parser", None)
+    if parser is not None:
+        parser.error(message)
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def run_cli(args: argparse.Namespace) -> None:
+    """
+    Execute the requested SpiderSimulation workflows for parsed CLI arguments.
+
+    Validates the runtime budget and brain configuration, then either launches
+    the GUI or runs headless workflows including training/evaluation,
+    deterministic scenario evaluations, behavior and configuration comparisons,
+    ablation analyses, learning-evidence comparisons, claim-test suites,
+    curriculum comparisons, and noise-robustness studies.
+    """
+    if args.claim_test and not args.claim_test_suite:
+        args.claim_test_suite = True
+
+    if args.load_modules and not args.load_brain:
+        _argument_error(args, "--load-modules requires --load-brain.")
+    if args.experiment_of_record:
+        if (
+            bool(args.module_reflex_scale)
+            or float(args.reflex_scale) != 1.0
+        ):
+            _argument_error(args,
+                "--experiment-of-record forbids custom reflex settings "
+                "(--reflex-scale/--module-reflex-scale); it selects "
+                f"{EXPERIMENT_OF_RECORD_REGIME!r} and applies checkpoint "
+                "penalties "
+                f"{EXPERIMENT_OF_RECORD_CHECKPOINT_OVERRIDE_PENALTY} "
+                "and "
+                f"{EXPERIMENT_OF_RECORD_CHECKPOINT_DOMINANCE_PENALTY}."
+            )
+        if args.reflex_anneal_final_scale is not None:
+            _argument_error(args,
+                "--experiment-of-record cannot be combined with "
+                "--reflex-anneal-final-scale."
+            )
+        if args.training_regime not in (None, EXPERIMENT_OF_RECORD_REGIME):
+            _argument_error(args,
+                "--experiment-of-record selects "
+                f"{EXPERIMENT_OF_RECORD_REGIME!r}; do not combine it with a "
+                "different --training-regime."
+            )
+        args.training_regime = EXPERIMENT_OF_RECORD_REGIME
+        args.checkpoint_selection = "best"
+        args.checkpoint_penalty_mode = "direct"
+        if float(args.checkpoint_override_penalty) == 0.0:
+            args.checkpoint_override_penalty = (
+                EXPERIMENT_OF_RECORD_CHECKPOINT_OVERRIDE_PENALTY
+            )
+        if float(args.checkpoint_dominance_penalty) == 0.0:
+            args.checkpoint_dominance_penalty = (
+                EXPERIMENT_OF_RECORD_CHECKPOINT_DOMINANCE_PENALTY
+            )
+    if args.benchmark_package is not None:
+        if args.budget_profile != "paper":
+            _argument_error(args, "--benchmark-package requires --budget-profile paper.")
+        if args.checkpoint_selection != "best":
+            _argument_error(args, "--benchmark-package requires --checkpoint-selection best.")
+    if not math.isfinite(float(args.reflex_scale)):
+        _argument_error(args, "--reflex-scale must be finite.")
+    if (
+        args.reflex_anneal_final_scale is not None
+        and not math.isfinite(float(args.reflex_anneal_final_scale))
+    ):
+        _argument_error(args, "--reflex-anneal-final-scale must be finite.")
+    for value, flag_name in (
+        (args.checkpoint_override_penalty, "--checkpoint-override-penalty"),
+        (args.checkpoint_dominance_penalty, "--checkpoint-dominance-penalty"),
+    ):
+        if not math.isfinite(float(value)):
+            _argument_error(args, f"{flag_name} must be finite.")
+        if float(value) < 0.0:
+            _argument_error(args, f"{flag_name} must be non-negative.")
+
+    budget = resolve_budget(
+        profile=args.budget_profile,
+        episodes=args.episodes,
+        eval_episodes=args.eval_episodes,
+        max_steps=args.max_steps,
+        scenario_episodes=args.scenario_episodes,
+        checkpoint_interval=args.checkpoint_interval,
+        behavior_seeds=args.behavior_seeds,
+        ablation_seeds=args.ablation_seeds,
+    )
+    if (
+        budget.requires_checkpoint_selection
+        and args.checkpoint_selection in (None, "none")
+    ):
+        _argument_error(args,
+            f"Budget profile {budget.profile!r} requires checkpoint selection; "
+            "specify --checkpoint-selection best."
+        )
+    if (
+        args.learning_evidence
+        and args.learning_evidence_long_budget_profile is not None
+    ):
+        long_budget_profile = resolve_budget_profile(
+            args.learning_evidence_long_budget_profile
+        )
+        if (
+            long_budget_profile.requires_checkpoint_selection
+            and args.checkpoint_selection in (None, "none")
+        ):
+            _argument_error(args,
+                f"Budget profile {long_budget_profile.name!r} requires checkpoint "
+                "selection; specify --checkpoint-selection best."
+            )
+    try:
+        module_reflex_scales = parse_module_reflex_scales(args.module_reflex_scale)
+    except ValueError as exc:
+        _argument_error(args, str(exc))
+    custom_reflex_config_requested = (
+        bool(module_reflex_scales)
+        or float(args.reflex_scale) != 1.0
+    )
+    unsupported_reflex_workflows: list[str] = []
+    if args.gui:
+        unsupported_reflex_workflows.append("--gui")
+    if args.compare_profiles or args.compare_maps:
+        unsupported_reflex_workflows.append("--compare-profiles/--compare-maps")
+    if args.behavior_compare_profiles or args.behavior_compare_maps:
+        unsupported_reflex_workflows.append(
+            "--behavior-compare-profiles/--behavior-compare-maps"
+        )
+    if args.noise_robustness:
+        unsupported_reflex_workflows.append("--noise-robustness")
+    if args.ablation_suite or args.ablation_variant:
+        unsupported_reflex_workflows.append("--ablation-suite/--ablation-variant")
+    if args.claim_test_suite:
+        unsupported_reflex_workflows.append("--claim-test-suite")
+    if unsupported_reflex_workflows and (
+        custom_reflex_config_requested
+        or args.reflex_anneal_final_scale is not None
+        or args.training_regime is not None
+    ):
+        _argument_error(args,
+            "Custom reflex flags, reflex annealing, and named training "
+            "regime / experiment-of-record settings (--training-regime/"
+            "--experiment-of-record) are not supported with "
+            + ", ".join(unsupported_reflex_workflows)
+            + "."
+        )
+
+    try:
+        base_brain_config = BrainAblationConfig(
+            name="modular_full",
+            architecture="modular",
+            module_dropout=args.module_dropout,
+            enable_reflexes=True,
+            enable_auxiliary_targets=True,
+            disabled_modules=(),
+            reflex_scale=args.reflex_scale,
+            module_reflex_scales=module_reflex_scales,
+        )
+    except ValueError as exc:
+        _argument_error(args, str(exc))
+
+    if args.gui:
+        from ..gui import run_gui
+
+        run_gui(
+            episodes=budget.episodes,
+            eval_episodes=budget.eval_episodes,
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            seed=args.seed,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            reward_profile=args.reward_profile,
+            map_template=args.map_template,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+            load_brain=args.load_brain,
+            load_modules=args.load_modules,
+        )
+        return
+
+    if args.noise_robustness:
+        if args.trace is not None:
+            _argument_error(args, "--trace is not supported with --noise-robustness.")
+        if args.render_eval:
+            _argument_error(args, "--render-eval is not supported with --noise-robustness.")
+        if args.debug_trace:
+            _argument_error(args, "--debug-trace is not supported with --noise-robustness.")
+        if args.curriculum_profile != "none":
+            _argument_error(args,
+                "--curriculum-profile is not supported with --noise-robustness."
+            )
+        if args.noise_profile != "none":
+            _argument_error(args,
+                "--noise-profile is not supported with --noise-robustness."
+            )
+        for enabled, flag_name in (
+            (args.compare_profiles, "--compare-profiles"),
+            (args.compare_maps, "--compare-maps"),
+            (args.behavior_compare_profiles, "--behavior-compare-profiles"),
+            (args.behavior_compare_maps, "--behavior-compare-maps"),
+            (args.ablation_suite, "--ablation-suite"),
+            (bool(args.ablation_variant), "--ablation-variant"),
+            (args.learning_evidence, "--learning-evidence"),
+            (args.claim_test_suite, "--claim-test-suite"),
+        ):
+            if enabled:
+                _argument_error(args,
+                    f"{flag_name} is not supported with --noise-robustness."
+                )
+        requested_scenarios = collect_requested_scenarios(args)
+        robustness_payload, robustness_rows = compare_noise_robustness(
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            reward_profile=args.reward_profile,
+            map_template=args.map_template,
+            operational_profile=args.operational_profile,
+            budget_profile=args.budget_profile,
+            seeds=tuple(budget.behavior_seeds),
+            names=requested_scenarios or None,
+            episodes_per_scenario=budget.scenario_episodes,
+            checkpoint_selection=args.checkpoint_selection,
+            checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir,
+            load_brain=args.load_brain,
+            load_modules=args.load_modules,
+            save_brain=args.save_brain,
+        )
+        behavior_evaluation = _default_behavior_evaluation()
+        behavior_evaluation["robustness_matrix"] = robustness_payload
+        summary = {
+            "config": {
+                "world": {
+                    "width": args.width,
+                    "height": args.height,
+                    "food_count": args.food_count,
+                    "day_length": args.day_length,
+                    "night_length": args.night_length,
+                    "max_steps": budget.max_steps,
+                    "reward_profile": args.reward_profile,
+                    "map_template": args.map_template,
+                },
+                "budget": budget.to_summary(),
+                "training_regime": {"name": "noise_robustness"},
+                "operational_profile": {"name": args.operational_profile},
+            },
+            "behavior_evaluation": behavior_evaluation,
+        }
+        if args.checkpoint_selection != "none":
+            summary["checkpointing"] = _default_checkpointing_summary(
+                selection=args.checkpoint_selection,
+                metric=args.checkpoint_metric,
+                checkpoint_interval=budget.checkpoint_interval,
+                selection_scenario_episodes=budget.selection_scenario_episodes,
+                override_penalty_weight=args.checkpoint_override_penalty,
+                dominance_penalty_weight=args.checkpoint_dominance_penalty,
+                penalty_mode=args.checkpoint_penalty_mode,
+            )
+        if args.benchmark_package is not None:
+            _build_and_record_benchmark_package(
+                output_dir=args.benchmark_package,
+                summary=summary,
+                behavior_csv=args.behavior_csv,
+                behavior_rows=robustness_rows,
+                command_metadata={
+                    "argv": list(sys.argv[1:]),
+                    "entrypoint": "spider_cortex_sim",
+                },
+            )
+        if args.summary is not None:
+            SpiderSimulation.save_summary(summary, args.summary)
+        if args.behavior_csv is not None:
+            SpiderSimulation.save_behavior_csv(robustness_rows, args.behavior_csv)
+        print(
+            json.dumps(
+                format_run_summary(summary, full=args.full_summary),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    sim = SpiderSimulation(
+        width=args.width,
+        height=args.height,
+        food_count=args.food_count,
+        day_length=args.day_length,
+        night_length=args.night_length,
+        max_steps=budget.max_steps,
+        seed=args.seed,
+        gamma=args.gamma,
+        module_lr=args.module_lr,
+        motor_lr=args.motor_lr,
+        module_dropout=args.module_dropout,
+        brain_config=base_brain_config,
+        reward_profile=args.reward_profile,
+        map_template=args.map_template,
+        operational_profile=args.operational_profile,
+        noise_profile=args.noise_profile,
+        budget_profile_name=budget.profile,
+        benchmark_strength=budget.benchmark_strength,
+        budget_summary=budget.to_summary(),
+    )
+    if args.load_brain:
+        loaded = sim.brain.load(args.load_brain, modules=args.load_modules)
+        print(f"Loaded modules: {loaded}")
+
+    behavior_rows = []
+    ablation_payload: dict[str, object] | None = None
+    learning_evidence_payload: dict[str, object] | None = None
+    ablation_active = bool(args.ablation_suite or args.ablation_variant)
+    learning_evidence_active = bool(args.learning_evidence)
+    claim_test_suite_active = bool(args.claim_test_suite)
+    checkpoint_selection_run = False
+    behavior_flags_active = bool(
+        args.behavior_scenario
+        or args.behavior_suite
+        or args.behavior_compare_profiles
+        or args.behavior_compare_maps
+    )
+
+    requested_scenarios = []
+    if not ablation_active:
+        requested_scenarios = collect_requested_scenarios(args)
+
+    ablation_scenarios = []
+    if ablation_active:
+        for name in args.behavior_scenario or []:
+            if name not in ablation_scenarios:
+                ablation_scenarios.append(name)
+        if args.behavior_suite:
+            for name in SCENARIO_NAMES:
+                if name not in ablation_scenarios:
+                    ablation_scenarios.append(name)
+        if not ablation_scenarios:
+            ablation_scenarios = list(SCENARIO_NAMES)
+
+    learning_evidence_scenarios = []
+    if learning_evidence_active:
+        for name in args.behavior_scenario or []:
+            if name not in learning_evidence_scenarios:
+                learning_evidence_scenarios.append(name)
+        if args.behavior_suite or not learning_evidence_scenarios:
+            for name in SCENARIO_NAMES:
+                if name not in learning_evidence_scenarios:
+                    learning_evidence_scenarios.append(name)
+
+    claim_test_seeds: tuple[int, ...] | None = None
+    if budget.behavior_seeds and budget.ablation_seeds:
+        claim_test_seeds = tuple(
+            dict.fromkeys((*budget.behavior_seeds, *budget.ablation_seeds))
+        )
+    elif budget.behavior_seeds:
+        claim_test_seeds = tuple(budget.behavior_seeds)
+    elif budget.ablation_seeds:
+        claim_test_seeds = tuple(budget.ablation_seeds)
+
+    if args.experiment_of_record:
+        primary_checkpoint_selection = args.checkpoint_selection
+    else:
+        primary_checkpoint_selection = (
+            args.checkpoint_selection
+            if args.checkpoint_selection != "none"
+            and behavior_flags_active
+            and requested_scenarios
+            else "none"
+        )
+    should_train_or_eval = (
+        budget.episodes > 0
+        or budget.eval_episodes > 0
+        or primary_checkpoint_selection != "none"
+    )
+    if (
+        args.reflex_anneal_final_scale is not None
+        or args.training_regime is not None
+    ) and not should_train_or_eval:
+        _argument_error(args,
+            "--reflex-anneal-final-scale/--training-regime requires a workflow "
+            "that trains or evaluates the base brain."
+        )
+    if should_train_or_eval:
+        checkpoint_selection_run = primary_checkpoint_selection != "none"
+        summary, trace = sim.train(
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            render_last_evaluation=args.render_eval,
+            capture_evaluation_trace=args.trace is not None,
+            debug_trace=args.debug_trace,
+            checkpoint_selection=primary_checkpoint_selection,
+            checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir if primary_checkpoint_selection != "none" else None,
+            checkpoint_scenario_names=requested_scenarios or list(SCENARIO_NAMES),
+            selection_scenario_episodes=budget.selection_scenario_episodes,
+            reflex_anneal_final_scale=args.reflex_anneal_final_scale,
+            curriculum_profile=args.curriculum_profile,
+            training_regime=args.training_regime,
+        )
+    else:
+        sim.set_runtime_budget(
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            scenario_episodes=budget.scenario_episodes,
+            behavior_seeds=budget.behavior_seeds,
+            ablation_seeds=budget.ablation_seeds,
+            checkpoint_interval=budget.checkpoint_interval,
+        )
+        summary, trace = sim.build_summary([], []), []
+
+    if requested_scenarios:
+        behavior_suite, scenario_trace, scenario_rows = sim.evaluate_behavior_suite(
+            requested_scenarios,
+            episodes_per_scenario=max(1, budget.scenario_episodes),
+            capture_trace=args.trace is not None and not trace,
+            debug_trace=args.debug_trace,
+        )
+        summary["scenarios"] = behavior_suite["legacy_scenarios"]
+        summary["behavior_evaluation"] = {
+            "suite": behavior_suite["suite"],
+            "summary": behavior_suite["summary"],
+        }
+        behavior_rows.extend(scenario_rows)
+        if not trace and scenario_trace:
+            trace = scenario_trace
+
+    if args.compare_profiles or args.compare_maps:
+        comparison_profiles = sorted(REWARD_PROFILES.keys()) if args.compare_profiles else [args.reward_profile]
+        comparison_maps = list(MAP_TEMPLATE_NAMES) if args.compare_maps else [args.map_template]
+        summary["comparisons"] = compare_configurations(
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+            budget_profile=args.budget_profile,
+            reward_profiles=comparison_profiles,
+            map_templates=comparison_maps,
+            seeds=tuple(budget.comparison_seeds),
+        )
+
+    if args.behavior_compare_profiles or args.behavior_compare_maps:
+        comparison_profiles = sorted(REWARD_PROFILES.keys()) if args.behavior_compare_profiles else [args.reward_profile]
+        comparison_maps = list(MAP_TEMPLATE_NAMES) if args.behavior_compare_maps else [args.map_template]
+        checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
+        behavior_comparisons, comparison_rows = compare_behavior_suite(
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+            budget_profile=args.budget_profile,
+            reward_profiles=comparison_profiles,
+            map_templates=comparison_maps,
+            seeds=tuple(budget.behavior_seeds),
+            names=requested_scenarios or None,
+            episodes_per_scenario=budget.scenario_episodes,
+            checkpoint_selection=args.checkpoint_selection,
+            checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir,
+        )
+        _ensure_behavior_evaluation(summary)
+        summary["behavior_evaluation"]["comparisons"] = behavior_comparisons
+        if "reward_audit" in behavior_comparisons:
+            summary["behavior_evaluation"]["shaping_audit"] = behavior_comparisons[
+                "reward_audit"
+            ]
+        behavior_rows.extend(comparison_rows)
+
+    if ablation_active:
+        checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
+        ablation_payload, ablation_rows = compare_ablation_suite(
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            reward_profile=args.reward_profile,
+            map_template=args.map_template,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+            budget_profile=args.budget_profile,
+            seeds=tuple(budget.ablation_seeds),
+            names=ablation_scenarios or None,
+            variant_names=args.ablation_variant,
+            episodes_per_scenario=budget.scenario_episodes,
+            checkpoint_selection=args.checkpoint_selection,
+            checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir,
+        )
+        _ensure_behavior_evaluation(summary)
+        summary["behavior_evaluation"]["ablations"] = ablation_payload
+        behavior_rows.extend(ablation_rows)
+
+    if learning_evidence_active:
+        checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
+        learning_evidence_payload, learning_evidence_rows = compare_learning_evidence(
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            reward_profile=args.reward_profile,
+            map_template=args.map_template,
+            brain_config=base_brain_config,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+            budget_profile=args.budget_profile,
+            long_budget_profile=args.learning_evidence_long_budget_profile,
+            seeds=tuple(budget.behavior_seeds),
+            names=learning_evidence_scenarios or None,
+            episodes_per_scenario=budget.scenario_episodes,
+            checkpoint_selection=args.checkpoint_selection,
+            checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir,
+        )
+        _ensure_behavior_evaluation(summary)
+        summary["behavior_evaluation"]["learning_evidence"] = learning_evidence_payload
+        behavior_rows.extend(learning_evidence_rows)
+
+    if claim_test_suite_active:
+        checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
+        claim_test_payload, claim_test_rows = run_claim_test_suite(
+            claim_tests=args.claim_test,
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            reward_profile=args.reward_profile,
+            map_template=args.map_template,
+            brain_config=base_brain_config,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+            budget_profile=args.budget_profile,
+            long_budget_profile=args.learning_evidence_long_budget_profile,
+            seeds=claim_test_seeds,
+            episodes_per_scenario=budget.scenario_episodes,
+            checkpoint_selection=args.checkpoint_selection,
+            checkpoint_metric=args.checkpoint_metric,
+            checkpoint_override_penalty=args.checkpoint_override_penalty,
+            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
+            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir,
+            ablation_payload=ablation_payload,
+            learning_evidence_payload=learning_evidence_payload,
+        )
+        _ensure_behavior_evaluation(summary)
+        summary["behavior_evaluation"]["claim_tests"] = claim_test_payload
+        behavior_rows.extend(claim_test_rows)
+
+    if (
+        args.curriculum_profile != "none"
+        and not ablation_active
+        and not learning_evidence_active
+        and (budget.episodes > 0 or budget.eval_episodes > 0)
+    ):
+        compare_training_kwargs = _build_compare_training_kwargs(args, budget)
+        curriculum_payload, curriculum_rows = compare_training_regimes(
+            names=requested_scenarios or None,
+            **compare_training_kwargs,
+        )
+        _ensure_behavior_evaluation(summary)
+        summary["behavior_evaluation"]["curriculum_comparison"] = curriculum_payload
+        behavior_rows.extend(curriculum_rows)
+
+    if (
+        checkpoint_selection_run
+        and args.checkpoint_selection != "none"
+        and "checkpointing" not in summary
+    ):
+        summary["checkpointing"] = _default_checkpointing_summary(
+            selection=args.checkpoint_selection,
+            metric=args.checkpoint_metric,
+            checkpoint_interval=budget.checkpoint_interval,
+            selection_scenario_episodes=budget.selection_scenario_episodes,
+            override_penalty_weight=args.checkpoint_override_penalty,
+            dominance_penalty_weight=args.checkpoint_dominance_penalty,
+            penalty_mode=args.checkpoint_penalty_mode,
+        )
+
+    if args.benchmark_package is not None:
+        _build_and_record_benchmark_package(
+            output_dir=args.benchmark_package,
+            summary=summary,
+            behavior_csv=args.behavior_csv,
+            behavior_rows=behavior_rows,
+            trace=trace,
+            command_metadata={
+                "argv": list(sys.argv[1:]),
+                "entrypoint": "spider_cortex_sim",
+            },
+        )
+
+    if args.summary is not None:
+        SpiderSimulation.save_summary(summary, args.summary)
+    if args.trace is not None:
+        SpiderSimulation.save_trace(trace, args.trace)
+    if args.behavior_csv is not None:
+        SpiderSimulation.save_behavior_csv(behavior_rows, args.behavior_csv)
+    if args.save_brain:
+        sim.brain.save(args.save_brain)
+        print(f"Brain saved to: {args.save_brain}")
+
+    print(
+        json.dumps(
+            format_run_summary(summary, full=args.full_summary),
+            indent=2,
+            ensure_ascii=False,
+        )
+    )

@@ -3,6 +3,10 @@
 Multi-seed comparison workflows and comparison statistics live in
 `spider_cortex_sim.comparison`; claim-test evaluation lives in
 `spider_cortex_sim.claim_evaluation`.
+
+``default_behavior_evaluation`` and ``ensure_behavior_evaluation`` are the
+public homes for the default behavior-evaluation helpers previously kept in
+the CLI entrypoint.
 """
 
 from __future__ import annotations
@@ -99,6 +103,28 @@ from .world import ACTIONS, REWARD_COMPONENT_NAMES, SpiderWorld
 
 EXPERIMENT_OF_RECORD_REGIME = "late_finetuning"
 CAPABILITY_PROBE_SCENARIOS: tuple[str, ...] = SCENARIO_CAPABILITY_PROBE_SCENARIOS
+
+
+def default_behavior_evaluation() -> dict[str, object]:
+    """Create the default behavior-evaluation payload structure."""
+    return {
+        "suite": {},
+        "legacy_scenarios": {},
+        "summary": {
+            "scenario_count": 0,
+            "episode_count": 0,
+            "scenario_success_rate": 0.0,
+            "episode_success_rate": 0.0,
+            "competence_type": "mixed",
+            "regressions": [],
+        },
+    }
+
+
+def ensure_behavior_evaluation(summary: dict[str, object]) -> None:
+    """Initialise the behavior_evaluation key in summary if absent."""
+    if "behavior_evaluation" not in summary:
+        summary["behavior_evaluation"] = default_behavior_evaluation()
 
 
 def is_capability_probe(scenario_name: str) -> bool:
@@ -784,6 +810,26 @@ class SpiderSimulation:
         self.budget_profile_name = str(budget.get("profile", self.budget_profile_name))
         self.benchmark_strength = str(
             budget.get("benchmark_strength", self.benchmark_strength)
+        )
+
+    def set_runtime_budget(
+        self,
+        *,
+        episodes: int,
+        evaluation_episodes: int,
+        scenario_episodes: int | None = None,
+        behavior_seeds: Sequence[int] | None = None,
+        ablation_seeds: Sequence[int] | None = None,
+        checkpoint_interval: int | None = None,
+    ) -> None:
+        """Package-internal API for entrypoints to update runtime budget state."""
+        self._set_runtime_budget(
+            episodes=episodes,
+            evaluation_episodes=evaluation_episodes,
+            scenario_episodes=scenario_episodes,
+            behavior_seeds=behavior_seeds,
+            ablation_seeds=ablation_seeds,
+            checkpoint_interval=checkpoint_interval,
         )
 
     def _capture_checkpoint_candidate(
@@ -2549,6 +2595,14 @@ class SpiderSimulation:
         if self._latest_curriculum_summary is not None:
             summary["curriculum"] = deepcopy(self._latest_curriculum_summary)
         return summary
+
+    def build_summary(
+        self,
+        training_history: List[EpisodeStats],
+        evaluation_history: List[EpisodeStats],
+    ) -> Dict[str, object]:
+        """Package-internal API for entrypoints to build a run summary."""
+        return self._build_summary(training_history, evaluation_history)
 
     def _annotate_behavior_rows(
         self,

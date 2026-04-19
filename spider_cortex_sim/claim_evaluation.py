@@ -1,4 +1,8 @@
-"""Claim-test evaluation workflows and helpers."""
+"""Claim-test evaluation workflows and helpers.
+
+``condense_claim_test_summary`` is the public home for the CLI helper formerly
+named ``_short_claim_test_suite_summary``.
+"""
 
 from __future__ import annotations
 
@@ -1701,6 +1705,42 @@ def build_claim_test_summary(
             all_primary_claims_benchmark_eligible
         ),
         "primary_claims": list(primary_claims),
+    }
+
+
+def condense_claim_test_summary(
+    claim_test_payload: object,
+) -> dict[str, object]:
+    """Construct a condensed summary of a claim-test payload for CLI display."""
+    payload = claim_test_payload if isinstance(claim_test_payload, dict) else {}
+    claims = payload.get("claims", {})
+    summary = payload.get("summary", {})
+    claim_rows = claims if isinstance(claims, dict) else {}
+    summary_row = summary if isinstance(summary, dict) else {}
+    condensed_claims: dict[str, dict[str, bool]] = {}
+    for name, data in claim_rows.items():
+        if not isinstance(data, dict):
+            continue
+        skipped = bool(data.get("skipped")) or str(data.get("status")) == "skipped"
+        condensed_claims[str(name)] = {
+            "passed": bool(data.get("passed", False)) and not skipped,
+            "skipped": skipped,
+        }
+
+    def summary_count(key: str) -> int:
+        try:
+            return int(summary_row.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "claims": condensed_claims,
+        "claims_passed": summary_count("claims_passed"),
+        "claims_failed": summary_count("claims_failed"),
+        "claims_skipped": summary_count("claims_skipped"),
+        "all_primary_claims_passed": bool(
+            summary_row.get("all_primary_claims_passed", False)
+        ),
     }
 
 

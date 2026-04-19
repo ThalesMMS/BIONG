@@ -1500,7 +1500,7 @@ class SpiderTrainingTest(unittest.TestCase):
         
         The test invokes the CLI for the specified claim test and asserts the JSON output includes top-level claim-test summary fields:
         `claims`, `claims_passed`, `claims_failed`, and `all_primary_claims_passed`. It also asserts the per-claim entry for
-        `learning_without_privileged_signals` is condensed to only include the `passed` key.
+        `learning_without_privileged_signals` is condensed to boolean `passed` and `skipped` keys.
         """
         proc = subprocess.run(
             self._claim_suite_base_argv(),
@@ -1520,7 +1520,7 @@ class SpiderTrainingTest(unittest.TestCase):
         self.assertIn("all_primary_claims_passed", claim_tests)
         self.assertEqual(
             set(claim_tests["claims"]["learning_without_privileged_signals"].keys()),
-            {"passed"},
+            {"passed", "skipped"},
         )
 
     def test_cli_claim_test_without_suite_flag_runs_claim_suite(self) -> None:

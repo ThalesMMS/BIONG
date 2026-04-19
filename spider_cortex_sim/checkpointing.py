@@ -1,3 +1,9 @@
+"""Checkpoint discovery, selection, and summary helpers.
+
+``build_checkpointing_summary`` is the public home for the CLI helper formerly
+named ``_default_checkpointing_summary``.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -112,6 +118,39 @@ class CheckpointSelectionConfig:
             "dominance_penalty_weight": float(self.dominance_penalty_weight),
             "penalty_mode": self.penalty_mode.value,
         }
+
+
+def build_checkpointing_summary(
+    *,
+    selection: str,
+    metric: str,
+    checkpoint_interval: int,
+    selection_scenario_episodes: int,
+    override_penalty_weight: float = 0.0,
+    dominance_penalty_weight: float = 0.0,
+    penalty_mode: str = "tiebreaker",
+) -> dict[str, object]:
+    """Build checkpoint-selection metadata for inclusion in a run summary."""
+    penalty_config = CheckpointSelectionConfig(
+        metric=metric,
+        override_penalty_weight=override_penalty_weight,
+        dominance_penalty_weight=dominance_penalty_weight,
+        penalty_mode=penalty_mode,
+    ).to_summary()
+    return {
+        "enabled": selection != "none",
+        "selection": selection,
+        "metric": metric,
+        "penalty_mode": penalty_config["penalty_mode"],
+        "penalty_config": penalty_config,
+        "checkpoint_interval": checkpoint_interval,
+        "evaluation_source": "behavior_suite",
+        "selection_scenario_episodes": selection_scenario_episodes,
+        "generated_checkpoints": [],
+        "selected_checkpoint": {
+            "scope": "per_run",
+        },
+    }
 
 
 def resolve_checkpoint_load_dir(

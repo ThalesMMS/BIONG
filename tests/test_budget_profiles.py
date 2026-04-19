@@ -738,7 +738,7 @@ class PaperCheckpointSelectionEnforcementTest(unittest.TestCase):
         Patches the CLI entrypoint environment and the functions that produce ablation, learning-evidence, and claim-test payloads so they return distinct objects, runs main(), and asserts the call to `run_claim_test_suite` receives the exact payload objects produced earlier (no copies or recomputation).
         """
         sim = MagicMock()
-        sim._build_summary.return_value = self._minimal_summary()
+        sim.build_summary.return_value = self._minimal_summary()
         ablation_payload = {"variants": {"modular_full": {"summary": {}}}}
         learning_payload = {
             "conditions": {"trained_without_reflex_support": {"summary": {}}}

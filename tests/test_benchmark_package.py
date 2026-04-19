@@ -8,6 +8,7 @@ from spider_cortex_sim.benchmark_package import (
     BENCHMARK_PACKAGE_CONTENTS,
     BenchmarkManifest,
     assemble_benchmark_package,
+    summarize_benchmark_manifest,
     _seed_level_rows_from_behavior_rows,
 )
 
@@ -313,6 +314,25 @@ class BenchmarkPackageTest(unittest.TestCase):
         self.assertTrue(
             any(isinstance(row.get("cohens_d"), (int, float)) for row in effect_ci_rows)
         )
+
+    def test_summarize_benchmark_manifest_counts_manifest_file(self) -> None:
+        manifest = BenchmarkManifest(**self._manifest_kwargs())
+        summary = summarize_benchmark_manifest(manifest, output_dir=Path("package"))
+
+        self.assertEqual(summary["file_count"], len(manifest.contents) + 1)
+
+    def test_summarize_benchmark_manifest_does_not_double_count_manifest_file(
+        self,
+    ) -> None:
+        kwargs = self._manifest_kwargs()
+        kwargs["contents"] = [
+            *kwargs["contents"],
+            {"path": "benchmark_manifest.json", "bytes": 2, "sha256": "def"},
+        ]
+        manifest = BenchmarkManifest(**kwargs)
+        summary = summarize_benchmark_manifest(manifest, output_dir=Path("package"))
+
+        self.assertEqual(summary["file_count"], len(manifest.contents))
 
     def test_seed_level_rows_from_behavior_rows_aggregates_by_seed_context(self) -> None:
         rows = _seed_level_rows_from_behavior_rows(

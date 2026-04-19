@@ -76,12 +76,14 @@ def jensen_shannon_divergence(
     right_probs = [value / right_total for value in right_values]
     midpoint = [
         0.5 * (left_value + right_value)
-        for left_value, right_value in zip(left_probs, right_probs, strict=True)
+        for left_value, right_value in zip(left_probs, right_probs)
     ]
 
     def _kl_divergence(source: Sequence[float], target: Sequence[float]) -> float:
+        if len(source) != len(target):
+            raise ValueError("Probability distributions must have the same length.")
         total = 0.0
-        for source_value, target_value in zip(source, target, strict=True):
+        for source_value, target_value in zip(source, target):
             if source_value <= 0.0 or target_value <= 0.0:
                 continue
             total += source_value * math.log2(source_value / target_value)

@@ -1178,11 +1178,7 @@ class SpiderBrain:
                 name: index
                 for index, name in enumerate(self.ARBITRATION_GATE_MODULE_ORDER)
             }
-            for result, extra_grad in zip(
-                decision.module_results,
-                per_result_input_grads,
-                strict=True,
-            ):
+            for result, extra_grad in zip(decision.module_results, per_result_input_grads):
                 gate_index = module_gate_indices.get(result.name)
                 if gate_index is None:
                     continue
@@ -1257,11 +1253,7 @@ class SpiderBrain:
         if self.config.is_modular:
             if self.module_bank is None:
                 raise RuntimeError("Module bank unavailable for modular architecture.")
-            for result, extra_grad in zip(
-                decision.module_results,
-                per_result_input_grads,
-                strict=True,
-            ):
+            for result, extra_grad in zip(decision.module_results, per_result_input_grads):
                 if not result.active:
                     continue
                 gate_weight = float(result.gate_weight)

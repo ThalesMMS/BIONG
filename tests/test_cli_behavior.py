@@ -150,9 +150,9 @@ class CLIBehaviorArgumentsTest(unittest.TestCase):
 
         Asserts that the payload contains "suite", "legacy_scenarios", and "summary" keys, that "legacy_scenarios" is an empty dict, and that the summary's "competence_type" is "mixed".
         """
-        from spider_cortex_sim.cli import _default_behavior_evaluation
+        from spider_cortex_sim.simulation import default_behavior_evaluation
 
-        payload = _default_behavior_evaluation()
+        payload = default_behavior_evaluation()
         self.assertIn("suite", payload)
         self.assertIn("legacy_scenarios", payload)
         self.assertIn("summary", payload)
@@ -428,9 +428,9 @@ class CLIBehaviorArgumentsTest(unittest.TestCase):
             self.parser.parse_args(["--claim-test", "not_a_claim_test"])
 
     def test_short_claim_test_suite_summary_preserves_skipped_state(self) -> None:
-        from spider_cortex_sim.cli import _short_claim_test_suite_summary
+        from spider_cortex_sim.claim_evaluation import condense_claim_test_summary
 
-        summary = _short_claim_test_suite_summary(
+        summary = condense_claim_test_summary(
             {
                 "claims": {
                     "learning_without_privileged_signals": {
@@ -449,9 +449,20 @@ class CLIBehaviorArgumentsTest(unittest.TestCase):
 
         self.assertEqual(
             summary["claims"]["learning_without_privileged_signals"],
-            {"passed": None, "skipped": True},
+            {"passed": False, "skipped": True},
         )
         self.assertEqual(summary["claims_skipped"], 1)
+
+    def test_short_claim_test_suite_summary_handles_non_dict_payload(self) -> None:
+        from spider_cortex_sim.claim_evaluation import condense_claim_test_summary
+
+        summary = condense_claim_test_summary(None)
+
+        self.assertEqual(summary["claims"], {})
+        self.assertEqual(summary["claims_passed"], 0)
+        self.assertEqual(summary["claims_failed"], 0)
+        self.assertEqual(summary["claims_skipped"], 0)
+        self.assertFalse(summary["all_primary_claims_passed"])
 
     def test_learning_evidence_long_budget_profile_default(self) -> None:
         args = self.parser.parse_args([])
@@ -654,17 +665,18 @@ class EvaluateBehaviorSuiteIntegrationTest(unittest.TestCase):
 
 
 class DefaultCheckpointingSummaryTest(unittest.TestCase):
-    """Tests for the _default_checkpointing_summary helper in cli.py."""
+    """Tests for the public checkpointing summary helper."""
 
     def _get_fn(self):
         """
-        Retrieve the `_default_checkpointing_summary` helper callable.
+        Retrieve the `build_checkpointing_summary` helper callable.
         
         Returns:
-            fn (callable): The `_default_checkpointing_summary` function from spider_cortex_sim.cli.
+            fn (callable): The `build_checkpointing_summary` function from spider_cortex_sim.checkpointing.
         """
-        from spider_cortex_sim.cli import _default_checkpointing_summary
-        return _default_checkpointing_summary
+        from spider_cortex_sim.checkpointing import build_checkpointing_summary
+
+        return build_checkpointing_summary
 
     def test_enabled_true_when_selection_is_best(self) -> None:
         fn = self._get_fn()
@@ -871,11 +883,12 @@ class CLIBudgetProfileChoicesTest(unittest.TestCase):
 
 
 class ParseModuleReflexScalesTest(unittest.TestCase):
-    """Tests for spider_cortex_sim.cli._parse_module_reflex_scales."""
+    """Tests for spider_cortex_sim.cli.parser.parse_module_reflex_scales."""
 
     def setUp(self) -> None:
-        from spider_cortex_sim.cli import _parse_module_reflex_scales
-        self._parse = _parse_module_reflex_scales
+        from spider_cortex_sim.cli.parser import parse_module_reflex_scales
+
+        self._parse = parse_module_reflex_scales
 
     def test_none_input_returns_empty_dict(self) -> None:
         result = self._parse(None)

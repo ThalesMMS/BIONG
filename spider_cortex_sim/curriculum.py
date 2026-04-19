@@ -275,6 +275,8 @@ def resolve_curriculum_profile(
         )
 
     phases: list[CurriculumPhaseDefinition] = []
+    if len(budgets) != len(phase_specs):
+        raise ValueError("Curriculum budgets and phase specs must have the same length.")
     for (
         budget,
         (
@@ -285,9 +287,7 @@ def resolve_curriculum_profile(
             threshold,
             promotion_check_specs,
         ),
-    ) in zip(
-        budgets, phase_specs, strict=True
-    ):
+    ) in zip(budgets, phase_specs):
         phases.append(
             CurriculumPhaseDefinition(
                 name=name,

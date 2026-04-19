@@ -1480,6 +1480,7 @@ class PredatorTypeSpecializationUncertaintyTest(unittest.TestCase):
             },
         ]
         for scenario, seed_values in values.items():
+            self.assertEqual(2, len(seed_values))
             scenario_rows = [
                 {
                     "metric_name": "scenario_success_rate",
@@ -1488,7 +1489,7 @@ class PredatorTypeSpecializationUncertaintyTest(unittest.TestCase):
                     "condition": condition,
                     "scenario": scenario,
                 }
-                for seed, value in zip((1, 2), seed_values, strict=True)
+                for seed, value in zip((1, 2), seed_values)
             ]
             suite[scenario]["seed_level"] = scenario_rows
             seed_level.extend(scenario_rows)

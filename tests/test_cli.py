@@ -15,6 +15,23 @@ from unittest.mock import MagicMock, patch
 from spider_cortex_sim.cli import build_parser, main
 
 
+class PublicReexportsTest(unittest.TestCase):
+    """Verify package-level entrypoint re-exports remain import-compatible."""
+
+    def test_cli_reexports_build_parser_and_main(self) -> None:
+        from spider_cortex_sim.cli import build_parser as exported_build_parser
+        from spider_cortex_sim.cli import main as exported_main
+
+        self.assertIs(exported_build_parser, build_parser)
+        self.assertIs(exported_main, main)
+
+    def test_gui_reexports_run_gui_and_spider_gui(self) -> None:
+        from spider_cortex_sim.gui import SpiderGUI, run_gui
+
+        self.assertTrue(callable(run_gui))
+        self.assertEqual(SpiderGUI.__name__, "SpiderGUI")
+
+
 class BuildParserDefaultsTest(unittest.TestCase):
     """Verify that build_parser() carries the PR-updated cycle length defaults."""
 

@@ -756,7 +756,7 @@ class ScoreFunctionTest(unittest.TestCase):
                 winning_valence=winning_valence,
             )
             for tick, (pos, food_dist, winning_valence, health) in enumerate(
-                zip(positions, food_distances, winning_valences, healths, strict=True)
+                zip(positions, food_distances, winning_valences, healths)
             )
         ]
 

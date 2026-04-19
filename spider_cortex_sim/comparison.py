@@ -1,3 +1,9 @@
+"""Cross-run comparison and condensed reporting helpers.
+
+``condense_robustness_summary`` is the public home for the CLI helper formerly
+named ``_short_robustness_matrix_summary``.
+"""
+
 from __future__ import annotations
 
 import json
@@ -113,6 +119,28 @@ def robustness_matrix_metadata(
     """
     return {
         "matrix_spec": robustness_matrix.to_summary(),
+    }
+
+
+def condense_robustness_summary(
+    robustness_payload: object,
+) -> dict[str, object]:
+    """Create a condensed summary of a robustness-matrix payload for display."""
+    payload = robustness_payload if isinstance(robustness_payload, dict) else {}
+    matrix_spec = payload.get("matrix_spec")
+    matrix_spec_dict = matrix_spec if isinstance(matrix_spec, dict) else {}
+    train_conditions = matrix_spec_dict.get("train_conditions")
+    eval_conditions = matrix_spec_dict.get("eval_conditions")
+    train_names = list(train_conditions) if isinstance(train_conditions, list) else []
+    eval_names = list(eval_conditions) if isinstance(eval_conditions, list) else []
+    return {
+        "matrix_dimensions": f"{len(train_names)}x{len(eval_names)}",
+        "matrix_spec": matrix_spec_dict,
+        "robustness_score": payload.get("robustness_score"),
+        "diagonal_score": payload.get("diagonal_score"),
+        "off_diagonal_score": payload.get("off_diagonal_score"),
+        "train_marginals": payload.get("train_marginals"),
+        "eval_marginals": payload.get("eval_marginals"),
     }
 
 

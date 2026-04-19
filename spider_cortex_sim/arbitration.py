@@ -467,6 +467,8 @@ def proposal_contribution_share(
     """
     Compute normalized proposal-contribution shares from gated logits.
     """
+    if len(module_results) != len(gated_logits):
+        raise ValueError("Module results and gated logits must have the same length.")
     active_results = [result for result in module_results if result.active]
     if not active_results:
         return {
@@ -475,7 +477,7 @@ def proposal_contribution_share(
         }
     magnitudes = {
         result.name: float(np.sum(np.abs(gated_logit)))
-        for result, gated_logit in zip(module_results, gated_logits, strict=True)
+        for result, gated_logit in zip(module_results, gated_logits)
         if result.active
     }
     total = float(sum(magnitudes.values()))
@@ -738,7 +740,7 @@ def compute_arbitration(
     if active_results:
         agreeing_modules = sum(
             1
-            for result, gated_logit in zip(module_results, gated_logits, strict=True)
+            for result, gated_logit in zip(module_results, gated_logits)
             if result.active and int(np.argmax(gated_logit)) == intent_after_gating_idx
         )
         module_agreement_rate = float(agreeing_modules / len(active_results))

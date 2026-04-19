@@ -114,7 +114,8 @@ class ArbitrationModuleFunctionSignatureTest(unittest.TestCase):
             evidence,
             valence_order=VALENCE_ORDER,
         )
-        self.assertEqual(deterministic_valence_winner(dict(zip(VALENCE_ORDER, scores, strict=True))), "hunger")
+        self.assertEqual(len(VALENCE_ORDER), len(scores))
+        self.assertEqual(deterministic_valence_winner(dict(zip(VALENCE_ORDER, scores))), "hunger")
 
     def test_warm_start_accepts_network_and_config(self) -> None:
         brain = SpiderBrain(seed=17, module_dropout=0.0)
@@ -1906,6 +1907,14 @@ class ProposalContributionShareTest(unittest.TestCase):
         shares = proposal_contribution_share([r1, r2], [g1, g2])
         self.assertEqual(shares["mod_a"], 0.0)
         self.assertEqual(shares["mod_b"], 0.0)
+
+    def test_inactive_modules_still_validate_gated_logit_count(self) -> None:
+        """Length mismatches should be reported before the inactive early return."""
+        r1 = self._make_result("mod_a", active=False)
+        r2 = self._make_result("mod_b", active=False)
+        g1 = np.zeros(9, dtype=float)
+        with self.assertRaises(ValueError):
+            proposal_contribution_share([r1, r2], [g1])
 
     def test_all_zero_gated_logits_returns_uniform_shares(self) -> None:
         """When all active modules have zero logits, shares are uniform."""

@@ -4,6 +4,10 @@ The package format is intentionally file-based and reproducible: JSON tables
 carry machine-readable benchmark data, CSVs preserve seed and behavior rows,
 Markdown provides the human report, and the manifest records file hashes so a
 published package can be audited without rerunning the simulation.
+
+``summarize_benchmark_manifest`` and ``build_and_record_benchmark_package``
+are the public homes for the benchmark-package helpers previously kept in the
+CLI entrypoint.
 """
 
 from __future__ import annotations
@@ -429,8 +433,62 @@ def assemble_benchmark_package(
     return manifest
 
 
+def summarize_benchmark_manifest(
+    manifest: BenchmarkManifest,
+    *,
+    output_dir: Path,
+) -> dict[str, object]:
+    """Return compact manifest fields suitable for user-facing summaries."""
+    manifest_paths = {
+        str(item.get("path"))
+        for item in manifest.contents
+        if isinstance(item, Mapping)
+    }
+    # _file_inventory() omits benchmark_manifest.json while the manifest
+    # variable represents a package that has already written that file.
+    file_count = len(manifest.contents) + (
+        0 if "benchmark_manifest.json" in manifest_paths else 1
+    )
+    return {
+        "output_dir": str(output_dir),
+        "package_version": manifest.package_version,
+        "created_at": manifest.created_at,
+        "seed_count": manifest.seed_count,
+        "confidence_level": manifest.confidence_level,
+        "file_count": file_count,
+        "limitations": list(manifest.limitations),
+    }
+
+
+def build_and_record_benchmark_package(
+    *,
+    output_dir: Path,
+    summary: dict[str, object],
+    behavior_csv: Path | None,
+    behavior_rows: Sequence[Mapping[str, object]],
+    command_metadata: Mapping[str, object],
+    trace: Sequence[Mapping[str, object]] = (),
+) -> BenchmarkManifest:
+    """Assemble a benchmark package and record its compact summary payload."""
+    manifest = assemble_benchmark_package(
+        output_dir,
+        summary,
+        behavior_csv,
+        behavior_rows=behavior_rows,
+        trace=trace,
+        command_metadata=command_metadata,
+    )
+    summary["benchmark_package"] = summarize_benchmark_manifest(
+        manifest,
+        output_dir=output_dir,
+    )
+    return manifest
+
+
 __all__ = [
     "BENCHMARK_PACKAGE_CONTENTS",
     "BenchmarkManifest",
     "assemble_benchmark_package",
+    "build_and_record_benchmark_package",
+    "summarize_benchmark_manifest",
 ]

@@ -115,7 +115,8 @@ class ArbitrationNetworkTest(unittest.TestCase):
                 self.assertEqual(actual, expected)
         source_outputs = source.forward(evidence, store_cache=False)
         target_outputs = target.forward(evidence, store_cache=False)
-        for actual, expected in zip(target_outputs, source_outputs, strict=True):
+        self.assertEqual(len(target_outputs), len(source_outputs))
+        for actual, expected in zip(target_outputs, source_outputs):
             np.testing.assert_allclose(actual, expected)
 
     def test_state_dict_includes_gate_adjustment_bounds(self) -> None:
