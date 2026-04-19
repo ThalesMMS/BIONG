@@ -56,13 +56,20 @@ class ProposalNetwork:
         self.b2 = np.zeros(output_dim, dtype=float)
         self.cache: Optional[ProposalCache] = None
 
-    def forward(self, x: Array, *, store_cache: bool = True) -> Array:
+    def forward(
+        self,
+        x: Array,
+        *,
+        store_cache: bool = True,
+        training: bool = False,
+    ) -> Array:
         """
         Compute proposal logits from the input and optionally cache the input and hidden activation for later backpropagation.
         
         Parameters:
             x (Array): Input feature vector.
             store_cache (bool): If True, store input and hidden activation in the instance cache for use by backward.
+            training (bool): Accepted for parity with modular proposal paths; this deterministic network has no training-only forward behavior.
         
         Returns:
             Array: Proposal logits (float array) with values clipped to the range [-20.0, 20.0].
