@@ -87,6 +87,7 @@ class EpisodeMetricAccumulator(AccumulatorRecordingMixin, AccumulatorSnapshotMix
     learning_steps: int = 0
     module_credit_weight_sums: Dict[str, float] = field(default_factory=dict)
     module_gradient_norm_sums: Dict[str, float] = field(default_factory=dict)
+    counterfactual_credit_weight_sums: Dict[str, float] = field(default_factory=dict)
     motor_execution_steps: int = 0
     motor_slip_steps: int = 0
     orientation_alignment_samples: List[float] = field(default_factory=list)

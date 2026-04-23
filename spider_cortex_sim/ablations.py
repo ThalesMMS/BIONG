@@ -4,12 +4,18 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, Mapping, Sequence, Tuple
 
+from .capacity_profiles import CapacityProfile, resolve_capacity_profile
 from .interfaces import MODULE_INTERFACES
 
 
 MODULE_NAMES: tuple[str, ...] = tuple(spec.name for spec in MODULE_INTERFACES)
 MONOLITHIC_POLICY_NAME: str = "monolithic_policy"
-PROPOSAL_SOURCE_NAMES: tuple[str, ...] = MODULE_NAMES + (MONOLITHIC_POLICY_NAME,)
+TRUE_MONOLITHIC_POLICY_NAME: str = "true_monolithic_policy"
+PROPOSAL_SOURCE_NAMES: tuple[str, ...] = (
+    *MODULE_NAMES,
+    MONOLITHIC_POLICY_NAME,
+    TRUE_MONOLITHIC_POLICY_NAME,
+)
 REFLEX_MODULE_NAMES: tuple[str, ...] = tuple(
     spec.name for spec in MODULE_INTERFACES if spec.role == "proposal"
 )
@@ -64,9 +70,19 @@ def _normalize_module_names(
     invalid = [n for n in normalized if n not in MODULE_NAMES]
     if invalid:
         raise ValueError(f"{invalid_msg}: {invalid}.")
-    if architecture == "monolithic" and normalized:
+    if architecture in {"monolithic", "true_monolithic"} and normalized:
         raise ValueError(monolithic_msg)
     return normalized
+
+
+def architecture_description(architecture: str) -> str:
+    """Return a short human-readable label for summary/report output."""
+    architecture = str(architecture)
+    if architecture == "true_monolithic":
+        return "true monolithic direct control"
+    if architecture == "monolithic":
+        return "monolithic proposer + action/motor pipeline"
+    return "full modular with arbitration"
 
 
 @dataclass(frozen=True)
@@ -86,13 +102,17 @@ class BrainAblationConfig:
     recurrent_modules: Tuple[str, ...] = ()
     reflex_scale: float = 1.0
     module_reflex_scales: dict[str, float] = field(default_factory=dict)
+    capacity_profile_name: str = "current"
+    capacity_profile: str | CapacityProfile | None = None
+    module_hidden_dims: dict[str, int] = field(default_factory=dict)
+    integration_hidden_dim: int | None = None
 
     def __post_init__(self) -> None:
         """
         Validate and normalize dataclass fields after initialization.
         
         Normalizes and persists these fields on the frozen dataclass:
-        - `architecture`: coerced to `str` and must be either "modular" or "monolithic".
+        - `architecture`: coerced to `str` and must be one of "modular", "monolithic", or "true_monolithic".
         - `module_dropout`: coerced to `float` and must be finite.
         - `use_learned_arbitration`: coerced to `bool`.
         - `enable_deterministic_guards`: coerced to `bool`.
@@ -106,16 +126,16 @@ class BrainAblationConfig:
         - `module_reflex_scales`: keys coerced to `str`, values coerced to `float`, sorted by key into a `dict`; each key must be in `REFLEX_MODULE_NAMES`, each value must be finite and >= 0.0.
         
         Raises:
-            ValueError: If `architecture` is not "modular" or "monolithic";
+            ValueError: If `architecture` is not "modular", "monolithic", or "true_monolithic";
                         if `module_dropout` or any `module_reflex_scales` value is not finite;
                         if `warm_start_scale` is outside [0.0, 1.0];
                         if `gate_adjustment_bounds` does not contain two finite ordered values;
                         if `reflex_scale` or any `module_reflex_scales` value is negative;
                         if `disabled_modules`, `recurrent_modules`, or `module_reflex_scales` contain unknown module names;
-                        or if `architecture == "monolithic"` while `disabled_modules`, `recurrent_modules`, or `module_reflex_scales` are non-empty.
+                        or if `architecture` is "monolithic" or "true_monolithic" while `disabled_modules`, `recurrent_modules`, or `module_reflex_scales` are non-empty.
         """
         architecture = str(self.architecture)
-        if architecture not in {"modular", "monolithic"}:
+        if architecture not in {"modular", "monolithic", "true_monolithic"}:
             raise ValueError(f"Invalid ablation architecture: {architecture!r}.")
         object.__setattr__(self, "architecture", architecture)
         module_dropout = float(self.module_dropout)
@@ -137,6 +157,52 @@ class BrainAblationConfig:
             "enable_food_direction_bias",
             bool(self.enable_food_direction_bias),
         )
+        capacity_profile_spec = (
+            self.capacity_profile
+            if self.capacity_profile is not None
+            else self.capacity_profile_name
+        )
+        resolved_capacity_profile = resolve_capacity_profile(capacity_profile_spec)
+        object.__setattr__(
+            self,
+            "capacity_profile_name",
+            resolved_capacity_profile.name,
+        )
+        object.__setattr__(self, "capacity_profile", resolved_capacity_profile)
+        normalized_module_hidden_dims = {
+            name: int(hidden_dim)
+            for name, hidden_dim in resolved_capacity_profile.module_hidden_dims.items()
+        }
+        for name, hidden_dim in dict(self.module_hidden_dims).items():
+            normalized_module_hidden_dims[str(name)] = int(hidden_dim)
+        invalid_hidden_dim_modules = sorted(
+            name
+            for name in normalized_module_hidden_dims
+            if name not in MODULE_NAMES
+        )
+        if invalid_hidden_dim_modules:
+            raise ValueError(
+                "Invalid modules in module_hidden_dims: "
+                f"{invalid_hidden_dim_modules}."
+            )
+        if any(hidden_dim <= 0 for hidden_dim in normalized_module_hidden_dims.values()):
+            raise ValueError("module_hidden_dims must contain only positive integers.")
+        object.__setattr__(
+            self,
+            "module_hidden_dims",
+            {
+                name: int(hidden_dim)
+                for name, hidden_dim in sorted(normalized_module_hidden_dims.items())
+            },
+        )
+        integration_hidden_dim = (
+            resolved_capacity_profile.integration_hidden_dim
+            if self.integration_hidden_dim is None
+            else int(self.integration_hidden_dim)
+        )
+        if integration_hidden_dim <= 0:
+            raise ValueError("integration_hidden_dim must be positive.")
+        object.__setattr__(self, "integration_hidden_dim", integration_hidden_dim)
         warm_start_scale = float(self.warm_start_scale)
         if not math.isfinite(warm_start_scale):
             raise ValueError("warm_start_scale must be finite.")
@@ -176,14 +242,14 @@ class BrainAblationConfig:
             self.disabled_modules,
             preserve_order=False,
             invalid_msg="Invalid ablation modules",
-            monolithic_msg="The monolithic baseline does not accept disabled modules.",
+            monolithic_msg="Monolithic baselines do not accept disabled modules.",
             architecture=architecture,
         ))
         object.__setattr__(self, "recurrent_modules", _normalize_module_names(
             self.recurrent_modules,
             preserve_order=True,
             invalid_msg="Invalid recurrent modules",
-            monolithic_msg="The monolithic baseline does not accept recurrent modules.",
+            monolithic_msg="Monolithic baselines do not accept recurrent modules.",
             architecture=architecture,
         ))
         normalized_reflex_scales = {
@@ -218,9 +284,9 @@ class BrainAblationConfig:
             raise ValueError(
                 "module_reflex_scales must contain only non-negative values."
             )
-        if architecture == "monolithic" and normalized_reflex_scales:
+        if architecture in {"monolithic", "true_monolithic"} and normalized_reflex_scales:
             raise ValueError(
-                "The monolithic baseline does not accept per-module module_reflex_scales."
+                "Monolithic baselines do not accept per-module module_reflex_scales."
             )
         object.__setattr__(self, "module_reflex_scales", normalized_reflex_scales)
 
@@ -243,6 +309,11 @@ class BrainAblationConfig:
             `true` if `architecture` is "monolithic", `false` otherwise.
         """
         return self.architecture == "monolithic"
+
+    @property
+    def is_true_monolithic(self) -> bool:
+        """Return whether the configuration uses the direct true-monolithic architecture."""
+        return self.architecture == "true_monolithic"
 
     @property
     def uses_local_credit_only(self) -> bool:
@@ -274,6 +345,10 @@ class BrainAblationConfig:
         """
         return bool(self.recurrent_modules)
 
+    @property
+    def monolithic_hidden_dim(self) -> int:
+        return int(sum(self.module_hidden_dims.values()))
+
     def to_summary(self) -> Dict[str, object]:
         """
         Produce a JSON-friendly summary of this ablation configuration.
@@ -282,6 +357,7 @@ class BrainAblationConfig:
             mapping (dict): Dictionary with the configuration fields:
                 - name: str
                 - architecture: str
+                - architecture_description: str
                 - module_dropout: float
                 - enable_reflexes: bool
                 - enable_auxiliary_targets: bool
@@ -297,9 +373,11 @@ class BrainAblationConfig:
                 - reflex_scale: float
                 - module_reflex_scales: dict[str, float]
         """
+        resolved_capacity_profile = resolve_capacity_profile(self.capacity_profile)
         return {
             "name": self.name,
             "architecture": self.architecture,
+            "architecture_description": architecture_description(self.architecture),
             "module_dropout": self.module_dropout,
             "enable_reflexes": self.enable_reflexes,
             "enable_auxiliary_targets": self.enable_auxiliary_targets,
@@ -314,7 +392,78 @@ class BrainAblationConfig:
             "is_recurrent": self.is_recurrent,
             "reflex_scale": self.reflex_scale,
             "module_reflex_scales": dict(self.module_reflex_scales),
+            "capacity_profile_name": resolved_capacity_profile.name,
+            "capacity_profile": resolved_capacity_profile.name,
+            "capacity_profile_version": resolved_capacity_profile.version,
+            "capacity_scale_factor": resolved_capacity_profile.scale_factor,
+            "module_hidden_dims": dict(self.module_hidden_dims),
+            "integration_hidden_dim": int(self.integration_hidden_dim or 0),
+            "monolithic_hidden_dim": self.monolithic_hidden_dim,
         }
+
+    @classmethod
+    def from_summary(
+        cls,
+        summary: Mapping[str, object],
+    ) -> "BrainAblationConfig":
+        if not isinstance(summary, Mapping):
+            raise ValueError("BrainAblationConfig summary must be a mapping.")
+        gate_adjustment_bounds_raw = summary.get("gate_adjustment_bounds", (0.5, 1.5))
+        if not isinstance(gate_adjustment_bounds_raw, Sequence) or isinstance(
+            gate_adjustment_bounds_raw,
+            (str, bytes),
+        ):
+            gate_adjustment_bounds_raw = (0.5, 1.5)
+        capacity_profile_name = str(
+            summary.get(
+                "capacity_profile_name",
+                summary.get("capacity_profile", "current"),
+            )
+            or "current"
+        )
+        module_dropout_value = summary.get("module_dropout")
+        warm_start_scale_value = summary.get("warm_start_scale")
+        reflex_scale_value = summary.get("reflex_scale")
+        return cls(
+            name=str(summary.get("name", "custom") or "custom"),
+            architecture=str(summary.get("architecture", "modular") or "modular"),
+            module_dropout=(
+                float(module_dropout_value)
+                if module_dropout_value is not None
+                else 0.05
+            ),
+            enable_reflexes=bool(summary.get("enable_reflexes", True)),
+            enable_auxiliary_targets=bool(
+                summary.get("enable_auxiliary_targets", True)
+            ),
+            use_learned_arbitration=bool(
+                summary.get("use_learned_arbitration", True)
+            ),
+            enable_deterministic_guards=bool(
+                summary.get("enable_deterministic_guards", False)
+            ),
+            enable_food_direction_bias=bool(
+                summary.get("enable_food_direction_bias", False)
+            ),
+            warm_start_scale=(
+                float(warm_start_scale_value)
+                if warm_start_scale_value is not None
+                else 1.0
+            ),
+            gate_adjustment_bounds=tuple(gate_adjustment_bounds_raw),
+            credit_strategy=str(summary.get("credit_strategy", "broadcast") or "broadcast"),
+            disabled_modules=tuple(summary.get("disabled_modules", ()) or ()),
+            recurrent_modules=tuple(summary.get("recurrent_modules", ()) or ()),
+            reflex_scale=(
+                float(reflex_scale_value)
+                if reflex_scale_value is not None
+                else 1.0
+            ),
+            module_reflex_scales=dict(summary.get("module_reflex_scales", {}) or {}),
+            capacity_profile_name=capacity_profile_name,
+            module_hidden_dims=dict(summary.get("module_hidden_dims", {}) or {}),
+            integration_hidden_dim=summary.get("integration_hidden_dim"),
+        )
 
 
 def _arbitration_fields(
@@ -334,7 +483,11 @@ def _arbitration_fields(
     }
 
 
-def default_brain_config(*, module_dropout: float = 0.05) -> BrainAblationConfig:
+def default_brain_config(
+    *,
+    module_dropout: float = 0.05,
+    capacity_profile: str | CapacityProfile | None = None,
+) -> BrainAblationConfig:
     """
     Provide the canonical "modular_full" brain ablation configuration.
     
@@ -356,18 +509,23 @@ def default_brain_config(*, module_dropout: float = 0.05) -> BrainAblationConfig
         recurrent_modules=(),
         reflex_scale=1.0,
         module_reflex_scales={},
+        capacity_profile=capacity_profile,
     )
 
 
-def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, BrainAblationConfig]:
+def canonical_ablation_configs(
+    *,
+    module_dropout: float = 0.05,
+    capacity_profile: str | CapacityProfile | None = None,
+) -> Dict[str, BrainAblationConfig]:
     """
     Create the canonical registry of named brain ablation configurations.
     
     The registry contains commonly used presets (for example: "modular_full",
     "no_module_dropout", "no_module_reflexes", "modular_recurrent",
-    "monolithic_policy"), credit variants, named arbitration-prior variants,
-    reflex-scale variants, and one per-module variant named "drop_<module_name>"
-    that disables exactly that module.
+    "true_monolithic_policy", "monolithic_policy"), credit variants, named
+    arbitration-prior variants, reflex-scale variants, and one per-module
+    variant named "drop_<module_name>" that disables exactly that module.
     
     Parameters:
         module_dropout (float): Default module dropout rate applied to modular variants.
@@ -375,8 +533,38 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
     Returns:
         A dict mapping variant names to their corresponding BrainAblationConfig objects.
     """
+    profile_fields = {"capacity_profile": capacity_profile}
+    four_center_disabled_modules = (
+        "alert_center",
+        "hunger_center",
+        "perception_center",
+        "sleep_center",
+    )
+
+    def make_four_center_variant(
+        name: str,
+        credit_strategy: str,
+    ) -> BrainAblationConfig:
+        return BrainAblationConfig(
+            name=name,
+            architecture="modular",
+            module_dropout=module_dropout,
+            enable_reflexes=True,
+            enable_auxiliary_targets=True,
+            **_arbitration_fields(),
+            credit_strategy=credit_strategy,
+            disabled_modules=four_center_disabled_modules,
+            recurrent_modules=(),
+            reflex_scale=1.0,
+            module_reflex_scales={},
+            **profile_fields,
+        )
+
     variants: Dict[str, BrainAblationConfig] = {
-        "modular_full": default_brain_config(module_dropout=module_dropout),
+        "modular_full": default_brain_config(
+            module_dropout=module_dropout,
+            capacity_profile=capacity_profile,
+        ),
         "no_module_dropout": BrainAblationConfig(
             name="no_module_dropout",
             architecture="modular",
@@ -388,6 +576,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "no_module_reflexes": BrainAblationConfig(
             name="no_module_reflexes",
@@ -400,6 +589,79 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=0.0,
             module_reflex_scales={},
+            **profile_fields,
+        ),
+        "three_center_modular": BrainAblationConfig(
+            name="three_center_modular",
+            architecture="modular",
+            module_dropout=module_dropout,
+            enable_reflexes=True,
+            enable_auxiliary_targets=True,
+            **_arbitration_fields(),
+            credit_strategy="broadcast",
+            disabled_modules=(
+                "alert_center",
+                "hunger_center",
+                "sensory_cortex",
+                "sleep_center",
+                "visual_cortex",
+            ),
+            recurrent_modules=(),
+            reflex_scale=1.0,
+            module_reflex_scales={},
+            **profile_fields,
+        ),
+        "three_center_modular_local_credit": BrainAblationConfig(
+            name="three_center_modular_local_credit",
+            architecture="modular",
+            module_dropout=module_dropout,
+            enable_reflexes=True,
+            enable_auxiliary_targets=True,
+            **_arbitration_fields(),
+            credit_strategy="local_only",
+            disabled_modules=(
+                "alert_center",
+                "hunger_center",
+                "sensory_cortex",
+                "sleep_center",
+                "visual_cortex",
+            ),
+            recurrent_modules=(),
+            reflex_scale=1.0,
+            module_reflex_scales={},
+            **profile_fields,
+        ),
+        "three_center_modular_counterfactual": BrainAblationConfig(
+            name="three_center_modular_counterfactual",
+            architecture="modular",
+            module_dropout=module_dropout,
+            enable_reflexes=True,
+            enable_auxiliary_targets=True,
+            **_arbitration_fields(),
+            credit_strategy="counterfactual",
+            disabled_modules=(
+                "alert_center",
+                "hunger_center",
+                "sensory_cortex",
+                "sleep_center",
+                "visual_cortex",
+            ),
+            recurrent_modules=(),
+            reflex_scale=1.0,
+            module_reflex_scales={},
+            **profile_fields,
+        ),
+        "four_center_modular": make_four_center_variant(
+            "four_center_modular",
+            "broadcast",
+        ),
+        "four_center_modular_local_credit": make_four_center_variant(
+            "four_center_modular_local_credit",
+            "local_only",
+        ),
+        "four_center_modular_counterfactual": make_four_center_variant(
+            "four_center_modular_counterfactual",
+            "counterfactual",
         ),
         "modular_recurrent": BrainAblationConfig(
             name="modular_recurrent",
@@ -413,6 +675,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             recurrent_modules=("alert_center", "sleep_center", "hunger_center"),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "modular_recurrent_all": BrainAblationConfig(
             name="modular_recurrent_all",
@@ -426,6 +689,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             recurrent_modules=MODULE_NAMES,
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "local_credit_only": BrainAblationConfig(
             name="local_credit_only",
@@ -438,6 +702,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "counterfactual_credit": BrainAblationConfig(
             name="counterfactual_credit",
@@ -450,6 +715,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "constrained_arbitration": BrainAblationConfig(
             name="constrained_arbitration",
@@ -465,6 +731,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "weaker_prior_arbitration": BrainAblationConfig(
             name="weaker_prior_arbitration",
@@ -477,6 +744,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "minimal_arbitration": BrainAblationConfig(
             name="minimal_arbitration",
@@ -492,6 +760,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "fixed_arbitration_baseline": BrainAblationConfig(
             name="fixed_arbitration_baseline",
@@ -504,6 +773,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "learned_arbitration_no_regularization": BrainAblationConfig(
             name="learned_arbitration_no_regularization",
@@ -516,6 +786,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "reflex_scale_0_25": BrainAblationConfig(
             name="reflex_scale_0_25",
@@ -528,6 +799,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=0.25,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "reflex_scale_0_50": BrainAblationConfig(
             name="reflex_scale_0_50",
@@ -540,6 +812,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=0.50,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "reflex_scale_0_75": BrainAblationConfig(
             name="reflex_scale_0_75",
@@ -552,6 +825,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=0.75,
             module_reflex_scales={},
+            **profile_fields,
         ),
         "monolithic_policy": BrainAblationConfig(
             name=MONOLITHIC_POLICY_NAME,
@@ -564,6 +838,20 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             disabled_modules=(),
             reflex_scale=0.0,
             module_reflex_scales={},
+            **profile_fields,
+        ),
+        "true_monolithic_policy": BrainAblationConfig(
+            name=TRUE_MONOLITHIC_POLICY_NAME,
+            architecture="true_monolithic",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            **_arbitration_fields(use_learned_arbitration=False, warm_start_scale=0.0),
+            credit_strategy="broadcast",
+            disabled_modules=(),
+            reflex_scale=0.0,
+            module_reflex_scales={},
+            **profile_fields,
         ),
     }
     for module_name in MODULE_NAMES:
@@ -579,6 +867,7 @@ def canonical_ablation_configs(*, module_dropout: float = 0.05) -> Dict[str, Bra
             recurrent_modules=(),
             reflex_scale=1.0,
             module_reflex_scales={},
+            **profile_fields,
         )
     return variants
 
@@ -591,7 +880,7 @@ def canonical_ablation_variant_names(*, module_dropout: float = 0.05) -> tuple[s
         tuple[str, ...]: Ordered variant names starting with "modular_full", then
         "no_module_dropout", "no_module_reflexes", and recurrent/credit/arbitration
         variants, followed by "drop_<module>" for each name in MODULE_NAMES, and
-        ending with "monolithic_policy".
+        ending with the monolithic baselines.
     """
     return tuple(canonical_ablation_configs(module_dropout=module_dropout).keys())
 
@@ -600,6 +889,7 @@ def resolve_ablation_configs(
     names: Sequence[str] | None,
     *,
     module_dropout: float = 0.05,
+    capacity_profile: str | CapacityProfile | None = None,
 ) -> list[BrainAblationConfig]:
     """
     Resolve a sequence of ablation variant names into their corresponding BrainAblationConfig objects in the requested order.
@@ -614,7 +904,10 @@ def resolve_ablation_configs(
     Raises:
         KeyError: If any requested names are unknown. The error message lists the unknown names and the available canonical variant names.
     """
-    registry = canonical_ablation_configs(module_dropout=module_dropout)
+    registry = canonical_ablation_configs(
+        module_dropout=module_dropout,
+        capacity_profile=capacity_profile,
+    )
     requested = list(names) if names is not None else list(canonical_ablation_variant_names(module_dropout=module_dropout))
     unknown = sorted({name for name in requested if name not in registry})
     if unknown:

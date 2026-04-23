@@ -92,6 +92,56 @@ class BuildParserDefaultsTest(unittest.TestCase):
         defaults = self._defaults()
         self.assertEqual(defaults["food_count"], 4)
 
+    def test_capacity_profile_default_is_none(self) -> None:
+        defaults = self._defaults()
+        self.assertIsNone(defaults["capacity_profile"])
+
+    def test_capacity_profile_accepts_large(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["--capacity-profile", "large"])
+        self.assertEqual(args.capacity_profile, "large")
+
+    def test_capacity_sweep_flag_defaults_false(self) -> None:
+        defaults = self._defaults()
+        self.assertFalse(defaults["capacity_sweep"])
+
+    def test_capacity_sweep_rejects_capacity_profile_flag(self) -> None:
+        stderr = io.StringIO()
+
+        with patch(
+            "sys.argv",
+            ["spider_cortex_sim", "--capacity-sweep", "--capacity-profile", "large"],
+        ), patch("sys.stderr", stderr), patch(
+            "spider_cortex_sim.cli.SpiderSimulation"
+        ) as simulation_mock:
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--capacity-profile", stderr.getvalue())
+        simulation_mock.assert_not_called()
+
+    def test_capacity_sweep_rejects_curriculum_profile_flag(self) -> None:
+        stderr = io.StringIO()
+
+        with patch(
+            "sys.argv",
+            [
+                "spider_cortex_sim",
+                "--capacity-sweep",
+                "--curriculum-profile",
+                "ecological_v1",
+            ],
+        ), patch("sys.stderr", stderr), patch(
+            "spider_cortex_sim.cli.SpiderSimulation"
+        ) as simulation_mock:
+            with self.assertRaises(SystemExit) as ctx:
+                main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--curriculum-profile", stderr.getvalue())
+        simulation_mock.assert_not_called()
+
 
 class CheckpointSelectionValidationTest(unittest.TestCase):
     def _minimal_summary(self) -> dict[str, object]:

@@ -62,6 +62,9 @@ class CompareAblationSuiteAlwaysIncludesReferenceTest(unittest.TestCase):
         variant_keys = list(payload["variants"].keys())
         self.assertEqual(variant_keys.count("modular_full"), 1)
 
+    def test_true_monolithic_policy_present_in_canonical_variants(self) -> None:
+        self.assertIn("true_monolithic_policy", canonical_ablation_configs())
+
     def test_deltas_always_has_reference_entry(self) -> None:
         payload, _ = compare_ablation_suite(
             episodes=0,
@@ -125,6 +128,58 @@ class CompareAblationSuiteAlwaysIncludesReferenceTest(unittest.TestCase):
             "mean_module_contribution_share",
             payload["variants"]["local_credit_only"]["legacy_scenarios"]["night_rest"],
         )
+
+    def test_true_monolithic_payload_includes_architecture_description(self) -> None:
+        payload, _ = compare_ablation_suite(
+            episodes=0,
+            evaluation_episodes=0,
+            variant_names=["true_monolithic_policy"],
+            names=("night_rest",),
+            seeds=(7,),
+        )
+        variant = payload["variants"]["true_monolithic_policy"]
+        self.assertEqual(
+            variant["config"]["architecture_description"],
+            "true monolithic direct control",
+        )
+        self.assertEqual(
+            variant["summary"]["architecture_description"],
+            "true monolithic direct control",
+        )
+
+    def test_true_monolithic_deltas_are_computed_vs_modular_full_reference(self) -> None:
+        payload, _ = compare_ablation_suite(
+            episodes=0,
+            evaluation_episodes=0,
+            variant_names=["true_monolithic_policy"],
+            names=("night_rest",),
+            seeds=(7,),
+        )
+        self.assertEqual(payload["reference_variant"], "modular_full")
+        self.assertIn("true_monolithic_policy", payload["deltas_vs_reference"])
+        delta = payload["deltas_vs_reference"]["true_monolithic_policy"]["summary"]
+        variant_summary = payload["variants"]["true_monolithic_policy"]["summary"]
+        reference_summary = payload["variants"]["modular_full"]["summary"]
+        expected = (
+            float(variant_summary["scenario_success_rate"])
+            - float(reference_summary["scenario_success_rate"])
+        )
+        self.assertAlmostEqual(
+            float(delta["scenario_success_rate_delta"]),
+            expected,
+            places=6,
+        )
+
+    def test_true_monolithic_completes_full_comparison_workflow_without_errors(self) -> None:
+        payload, rows = compare_ablation_suite(
+            episodes=0,
+            evaluation_episodes=0,
+            variant_names=["true_monolithic_policy"],
+            names=("night_rest",),
+            seeds=(7,),
+        )
+        self.assertIn("true_monolithic_policy", payload["variants"])
+        self.assertTrue(rows)
 
     def test_rows_contain_operational_profile_columns(self) -> None:
         _, rows = compare_ablation_suite(

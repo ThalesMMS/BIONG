@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..noise import NoiseConfig
+from ..capacity_profiles import CapacityProfile
 from ..simulation import SpiderSimulation
 from .constants import BOTTOM_BAR_HEIGHT, CELL_SIZE, TOP_BAR_HEIGHT
 from .controller import GUIController
@@ -91,6 +92,7 @@ def run_gui(
     module_lr: float = 0.010,
     motor_lr: float = 0.012,
     module_dropout: float = 0.05,
+    capacity_profile: str | CapacityProfile | None = None,
     reward_profile: str = "classic",
     map_template: str = "central_burrow",
     operational_profile: str = "default_v1",
@@ -110,6 +112,7 @@ def run_gui(
         module_lr=module_lr,
         motor_lr=motor_lr,
         module_dropout=module_dropout,
+        capacity_profile=capacity_profile,
         reward_profile=reward_profile,
         map_template=map_template,
         operational_profile=operational_profile,

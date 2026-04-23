@@ -544,6 +544,18 @@ class RecordLearningEdgeCasesTest(unittest.TestCase):
         snapshot = acc.snapshot()
         self.assertAlmostEqual(snapshot["module_gradient_norm_means"]["visual_cortex"], 2.0)
 
+    def test_snapshot_counterfactual_credit_weights_average_correctly(self) -> None:
+        acc = self._make_accumulator()
+        for value in (0.25, 0.75):
+            acc.record_learning(
+                {"counterfactual_credit_weights": {"alert_center": value}}
+            )
+        snapshot = acc.snapshot()
+        self.assertAlmostEqual(
+            snapshot["mean_counterfactual_credit_weights"]["alert_center"],
+            0.5,
+        )
+
     def test_record_learning_multiple_modules_in_same_step(self) -> None:
         """record_learning accumulates all modules provided in a single call."""
         acc = self._make_accumulator()
@@ -557,6 +569,10 @@ class RecordLearningEdgeCasesTest(unittest.TestCase):
                     "alert_center": 2.0,
                     "visual_cortex": 1.0,
                 },
+                "counterfactual_credit_weights": {
+                    "alert_center": 0.6,
+                    "visual_cortex": 0.4,
+                },
             }
         )
         snapshot = acc.snapshot()
@@ -564,6 +580,14 @@ class RecordLearningEdgeCasesTest(unittest.TestCase):
         self.assertAlmostEqual(snapshot["mean_module_credit_weights"]["visual_cortex"], 0.3)
         self.assertAlmostEqual(snapshot["module_gradient_norm_means"]["alert_center"], 2.0)
         self.assertAlmostEqual(snapshot["module_gradient_norm_means"]["visual_cortex"], 1.0)
+        self.assertAlmostEqual(
+            snapshot["mean_counterfactual_credit_weights"]["alert_center"],
+            0.6,
+        )
+        self.assertAlmostEqual(
+            snapshot["mean_counterfactual_credit_weights"]["visual_cortex"],
+            0.4,
+        )
 
     def test_record_learning_empty_dict_still_increments_counter(self) -> None:
         """An empty learn_stats dict still increments learning_steps."""

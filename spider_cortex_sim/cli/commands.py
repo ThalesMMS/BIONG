@@ -16,16 +16,19 @@ from ..benchmark_package import (
     summarize_benchmark_manifest,
 )
 from ..budget_profiles import ResolvedBudget, resolve_budget, resolve_budget_profile
-from ..checkpointing import build_checkpointing_summary
+from ..checkpointing import CheckpointSelectionConfig, build_checkpointing_summary
 from ..claim_evaluation import run_claim_test_suite
 from ..comparison import (
     compare_ablation_suite,
     compare_behavior_suite,
+    compare_capacity_sweep,
     compare_configurations,
+    compare_ladder_under_profiles,
     compare_learning_evidence,
     compare_noise_robustness,
     compare_training_regimes,
 )
+from ..distillation import DistillationConfig
 from ..maps import MAP_TEMPLATE_NAMES
 from ..scenarios import SCENARIO_NAMES
 from ..simulation import (
@@ -34,6 +37,7 @@ from ..simulation import (
     default_behavior_evaluation,
     ensure_behavior_evaluation,
 )
+from ..training_regimes import resolve_training_regime
 from ..world import REWARD_PROFILES
 from .formatting import format_run_summary
 from .parser import collect_requested_scenarios, parse_module_reflex_scales
@@ -74,6 +78,7 @@ def _build_and_record_benchmark_package(
 def _build_compare_training_kwargs(
     args: argparse.Namespace,
     budget: ResolvedBudget,
+    checkpoint_selection_config: CheckpointSelectionConfig,
 ) -> dict[str, object]:
     """
     Builds a dictionary of shared training and evaluation keyword arguments used for comparing training regimes.
@@ -83,7 +88,7 @@ def _build_compare_training_kwargs(
         budget: Budget-like object with attributes `max_steps`, `episodes`, `eval_episodes`, `behavior_seeds`, `scenario_episodes`, and `checkpoint_interval` describing runtime sizing.
 
     Returns:
-        dict[str, object]: Mapping of runtime kwargs including world size (`width`, `height`, `food_count`, `day_length`, `night_length`, `max_steps`), training/evaluation sizing (`episodes`, `evaluation_episodes`, `episodes_per_scenario`, `checkpoint_interval`), learning hyperparameters (`gamma`, `module_lr`, `motor_lr`, `module_dropout`), profile selections (`reward_profile`, `map_template`, `operational_profile`, `noise_profile`, `budget_profile`, `curriculum_profile`), checkpoint controls (`checkpoint_selection`, `checkpoint_metric`, `checkpoint_override_penalty`, `checkpoint_dominance_penalty`, `checkpoint_penalty_mode`, `checkpoint_dir`), and `seeds` as a tuple of behavior seeds.
+        dict[str, object]: Mapping of runtime kwargs including world size (`width`, `height`, `food_count`, `day_length`, `night_length`, `max_steps`), training/evaluation sizing (`episodes`, `evaluation_episodes`, `episodes_per_scenario`, `checkpoint_interval`), learning hyperparameters (`gamma`, `module_lr`, `motor_lr`, `module_dropout`), profile selections (`reward_profile`, `map_template`, `operational_profile`, `noise_profile`, `budget_profile`, `curriculum_profile`), checkpoint controls (`checkpoint_selection`, `checkpoint_selection_config`, `checkpoint_dir`), and `seeds` as a tuple of behavior seeds.
     """
     return {
         "width": args.width,
@@ -106,14 +111,26 @@ def _build_compare_training_kwargs(
         "seeds": tuple(budget.behavior_seeds),
         "episodes_per_scenario": budget.scenario_episodes,
         "checkpoint_selection": args.checkpoint_selection,
-        "checkpoint_metric": args.checkpoint_metric,
-        "checkpoint_override_penalty": args.checkpoint_override_penalty,
-        "checkpoint_dominance_penalty": args.checkpoint_dominance_penalty,
-        "checkpoint_penalty_mode": args.checkpoint_penalty_mode,
+        "checkpoint_selection_config": checkpoint_selection_config,
         "checkpoint_interval": budget.checkpoint_interval,
         "checkpoint_dir": args.checkpoint_dir,
         "curriculum_profile": args.curriculum_profile,
     }
+
+
+def _build_checkpoint_selection_config(
+    args: argparse.Namespace,
+) -> CheckpointSelectionConfig:
+    try:
+        return CheckpointSelectionConfig(
+            metric=args.checkpoint_metric,
+            override_penalty_weight=args.checkpoint_override_penalty,
+            dominance_penalty_weight=args.checkpoint_dominance_penalty,
+            penalty_mode=args.checkpoint_penalty_mode,
+        )
+    except ValueError as exc:
+        _argument_error(args, str(exc))
+        raise AssertionError("unreachable") from exc
 
 
 def _argument_error(args: argparse.Namespace, message: str) -> None:
@@ -195,6 +212,7 @@ def run_cli(args: argparse.Namespace) -> None:
             _argument_error(args, f"{flag_name} must be finite.")
         if float(value) < 0.0:
             _argument_error(args, f"{flag_name} must be non-negative.")
+    checkpoint_selection_config = _build_checkpoint_selection_config(args)
 
     budget = resolve_budget(
         profile=args.budget_profile,
@@ -250,6 +268,10 @@ def run_cli(args: argparse.Namespace) -> None:
         unsupported_reflex_workflows.append("--noise-robustness")
     if args.ablation_suite or args.ablation_variant:
         unsupported_reflex_workflows.append("--ablation-suite/--ablation-variant")
+    if args.ladder_reward_profiles:
+        unsupported_reflex_workflows.append("--ladder-reward-profiles")
+    if args.capacity_sweep:
+        unsupported_reflex_workflows.append("--capacity-sweep")
     if args.claim_test_suite:
         unsupported_reflex_workflows.append("--claim-test-suite")
     if unsupported_reflex_workflows and (
@@ -275,9 +297,31 @@ def run_cli(args: argparse.Namespace) -> None:
             disabled_modules=(),
             reflex_scale=args.reflex_scale,
             module_reflex_scales=module_reflex_scales,
+            capacity_profile=args.capacity_profile,
         )
     except ValueError as exc:
         _argument_error(args, str(exc))
+
+    unsupported_capacity_workflows: list[str] = []
+    if args.gui:
+        unsupported_capacity_workflows.append("--gui")
+    if args.noise_robustness:
+        unsupported_capacity_workflows.append("--noise-robustness")
+    if args.compare_profiles or args.compare_maps:
+        unsupported_capacity_workflows.append("--compare-profiles/--compare-maps")
+    if args.behavior_compare_profiles or args.behavior_compare_maps:
+        unsupported_capacity_workflows.append(
+            "--behavior-compare-profiles/--behavior-compare-maps"
+        )
+    if args.curriculum_profile != "none":
+        unsupported_capacity_workflows.append("--curriculum-profile")
+    if args.capacity_profile is not None and unsupported_capacity_workflows:
+        _argument_error(
+            args,
+            "--capacity-profile is not supported with "
+            + ", ".join(unsupported_capacity_workflows)
+            + ".",
+        )
 
     if args.gui:
         from ..gui import run_gui
@@ -296,6 +340,7 @@ def run_cli(args: argparse.Namespace) -> None:
             module_lr=args.module_lr,
             motor_lr=args.motor_lr,
             module_dropout=args.module_dropout,
+            capacity_profile=args.capacity_profile,
             reward_profile=args.reward_profile,
             map_template=args.map_template,
             operational_profile=args.operational_profile,
@@ -306,6 +351,11 @@ def run_cli(args: argparse.Namespace) -> None:
         return
 
     if args.noise_robustness:
+        if args.capacity_profile is not None:
+            _argument_error(
+                args,
+                "--capacity-profile is not supported with --noise-robustness.",
+            )
         if args.trace is not None:
             _argument_error(args, "--trace is not supported with --noise-robustness.")
         if args.render_eval:
@@ -356,10 +406,7 @@ def run_cli(args: argparse.Namespace) -> None:
             names=requested_scenarios or None,
             episodes_per_scenario=budget.scenario_episodes,
             checkpoint_selection=args.checkpoint_selection,
-            checkpoint_metric=args.checkpoint_metric,
-            checkpoint_override_penalty=args.checkpoint_override_penalty,
-            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
-            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_selection_config=checkpoint_selection_config,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
             load_brain=args.load_brain,
@@ -389,12 +436,9 @@ def run_cli(args: argparse.Namespace) -> None:
         if args.checkpoint_selection != "none":
             summary["checkpointing"] = _default_checkpointing_summary(
                 selection=args.checkpoint_selection,
-                metric=args.checkpoint_metric,
                 checkpoint_interval=budget.checkpoint_interval,
                 selection_scenario_episodes=budget.selection_scenario_episodes,
-                override_penalty_weight=args.checkpoint_override_penalty,
-                dominance_penalty_weight=args.checkpoint_dominance_penalty,
-                penalty_mode=args.checkpoint_penalty_mode,
+                selection_config=checkpoint_selection_config,
             )
         if args.benchmark_package is not None:
             _build_and_record_benchmark_package(
@@ -420,6 +464,116 @@ def run_cli(args: argparse.Namespace) -> None:
         )
         return
 
+    if args.capacity_sweep:
+        if args.trace is not None:
+            _argument_error(args, "--trace is not supported with --capacity-sweep.")
+        if args.render_eval:
+            _argument_error(args, "--render-eval is not supported with --capacity-sweep.")
+        if args.debug_trace:
+            _argument_error(args, "--debug-trace is not supported with --capacity-sweep.")
+        for enabled, flag_name in (
+            (args.compare_profiles, "--compare-profiles"),
+            (args.compare_maps, "--compare-maps"),
+            (args.behavior_compare_profiles, "--behavior-compare-profiles"),
+            (args.behavior_compare_maps, "--behavior-compare-maps"),
+            (args.ablation_suite, "--ablation-suite"),
+            (bool(args.ablation_variant), "--ablation-variant"),
+            (args.learning_evidence, "--learning-evidence"),
+            (args.claim_test_suite, "--claim-test-suite"),
+            (bool(args.capacity_profile), "--capacity-profile"),
+            (bool(args.curriculum_profile and args.curriculum_profile != "none"), "--curriculum-profile"),
+        ):
+            if enabled:
+                _argument_error(
+                    args,
+                    f"{flag_name} is not supported with --capacity-sweep."
+                )
+        capacity_scenarios: list[str] = []
+        for name in args.behavior_scenario or []:
+            if name not in capacity_scenarios:
+                capacity_scenarios.append(name)
+        if args.behavior_suite or not capacity_scenarios:
+            for name in SCENARIO_NAMES:
+                if name not in capacity_scenarios:
+                    capacity_scenarios.append(name)
+        capacity_payload, capacity_rows = compare_capacity_sweep(
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            reward_profile=args.reward_profile,
+            map_template=args.map_template,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+            budget_profile=args.budget_profile,
+            seeds=tuple(budget.ablation_seeds),
+            names=capacity_scenarios or None,
+            checkpoint_selection=args.checkpoint_selection,
+            checkpoint_selection_config=checkpoint_selection_config,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir,
+        )
+        summary = {
+            "config": {
+                "brain": base_brain_config.to_summary(),
+                "world": {
+                    "width": args.width,
+                    "height": args.height,
+                    "food_count": args.food_count,
+                    "day_length": args.day_length,
+                    "night_length": args.night_length,
+                    "max_steps": budget.max_steps,
+                    "reward_profile": args.reward_profile,
+                    "map_template": args.map_template,
+                },
+                "budget": budget.to_summary(),
+                "training_regime": {"name": "capacity_sweep"},
+                "operational_profile": {"name": args.operational_profile},
+                "noise_profile": {"name": args.noise_profile},
+            },
+            "behavior_evaluation": {
+                "capacity_sweeps": capacity_payload,
+            },
+        }
+        if args.checkpoint_selection != "none":
+            summary["checkpointing"] = _default_checkpointing_summary(
+                selection=args.checkpoint_selection,
+                checkpoint_interval=budget.checkpoint_interval,
+                selection_scenario_episodes=budget.selection_scenario_episodes,
+                selection_config=checkpoint_selection_config,
+            )
+        if args.benchmark_package is not None:
+            _build_and_record_benchmark_package(
+                output_dir=args.benchmark_package,
+                summary=summary,
+                behavior_csv=args.behavior_csv,
+                behavior_rows=capacity_rows,
+                command_metadata={
+                    "argv": list(sys.argv[1:]),
+                    "entrypoint": "spider_cortex_sim",
+                },
+            )
+        if args.summary is not None:
+            SpiderSimulation.save_summary(summary, args.summary)
+        if args.behavior_csv is not None:
+            SpiderSimulation.save_behavior_csv(capacity_rows, args.behavior_csv)
+        print(
+            json.dumps(
+                format_run_summary(summary, full=args.full_summary),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return
+
     sim = SpiderSimulation(
         width=args.width,
         height=args.height,
@@ -432,6 +586,7 @@ def run_cli(args: argparse.Namespace) -> None:
         module_lr=args.module_lr,
         motor_lr=args.motor_lr,
         module_dropout=args.module_dropout,
+        capacity_profile=args.capacity_profile,
         brain_config=base_brain_config,
         reward_profile=args.reward_profile,
         map_template=args.map_template,
@@ -447,8 +602,10 @@ def run_cli(args: argparse.Namespace) -> None:
 
     behavior_rows = []
     ablation_payload: dict[str, object] | None = None
+    ladder_profile_payload: dict[str, object] | None = None
     learning_evidence_payload: dict[str, object] | None = None
     ablation_active = bool(args.ablation_suite or args.ablation_variant)
+    ladder_profile_active = bool(args.ladder_reward_profiles)
     learning_evidence_active = bool(args.learning_evidence)
     claim_test_suite_active = bool(args.claim_test_suite)
     checkpoint_selection_run = False
@@ -460,11 +617,11 @@ def run_cli(args: argparse.Namespace) -> None:
     )
 
     requested_scenarios = []
-    if not ablation_active:
+    if not ablation_active and not ladder_profile_active:
         requested_scenarios = collect_requested_scenarios(args)
 
     ablation_scenarios = []
-    if ablation_active:
+    if ablation_active or ladder_profile_active:
         for name in args.behavior_scenario or []:
             if name not in ablation_scenarios:
                 ablation_scenarios.append(name)
@@ -518,6 +675,66 @@ def run_cli(args: argparse.Namespace) -> None:
             "--reflex-anneal-final-scale/--training-regime requires a workflow "
             "that trains or evaluates the base brain."
         )
+    lr_overrides = [
+        value
+        for value in (
+            args.distillation_module_lr,
+            args.distillation_motor_lr,
+            args.distillation_arbitration_lr,
+        )
+        if value is not None
+    ]
+    effective_distillation_lr = (
+        lr_overrides[0]
+        if lr_overrides
+        else None
+    )
+    if lr_overrides and any(
+        abs(float(value) - float(lr_overrides[0])) > 1e-12
+        for value in lr_overrides[1:]
+    ):
+        _argument_error(
+            args,
+            "Distillation now uses a single regime-level learning rate; provide matching distillation LR overrides.",
+        )
+    distillation_config = (
+        None
+        if args.distillation_teacher_checkpoint is None
+        else DistillationConfig(
+            teacher_checkpoint=args.distillation_teacher_checkpoint,
+            shuffle=args.distillation_shuffle,
+            match_local_proposals=args.distillation_match_local_proposals,
+        )
+    )
+    distillation_training_regime = None
+    if args.distillation_teacher_checkpoint is not None:
+        base_distillation_regime = resolve_training_regime("distillation")
+        distillation_training_regime = type(base_distillation_regime)(
+            name=base_distillation_regime.name,
+            annealing_schedule=base_distillation_regime.annealing_schedule,
+            anneal_target_scale=base_distillation_regime.anneal_target_scale,
+            anneal_warmup_fraction=base_distillation_regime.anneal_warmup_fraction,
+            finetuning_episodes=base_distillation_regime.finetuning_episodes,
+            finetuning_reflex_scale=base_distillation_regime.finetuning_reflex_scale,
+            loss_override_penalty_weight=base_distillation_regime.loss_override_penalty_weight,
+            loss_dominance_penalty_weight=base_distillation_regime.loss_dominance_penalty_weight,
+            distillation_epochs=args.distillation_epochs,
+            distillation_temperature=args.distillation_temperature,
+            distillation_lr=(
+                effective_distillation_lr
+                if effective_distillation_lr is not None
+                else base_distillation_regime.distillation_lr
+            ),
+            distillation_enabled=True,
+        )
+    resolved_training_regime = args.training_regime
+    if args.training_regime == "distillation":
+        if args.distillation_teacher_checkpoint is None:
+            _argument_error(
+                args,
+                "--training-regime distillation requires --distillation-teacher-checkpoint.",
+            )
+        resolved_training_regime = distillation_training_regime
     if should_train_or_eval:
         checkpoint_selection_run = primary_checkpoint_selection != "none"
         summary, trace = sim.train(
@@ -527,17 +744,16 @@ def run_cli(args: argparse.Namespace) -> None:
             capture_evaluation_trace=args.trace is not None,
             debug_trace=args.debug_trace,
             checkpoint_selection=primary_checkpoint_selection,
-            checkpoint_metric=args.checkpoint_metric,
-            checkpoint_override_penalty=args.checkpoint_override_penalty,
-            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
-            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_selection_config=checkpoint_selection_config,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir if primary_checkpoint_selection != "none" else None,
             checkpoint_scenario_names=requested_scenarios or list(SCENARIO_NAMES),
             selection_scenario_episodes=budget.selection_scenario_episodes,
             reflex_anneal_final_scale=args.reflex_anneal_final_scale,
             curriculum_profile=args.curriculum_profile,
-            training_regime=args.training_regime,
+            training_regime=resolved_training_regime,
+            teacher_checkpoint=args.distillation_teacher_checkpoint,
+            distillation_config=distillation_config,
         )
     else:
         sim.set_runtime_budget(
@@ -616,10 +832,7 @@ def run_cli(args: argparse.Namespace) -> None:
             names=requested_scenarios or None,
             episodes_per_scenario=budget.scenario_episodes,
             checkpoint_selection=args.checkpoint_selection,
-            checkpoint_metric=args.checkpoint_metric,
-            checkpoint_override_penalty=args.checkpoint_override_penalty,
-            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
-            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_selection_config=checkpoint_selection_config,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
         )
@@ -646,6 +859,7 @@ def run_cli(args: argparse.Namespace) -> None:
             module_lr=args.module_lr,
             motor_lr=args.motor_lr,
             module_dropout=args.module_dropout,
+            capacity_profile=args.capacity_profile,
             reward_profile=args.reward_profile,
             map_template=args.map_template,
             operational_profile=args.operational_profile,
@@ -656,16 +870,49 @@ def run_cli(args: argparse.Namespace) -> None:
             variant_names=args.ablation_variant,
             episodes_per_scenario=budget.scenario_episodes,
             checkpoint_selection=args.checkpoint_selection,
-            checkpoint_metric=args.checkpoint_metric,
-            checkpoint_override_penalty=args.checkpoint_override_penalty,
-            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
-            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_selection_config=checkpoint_selection_config,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
         )
         _ensure_behavior_evaluation(summary)
         summary["behavior_evaluation"]["ablations"] = ablation_payload
         behavior_rows.extend(ablation_rows)
+
+    if ladder_profile_active:
+        checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
+        ladder_profile_payload, ladder_profile_rows = compare_ladder_under_profiles(
+            width=args.width,
+            height=args.height,
+            food_count=args.food_count,
+            day_length=args.day_length,
+            night_length=args.night_length,
+            max_steps=budget.max_steps,
+            episodes=budget.episodes,
+            evaluation_episodes=budget.eval_episodes,
+            gamma=args.gamma,
+            module_lr=args.module_lr,
+            motor_lr=args.motor_lr,
+            module_dropout=args.module_dropout,
+            capacity_profile=args.capacity_profile,
+            map_template=args.map_template,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+            budget_profile=args.budget_profile,
+            seeds=tuple(budget.ablation_seeds),
+            names=ablation_scenarios or None,
+            episodes_per_scenario=budget.scenario_episodes,
+            checkpoint_selection=args.checkpoint_selection,
+            checkpoint_selection_config=checkpoint_selection_config,
+            checkpoint_interval=budget.checkpoint_interval,
+            checkpoint_dir=args.checkpoint_dir,
+            enforce_benchmark_policy=args.benchmark_package is not None,
+        )
+        _ensure_behavior_evaluation(summary)
+        summary["behavior_evaluation"]["ladder_under_profiles"] = ladder_profile_payload
+        summary["behavior_evaluation"]["ladder_profile_comparison"] = (
+            ladder_profile_payload
+        )
+        behavior_rows.extend(ladder_profile_rows)
 
     if learning_evidence_active:
         checkpoint_selection_run = checkpoint_selection_run or args.checkpoint_selection != "none"
@@ -693,12 +940,11 @@ def run_cli(args: argparse.Namespace) -> None:
             names=learning_evidence_scenarios or None,
             episodes_per_scenario=budget.scenario_episodes,
             checkpoint_selection=args.checkpoint_selection,
-            checkpoint_metric=args.checkpoint_metric,
-            checkpoint_override_penalty=args.checkpoint_override_penalty,
-            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
-            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_selection_config=checkpoint_selection_config,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
+            distillation_config=distillation_config,
+            distillation_training_regime=distillation_training_regime,
         )
         _ensure_behavior_evaluation(summary)
         summary["behavior_evaluation"]["learning_evidence"] = learning_evidence_payload
@@ -730,10 +976,7 @@ def run_cli(args: argparse.Namespace) -> None:
             seeds=claim_test_seeds,
             episodes_per_scenario=budget.scenario_episodes,
             checkpoint_selection=args.checkpoint_selection,
-            checkpoint_metric=args.checkpoint_metric,
-            checkpoint_override_penalty=args.checkpoint_override_penalty,
-            checkpoint_dominance_penalty=args.checkpoint_dominance_penalty,
-            checkpoint_penalty_mode=args.checkpoint_penalty_mode,
+            checkpoint_selection_config=checkpoint_selection_config,
             checkpoint_interval=budget.checkpoint_interval,
             checkpoint_dir=args.checkpoint_dir,
             ablation_payload=ablation_payload,
@@ -749,7 +992,11 @@ def run_cli(args: argparse.Namespace) -> None:
         and not learning_evidence_active
         and (budget.episodes > 0 or budget.eval_episodes > 0)
     ):
-        compare_training_kwargs = _build_compare_training_kwargs(args, budget)
+        compare_training_kwargs = _build_compare_training_kwargs(
+            args,
+            budget,
+            checkpoint_selection_config,
+        )
         curriculum_payload, curriculum_rows = compare_training_regimes(
             names=requested_scenarios or None,
             **compare_training_kwargs,
@@ -765,12 +1012,9 @@ def run_cli(args: argparse.Namespace) -> None:
     ):
         summary["checkpointing"] = _default_checkpointing_summary(
             selection=args.checkpoint_selection,
-            metric=args.checkpoint_metric,
             checkpoint_interval=budget.checkpoint_interval,
             selection_scenario_episodes=budget.selection_scenario_episodes,
-            override_penalty_weight=args.checkpoint_override_penalty,
-            dominance_penalty_weight=args.checkpoint_dominance_penalty,
-            penalty_mode=args.checkpoint_penalty_mode,
+            selection_config=checkpoint_selection_config,
         )
 
     if args.benchmark_package is not None:

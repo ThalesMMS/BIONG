@@ -506,6 +506,28 @@ class CounterfactualCreditEdgeCasesTest(unittest.TestCase):
             self.assertIsInstance(float(norm), float)
             self.assertGreaterEqual(float(norm), 0.0, f"Norm for {name!r} should be >= 0")
 
+    def test_frozen_proposer_skips_module_update_and_reports_zero_gradient_norm(self) -> None:
+        brain = SpiderBrain(seed=15, module_dropout=0.0)
+        obs = _blank_obs()
+        brain.freeze_proposers(("alert_center",))
+        frozen_before = brain.module_bank.modules["alert_center"].W1.copy()
+        trainable_before = brain.module_bank.modules["hunger_center"].W1.copy()
+
+        step = brain.act(obs, sample=False, training=True)
+        stats = brain.learn(step, reward=1.0, next_observation=obs, done=True)
+
+        np.testing.assert_allclose(
+            brain.module_bank.modules["alert_center"].W1,
+            frozen_before,
+        )
+        self.assertEqual(stats["module_gradient_norms"]["alert_center"], 0.0)
+        self.assertFalse(
+            np.allclose(
+                brain.module_bank.modules["hunger_center"].W1,
+                trainable_before,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

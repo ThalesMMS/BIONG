@@ -13,10 +13,13 @@ from .interfaces import (
     AlertObservation,
     ActionContextObservation,
     HungerObservation,
+    HomeostasisObservation,
     MotorContextObservation,
     ObservationView,
+    PerceptionObservation,
     SensoryObservation,
     SleepObservation,
+    ThreatObservation,
     VisualObservation,
 )
 from .maps import BLOCKED, CLUTTER, NARROW, OPEN
@@ -26,6 +29,9 @@ from .perception_geometry import _max_scan_age, _normalized_scan_age, smell_grad
 from .perception_predators import _predator_candidates, _predator_view_from_views, _predator_views_by_type_from_sampled_views, _sample_predator_views, compute_per_type_threats, predator_motion_salience
 from .perception_targets import DOMINANT_PREDATOR_TYPE_NONE, DOMINANT_PREDATOR_TYPE_OLFACTORY, DOMINANT_PREDATOR_TYPE_VISUAL, NO_TARGET_DISTANCE, PerceivedTarget, TERRAIN_DIFFICULTY
 from .perception_trace import trace_view
+
+if TYPE_CHECKING:
+    from .world import SpiderWorld
 
 def _unpack_trace_view(trace_view: Mapping[str, object]) -> tuple[float, float, float, float, float]:
     """
@@ -350,6 +356,198 @@ def build_alert_observation(
         escape_memory_age=escape_mem_age,
     )
 
+
+def build_perception_observation(
+    *,
+    food_view: PerceivedTarget,
+    shelter_view: PerceivedTarget,
+    predator_view: PerceivedTarget,
+    heading_dx: float,
+    heading_dy: float,
+    foveal_scan_age: float,
+    food_smell_strength: float,
+    food_smell_dx: float,
+    food_smell_dy: float,
+    predator_smell_strength: float,
+    predator_smell_dx: float,
+    predator_smell_dy: float,
+    light: float,
+    day: float,
+    night: float,
+    food_trace_strength: float,
+    food_trace_heading: tuple[float, float],
+    shelter_trace_strength: float,
+    shelter_trace_heading: tuple[float, float],
+    predator_trace_strength: float,
+    predator_trace_heading: tuple[float, float],
+    food_memory: tuple[float, float, float],
+    shelter_memory: tuple[float, float, float],
+    predator_memory: tuple[float, float, float],
+) -> PerceptionObservation:
+    """Build the coarse perception-center view from visual, olfactory, trace, and memory signals."""
+    food_trace_heading_dx, food_trace_heading_dy = food_trace_heading
+    shelter_trace_heading_dx, shelter_trace_heading_dy = shelter_trace_heading
+    predator_trace_heading_dx, predator_trace_heading_dy = predator_trace_heading
+    food_mem_dx, food_mem_dy, food_mem_age = food_memory
+    shelter_mem_dx, shelter_mem_dy, shelter_mem_age = shelter_memory
+    predator_mem_dx, predator_mem_dy, predator_mem_age = predator_memory
+    return PerceptionObservation(
+        food_visible=food_view.visible,
+        food_certainty=food_view.certainty,
+        food_dx=food_view.dx,
+        food_dy=food_view.dy,
+        shelter_visible=shelter_view.visible,
+        shelter_certainty=shelter_view.certainty,
+        shelter_dx=shelter_view.dx,
+        shelter_dy=shelter_view.dy,
+        predator_visible=predator_view.visible,
+        predator_certainty=predator_view.certainty,
+        predator_dx=predator_view.dx,
+        predator_dy=predator_view.dy,
+        heading_dx=heading_dx,
+        heading_dy=heading_dy,
+        foveal_scan_age=float(np.clip(foveal_scan_age, 0.0, 1.0)),
+        food_smell_strength=food_smell_strength,
+        food_smell_dx=food_smell_dx,
+        food_smell_dy=food_smell_dy,
+        predator_smell_strength=predator_smell_strength,
+        predator_smell_dx=predator_smell_dx,
+        predator_smell_dy=predator_smell_dy,
+        light=light,
+        day=day,
+        night=night,
+        food_trace_strength=food_trace_strength,
+        food_trace_heading_dx=food_trace_heading_dx,
+        food_trace_heading_dy=food_trace_heading_dy,
+        shelter_trace_strength=shelter_trace_strength,
+        shelter_trace_heading_dx=shelter_trace_heading_dx,
+        shelter_trace_heading_dy=shelter_trace_heading_dy,
+        predator_trace_strength=predator_trace_strength,
+        predator_trace_heading_dx=predator_trace_heading_dx,
+        predator_trace_heading_dy=predator_trace_heading_dy,
+        food_memory_dx=food_mem_dx,
+        food_memory_dy=food_mem_dy,
+        food_memory_age=food_mem_age,
+        shelter_memory_dx=shelter_mem_dx,
+        shelter_memory_dy=shelter_mem_dy,
+        shelter_memory_age=shelter_mem_age,
+        predator_memory_dx=predator_mem_dx,
+        predator_memory_dy=predator_mem_dy,
+        predator_memory_age=predator_mem_age,
+    )
+
+
+def build_homeostasis_observation(
+    world: "SpiderWorld",
+    *,
+    on_food: float,
+    on_shelter: float,
+    day: float,
+    night: float,
+    food_view: PerceivedTarget,
+    food_smell_strength: float,
+    food_smell_dx: float,
+    food_smell_dy: float,
+    food_trace: tuple[float, float, float, float, float],
+    food_memory: tuple[float, float, float],
+    sleep_phase_level: float,
+    rest_streak_norm: float,
+    shelter_role_level: float,
+    shelter_trace: tuple[float, float, float, float, float],
+    shelter_memory: tuple[float, float, float],
+) -> HomeostasisObservation:
+    """Build the coarse homeostasis-center view from body state, food cues, and shelter cues."""
+    food_trace_dx, food_trace_dy, food_trace_strength, _, _ = food_trace
+    food_mem_dx, food_mem_dy, food_mem_age = food_memory
+    shelter_trace_dx, shelter_trace_dy, shelter_trace_strength, _, _ = shelter_trace
+    shelter_mem_dx, shelter_mem_dy, shelter_mem_age = shelter_memory
+    return HomeostasisObservation(
+        hunger=world.state.hunger,
+        fatigue=world.state.fatigue,
+        health=world.state.health,
+        on_food=on_food,
+        on_shelter=on_shelter,
+        day=day,
+        night=night,
+        sleep_phase_level=sleep_phase_level,
+        rest_streak_norm=rest_streak_norm,
+        sleep_debt=world.state.sleep_debt,
+        shelter_role_level=shelter_role_level,
+        food_visible=food_view.visible,
+        food_certainty=food_view.certainty,
+        food_smell_strength=food_smell_strength,
+        food_smell_dx=food_smell_dx,
+        food_smell_dy=food_smell_dy,
+        food_trace_dx=food_trace_dx,
+        food_trace_dy=food_trace_dy,
+        food_trace_strength=food_trace_strength,
+        food_memory_dx=food_mem_dx,
+        food_memory_dy=food_mem_dy,
+        food_memory_age=food_mem_age,
+        shelter_trace_dx=shelter_trace_dx,
+        shelter_trace_dy=shelter_trace_dy,
+        shelter_trace_strength=shelter_trace_strength,
+        shelter_memory_dx=shelter_mem_dx,
+        shelter_memory_dy=shelter_mem_dy,
+        shelter_memory_age=shelter_mem_age,
+    )
+
+
+def build_threat_observation(
+    world: "SpiderWorld",
+    *,
+    predator_view: PerceivedTarget,
+    predator_smell_strength: float,
+    predator_smell_dx: float,
+    predator_smell_dy: float,
+    predator_motion_salience_value: float,
+    visual_predator_threat: float,
+    olfactory_predator_threat: float,
+    dominant_predator_type: float,
+    on_shelter: float,
+    night: float,
+    predator_trace: tuple[float, float, float, float, float],
+    predator_memory: tuple[float, float, float],
+    escape_memory: tuple[float, float, float],
+) -> ThreatObservation:
+    """Build the coarse threat-center view from threat sensing, body damage, and escape memory."""
+    predator_trace_dx, predator_trace_dy, predator_trace_strength, _, _ = predator_trace
+    predator_mem_dx, predator_mem_dy, predator_mem_age = predator_memory
+    escape_mem_dx, escape_mem_dy, escape_mem_age = escape_memory
+    dominant_predator_none = 1.0 if dominant_predator_type == DOMINANT_PREDATOR_TYPE_NONE else 0.0
+    dominant_predator_visual = 1.0 if dominant_predator_type == DOMINANT_PREDATOR_TYPE_VISUAL else 0.0
+    dominant_predator_olfactory = 1.0 if dominant_predator_type == DOMINANT_PREDATOR_TYPE_OLFACTORY else 0.0
+    return ThreatObservation(
+        predator_visible=predator_view.visible,
+        predator_certainty=predator_view.certainty,
+        predator_dx=predator_view.dx,
+        predator_dy=predator_view.dy,
+        predator_smell_strength=predator_smell_strength,
+        predator_smell_dx=predator_smell_dx,
+        predator_smell_dy=predator_smell_dy,
+        predator_motion_salience=predator_motion_salience_value,
+        visual_predator_threat=visual_predator_threat,
+        olfactory_predator_threat=olfactory_predator_threat,
+        dominant_predator_none=dominant_predator_none,
+        dominant_predator_visual=dominant_predator_visual,
+        dominant_predator_olfactory=dominant_predator_olfactory,
+        recent_pain=world.state.recent_pain,
+        recent_contact=world.state.recent_contact,
+        health=world.state.health,
+        on_shelter=on_shelter,
+        night=night,
+        predator_trace_dx=predator_trace_dx,
+        predator_trace_dy=predator_trace_dy,
+        predator_trace_strength=predator_trace_strength,
+        predator_memory_dx=predator_mem_dx,
+        predator_memory_dy=predator_mem_dy,
+        predator_memory_age=predator_mem_age,
+        escape_memory_dx=escape_mem_dx,
+        escape_memory_dy=escape_mem_dy,
+        escape_memory_age=escape_mem_age,
+    )
+
+
 def build_action_context_observation(
     world: "SpiderWorld",
     *,
@@ -583,6 +781,84 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         predator_memory=(predator_mem_dx, predator_mem_dy, predator_mem_age),
         escape_memory=(escape_mem_dx, escape_mem_dy, escape_mem_age),
     )
+    perception_observation = build_perception_observation(
+        food_view=food_view,
+        shelter_view=shelter_view,
+        predator_view=predator_view,
+        heading_dx=heading_dx,
+        heading_dy=heading_dy,
+        foveal_scan_age=float(visual_observation.foveal_scan_age),
+        food_smell_strength=food_smell_strength,
+        food_smell_dx=food_smell_dx,
+        food_smell_dy=food_smell_dy,
+        predator_smell_strength=predator_smell_strength,
+        predator_smell_dx=predator_smell_dx,
+        predator_smell_dy=predator_smell_dy,
+        light=light,
+        day=day,
+        night=night,
+        food_trace_strength=food_trace_strength,
+        food_trace_heading=(food_trace_heading_dx, food_trace_heading_dy),
+        shelter_trace_strength=shelter_trace_strength,
+        shelter_trace_heading=(shelter_trace_heading_dx, shelter_trace_heading_dy),
+        predator_trace_strength=predator_trace_strength,
+        predator_trace_heading=(predator_trace_heading_dx, predator_trace_heading_dy),
+        food_memory=(food_mem_dx, food_mem_dy, food_mem_age),
+        shelter_memory=(shelter_mem_dx, shelter_mem_dy, shelter_mem_age),
+        predator_memory=(predator_mem_dx, predator_mem_dy, predator_mem_age),
+    )
+    homeostasis_observation = build_homeostasis_observation(
+        world,
+        on_food=on_food,
+        on_shelter=on_shelter,
+        day=day,
+        night=night,
+        food_view=food_view,
+        food_smell_strength=food_smell_strength,
+        food_smell_dx=food_smell_dx,
+        food_smell_dy=food_smell_dy,
+        food_trace=(
+            food_trace_dx,
+            food_trace_dy,
+            food_trace_strength,
+            food_trace_heading_dx,
+            food_trace_heading_dy,
+        ),
+        food_memory=(food_mem_dx, food_mem_dy, food_mem_age),
+        sleep_phase_level=sleep_phase,
+        rest_streak_norm=rest_norm,
+        shelter_role_level=shelter_role_level,
+        shelter_trace=(
+            shelter_trace_dx,
+            shelter_trace_dy,
+            shelter_trace_strength,
+            shelter_trace_heading_dx,
+            shelter_trace_heading_dy,
+        ),
+        shelter_memory=(shelter_mem_dx, shelter_mem_dy, shelter_mem_age),
+    )
+    threat_observation = build_threat_observation(
+        world,
+        predator_view=predator_view,
+        predator_smell_strength=predator_smell_strength,
+        predator_smell_dx=predator_smell_dx,
+        predator_smell_dy=predator_smell_dy,
+        predator_motion_salience_value=motion_salience,
+        visual_predator_threat=per_type_threats["visual_predator_threat"],
+        olfactory_predator_threat=per_type_threats["olfactory_predator_threat"],
+        dominant_predator_type=per_type_threats["dominant_predator_type"],
+        on_shelter=on_shelter,
+        night=night,
+        predator_trace=(
+            predator_trace_dx,
+            predator_trace_dy,
+            predator_trace_strength,
+            predator_trace_heading_dx,
+            predator_trace_heading_dy,
+        ),
+        predator_memory=(predator_mem_dx, predator_mem_dy, predator_mem_age),
+        escape_memory=(escape_mem_dx, escape_mem_dy, escape_mem_age),
+    )
     action_context_observation = build_action_context_observation(
         world,
         on_food=on_food,
@@ -608,6 +884,9 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         "hunger": serialize_observation_view("hunger", hunger_observation),
         "sleep": serialize_observation_view("sleep", sleep_observation),
         "alert": serialize_observation_view("alert", alert_observation),
+        "perception": serialize_observation_view("perception", perception_observation),
+        "homeostasis": serialize_observation_view("homeostasis", homeostasis_observation),
+        "threat": serialize_observation_view("threat", threat_observation),
         "action_context": serialize_observation_view("action_context", action_context_observation),
         "motor_context": serialize_observation_view("motor_context", motor_context_observation),
     }

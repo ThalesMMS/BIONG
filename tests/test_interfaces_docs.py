@@ -148,6 +148,30 @@ class RenderInterfacesMarkdownTest(unittest.TestCase):
         md = render_interfaces_markdown()
         self.assertIn("Schema version:", md)
 
+    def test_markdown_contains_a5_candidate_interfaces_section(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("## A5 Candidate Interfaces", md)
+        self.assertIn("gated by the prerequisite checklist", md)
+        self.assertIn("proposal surfaces for `A5_future_bio_refined`", md)
+        self.assertIn("do not affect save/load compatibility", md)
+
+    def test_markdown_contains_olfactory_center_candidate_spec(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("### `olfactory_center`", md)
+        self.assertIn("`smell_ambiguity`", md)
+        self.assertIn('valence role `"foraging"` or `"threat"`', md)
+        self.assertIn("`drop_olfactory_center`", md)
+        self.assertIn("Coupling risk: `HIGH`", md)
+
+    def test_markdown_contains_homeostasis_refinement_pathway(self) -> None:
+        md = render_interfaces_markdown()
+        self.assertIn("### `homeostasis_center` A5 Refinement Pathway", md)
+        self.assertIn("coarse `A2_three_center` homeostatic control with `28` canonical signals", md)
+        self.assertIn("#### `metabolic_regulation_center`", md)
+        self.assertIn("#### `thermoregulation_center`", md)
+        self.assertIn("`Cohen's d >= 0.3`", md)
+        self.assertIn("hypothetical 6-module A5 configuration", md)
+
 class AlertObservationNewFieldsTest(unittest.TestCase):
     """Tests for new fields added to AlertObservation in this PR."""
 
@@ -476,6 +500,6 @@ class InterfaceRegistryFingerprintChangedTest(unittest.TestCase):
 
     def test_fingerprint_matches_documented_value(self) -> None:
         # The new fingerprint from docs/interfaces.md after PR
-        expected = "b5bff4986a57404d4c3c2d3c075b3f8e4c283cf5355c36591588197859807ef7"
+        expected = "25164d4bee0652c6da69d28bd983d941690a6e6dfd5471dcdcc412bf522f263f"
         fp = interface_registry_fingerprint()
         self.assertEqual(fp, expected)

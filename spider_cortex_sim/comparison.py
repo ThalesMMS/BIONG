@@ -3,6 +3,7 @@ from __future__ import annotations
 from .budget_profiles import resolve_budget
 from .learning_evidence import resolve_learning_evidence_conditions
 from . import comparison_learning as _comparison_learning
+from . import comparison_ladder_profiles as _comparison_ladder_profiles
 from . import comparison_training as _comparison_training
 from .comparison_utils import (
     noise_profile_metadata,
@@ -49,6 +50,7 @@ from .comparison_representation import (
     build_predator_type_specialization_summary,
 )
 from .comparison_learning import (
+    build_distillation_comparison_report,
     build_learning_evidence_deltas,
     build_learning_evidence_summary,
 )
@@ -64,6 +66,10 @@ from .comparison_training import (
 from .comparison_ablation import (
     compare_ablation_suite,
 )
+from .comparison_capacity import (
+    compare_capacity_sweep,
+    compare_capacity_sweeps,
+)
 
 def compare_learning_evidence(*args, **kwargs):
     _comparison_learning.resolve_budget = resolve_budget
@@ -71,6 +77,13 @@ def compare_learning_evidence(*args, **kwargs):
         resolve_learning_evidence_conditions
     )
     return _comparison_learning.compare_learning_evidence(*args, **kwargs)
+
+def compare_ladder_under_profiles(*args, **kwargs):
+    _comparison_ladder_profiles.resolve_budget = resolve_budget
+    return _comparison_ladder_profiles.compare_ladder_under_profiles(
+        *args,
+        **kwargs,
+    )
 
 def compare_training_regimes(*args, **kwargs):
     _comparison_training.resolve_budget = resolve_budget

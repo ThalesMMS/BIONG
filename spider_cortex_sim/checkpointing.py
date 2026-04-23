@@ -120,27 +120,52 @@ class CheckpointSelectionConfig:
         }
 
 
+def resolve_checkpoint_selection_config(
+    selection_config: CheckpointSelectionConfig | None = None,
+) -> CheckpointSelectionConfig:
+    """Return the provided selection config or the default checkpoint selection config."""
+    if selection_config is not None:
+        return selection_config
+    return CheckpointSelectionConfig(metric="scenario_success_rate")
+
+
 def build_checkpointing_summary(
     *,
     selection: str,
-    metric: str,
     checkpoint_interval: int,
     selection_scenario_episodes: int,
+    selection_config: CheckpointSelectionConfig | None = None,
+    metric: str = "scenario_success_rate",
     override_penalty_weight: float = 0.0,
     dominance_penalty_weight: float = 0.0,
     penalty_mode: str = "tiebreaker",
 ) -> dict[str, object]:
     """Build checkpoint-selection metadata for inclusion in a run summary."""
-    penalty_config = CheckpointSelectionConfig(
-        metric=metric,
-        override_penalty_weight=override_penalty_weight,
-        dominance_penalty_weight=dominance_penalty_weight,
-        penalty_mode=penalty_mode,
-    ).to_summary()
+    if selection_config is not None and (
+        metric != "scenario_success_rate"
+        or override_penalty_weight != 0.0
+        or dominance_penalty_weight != 0.0
+        or penalty_mode != "tiebreaker"
+    ):
+        raise ValueError(
+            "build_checkpointing_summary() does not allow mixing "
+            "selection_config with legacy checkpoint-selection kwargs."
+        )
+    resolved_selection_config = (
+        resolve_checkpoint_selection_config(selection_config)
+        if selection_config is not None
+        else CheckpointSelectionConfig(
+            metric=metric,
+            override_penalty_weight=override_penalty_weight,
+            dominance_penalty_weight=dominance_penalty_weight,
+            penalty_mode=penalty_mode,
+        )
+    )
+    penalty_config = resolved_selection_config.to_summary()
     return {
         "enabled": selection != "none",
         "selection": selection,
-        "metric": metric,
+        "metric": resolved_selection_config.metric,
         "penalty_mode": penalty_config["penalty_mode"],
         "penalty_config": penalty_config,
         "checkpoint_interval": checkpoint_interval,

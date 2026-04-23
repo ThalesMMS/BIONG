@@ -1,3 +1,6 @@
+# Development baseline dependencies only.
+# Exact benchmark-of-record environments are captured in benchmark packages via
+# pip_freeze.txt and benchmark_manifest.json environment fields.
 defusedxml
 numpy
 pygame-ce

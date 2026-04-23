@@ -72,6 +72,7 @@ from .curriculum import (
     resolve_curriculum_profile,
     validate_curriculum_profile,
 )
+from .distillation import DistillationDataset
 from .export import (
     compact_aggregate,
     compact_behavior_payload,
@@ -104,6 +105,85 @@ from .simulation_helpers import EXPERIMENT_OF_RECORD_REGIME, CAPABILITY_PROBE_SC
 
 
 class SimulationEpisodeMixin:
+    def collect_teacher_rollout(
+        self,
+        teacher_brain: SpiderBrain,
+        *,
+        episodes: int,
+        teacher_metadata: Dict[str, object] | None = None,
+        episode_start: int = 0,
+        policy_mode: str = "normal",
+        sample: bool = False,
+        scenario_name: str | None = None,
+    ) -> DistillationDataset:
+        if policy_mode not in {"normal", "reflex_only"}:
+            raise ValueError(
+                "Invalid policy_mode. Use 'normal' or 'reflex_only'."
+            )
+        dataset = DistillationDataset(teacher_metadata=teacher_metadata)
+        total_episodes = max(0, int(episodes))
+        scenario = get_scenario(scenario_name) if scenario_name is not None else None
+        for episode_offset in range(total_episodes):
+            episode_index = int(episode_start + episode_offset)
+            episode_seed = self.seed + 997 * (episode_index + 1)
+            episode_map_template = (
+                scenario.map_template if scenario is not None else self.default_map_template
+            )
+            if self.world.map_template_name != episode_map_template:
+                self.world.configure_map_template(episode_map_template)
+            observation = self.world.reset(seed=episode_seed)
+            teacher_brain.reset_hidden_states()
+            episode_max_steps = self.max_steps
+            if scenario is not None:
+                scenario.setup(self.world)
+                observation = self.world.observe()
+                episode_max_steps = scenario.max_steps
+            for step in range(episode_max_steps):
+                decision = teacher_brain.act(
+                    observation,
+                    bus=None,
+                    sample=sample,
+                    policy_mode=policy_mode,
+                    training=False,
+                )
+                arbitration = decision.arbitration_decision
+                dataset.add_sample(
+                    episode=episode_index,
+                    step=step,
+                    observation=observation,
+                    teacher_policy=decision.policy,
+                    teacher_total_logits=decision.total_logits,
+                    teacher_action_center_policy=decision.action_center_policy,
+                    teacher_action_center_logits=decision.action_center_logits,
+                    teacher_action_intent_idx=decision.action_intent_idx,
+                    teacher_valence_probs=(
+                        [
+                            float(arbitration.valence_scores.get(name, 0.0))
+                            for name in teacher_brain.VALENCE_ORDER
+                        ]
+                        if arbitration is not None
+                        else None
+                    ),
+                    teacher_valence_logits=(
+                        [
+                            float(arbitration.valence_logits.get(name, 0.0))
+                            for name in teacher_brain.VALENCE_ORDER
+                        ]
+                        if arbitration is not None
+                        else None
+                    ),
+                    teacher_module_policies={
+                        result.name: result.probs
+                        for result in decision.module_results
+                        if result.active
+                    },
+                )
+                next_observation, _, done, _ = self.world.step(decision.action_idx)
+                observation = next_observation
+                if done:
+                    break
+        return dataset
+
     @staticmethod
     def _episode_stats_behavior_metrics(stats: EpisodeStats) -> Dict[str, object]:
         """

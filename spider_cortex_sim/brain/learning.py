@@ -4,14 +4,472 @@ from typing import Dict, List
 
 import numpy as np
 
+from ..distillation.dataset import (
+    DistillationConfig,
+    DistillationDataset,
+    DistillationSample,
+    DistillationLossConfig,
+)
 from ..interfaces import ACTION_CONTEXT_INTERFACE
 from ..modules import ModuleResult
 from ..nn import one_hot, softmax
+from ..nn_utils import cross_entropy_loss, kl_divergence
 
 from .types import BrainStep
 
 
 class BrainLearningMixin:
+    @staticmethod
+    def _normalized_teacher_probs(
+        teacher_probs: np.ndarray,
+        *,
+        shape: tuple[int, ...],
+    ) -> np.ndarray:
+        teacher_probs = np.asarray(teacher_probs, dtype=float)
+        if teacher_probs.shape != shape:
+            raise ValueError(
+                "teacher_probs shape must match the student distribution shape."
+            )
+        teacher_probs = np.nan_to_num(
+            teacher_probs,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        teacher_probs = np.clip(teacher_probs, 0.0, None)
+        total = float(np.sum(teacher_probs))
+        if total <= 0.0 or not np.isfinite(total):
+            return np.full(shape, 1.0 / max(1, int(np.prod(shape))), dtype=float)
+        return teacher_probs / total
+
+    def distill_step(
+        self,
+        observation: Dict[str, object],
+        teacher_policy: np.ndarray,
+        teacher_valence_logits: np.ndarray | None = None,
+        *,
+        teacher_policy_logits: np.ndarray | None = None,
+        teacher_action_center_policy: np.ndarray | None = None,
+        teacher_action_center_logits: np.ndarray | None = None,
+        teacher_action_intent_idx: int | None = None,
+        teacher_module_policies: Dict[str, np.ndarray] | None = None,
+        temperature: float = 1.0,
+        module_lr: float | None = None,
+        motor_lr: float | None = None,
+        arbitration_lr: float | None = None,
+        match_local_proposals: bool = False,
+        loss_weights: DistillationLossConfig | None = None,
+    ) -> Dict[str, float]:
+        resolved_module_lr = self.module_lr if module_lr is None else float(module_lr)
+        resolved_motor_lr = self.motor_lr if motor_lr is None else float(motor_lr)
+        resolved_arbitration_lr = (
+            self.arbitration_lr if arbitration_lr is None else float(arbitration_lr)
+        )
+        resolved_loss_weights = (
+            DistillationLossConfig()
+            if loss_weights is None
+            else loss_weights
+        )
+        decision = self.act(
+            observation,
+            bus=None,
+            sample=False,
+            policy_mode="normal",
+            training=True,
+        )
+
+        final_policy_loss = 0.0
+        final_policy_grad = np.zeros(self.action_dim, dtype=float)
+        if np.asarray(teacher_policy, dtype=float).size == self.action_dim:
+            teacher_policy_target = (
+                softmax(teacher_policy_logits, temperature=temperature)
+                if teacher_policy_logits is not None
+                else self._normalized_teacher_probs(
+                    teacher_policy,
+                    shape=decision.policy.shape,
+                )
+            )
+            final_policy_loss = (
+                resolved_loss_weights.final_policy_weight
+                * cross_entropy_loss(
+                    decision.total_logits,
+                    teacher_policy_target,
+                    temperature=temperature,
+                )
+            )
+            final_policy_grad = (
+                resolved_loss_weights.final_policy_weight
+                * (
+                    softmax(decision.total_logits, temperature=temperature)
+                    - teacher_policy_target
+                )
+            )
+
+        action_center_loss = 0.0
+        action_center_direct_grad = np.zeros(self.action_dim, dtype=float)
+        if (
+            teacher_action_center_policy is not None
+            and np.asarray(teacher_action_center_policy, dtype=float).size == self.action_dim
+        ):
+            teacher_action_center_target = (
+                softmax(teacher_action_center_logits, temperature=temperature)
+                if teacher_action_center_logits is not None
+                else self._normalized_teacher_probs(
+                    teacher_action_center_policy,
+                    shape=decision.action_center_policy.shape,
+                )
+            )
+            action_center_loss = (
+                resolved_loss_weights.action_center_weight
+                * cross_entropy_loss(
+                    decision.action_center_logits,
+                    teacher_action_center_target,
+                    temperature=temperature,
+                )
+            )
+            action_center_direct_grad = (
+                resolved_loss_weights.action_center_weight
+                * (
+                    softmax(
+                        decision.action_center_logits,
+                        temperature=temperature,
+                    )
+                    - teacher_action_center_target
+                )
+            )
+
+        proposal_stage_grad = final_policy_grad + action_center_direct_grad
+        proposal_grad_width = self.action_dim * len(decision.module_results)
+        module_gradient_norms: Dict[str, float] = {}
+        proposal_alignment_losses: Dict[str, float] = {}
+
+        if self.config.is_true_monolithic:
+            if self.true_monolithic_policy is None:
+                raise RuntimeError(
+                    "True monolithic network unavailable for the configured architecture."
+                )
+            if self.TRUE_MONOLITHIC_POLICY_NAME not in self._frozen_modules:
+                self.true_monolithic_policy.backward(
+                    grad_policy_logits=final_policy_grad,
+                    grad_value=0.0,
+                    lr=resolved_module_lr,
+                )
+            module_gradient_norms[self.TRUE_MONOLITHIC_POLICY_NAME] = float(
+                0.0
+                if self.TRUE_MONOLITHIC_POLICY_NAME in self._frozen_modules
+                else np.linalg.norm(final_policy_grad)
+            )
+        else:
+            if self.motor_cortex is None or self.action_center is None:
+                raise RuntimeError(
+                    "Distillation requires action_center and motor_cortex for the configured architecture."
+                )
+            self.motor_cortex.backward(final_policy_grad, lr=resolved_motor_lr)
+            action_center_input_grads = self.action_center.backward(
+                grad_policy_logits=proposal_stage_grad,
+                grad_value=0.0,
+                lr=resolved_motor_lr,
+            )
+            proposal_input_grads = np.asarray(
+                action_center_input_grads[:proposal_grad_width],
+                dtype=float,
+            )
+            per_result_input_grads = proposal_input_grads.reshape(
+                len(decision.module_results),
+                self.action_dim,
+            )
+            if self.config.is_modular:
+                if self.module_bank is None:
+                    raise RuntimeError(
+                        "Module bank unavailable for modular architecture."
+                    )
+                module_total_grads: Dict[str, np.ndarray] = {}
+                trainable_module_names: List[str] = []
+                for result, extra_grad in zip(
+                    decision.module_results,
+                    per_result_input_grads,
+                    strict=True,
+                ):
+                    if not result.active:
+                        continue
+                    if result.name in self._frozen_modules:
+                        module_gradient_norms[result.name] = 0.0
+                        continue
+                    total_grad = (
+                        result.gate_weight
+                        * (
+                            np.asarray(proposal_stage_grad, dtype=float)
+                            + np.asarray(extra_grad, dtype=float)
+                        )
+                    )
+                    if (
+                        match_local_proposals
+                        and teacher_module_policies is not None
+                        and result.name in teacher_module_policies
+                    ):
+                        teacher_module_policy = np.asarray(
+                            teacher_module_policies[result.name],
+                            dtype=float,
+                        )
+                        teacher_module_policy = self._normalized_teacher_probs(
+                            teacher_module_policy,
+                            shape=result.probs.shape,
+                        )
+                        local_grad = (
+                            resolved_loss_weights.proposal_weight
+                            * (
+                                softmax(result.logits, temperature=temperature)
+                                - teacher_module_policy
+                            )
+                        )
+                        total_grad += local_grad
+                        proposal_alignment_losses[result.name] = cross_entropy_loss(
+                            result.logits,
+                            teacher_module_policy,
+                            temperature=temperature,
+                        )
+                    module_total_grads[result.name] = module_total_grads.get(
+                        result.name,
+                        np.zeros(self.action_dim, dtype=float),
+                    ) + total_grad
+                    module_gradient_norms[result.name] = float(
+                        np.linalg.norm(total_grad)
+                    )
+                    trainable_module_names.append(result.name)
+                if trainable_module_names:
+                    original_active_names = list(self.module_bank._active_names)
+                    try:
+                        self.module_bank._active_names = trainable_module_names
+                        self.module_bank.backward(
+                            np.zeros(self.action_dim, dtype=float),
+                            lr=resolved_module_lr,
+                            aux_grads=module_total_grads,
+                        )
+                    finally:
+                        self.module_bank._active_names = original_active_names
+            else:
+                if self.monolithic_policy is None:
+                    raise RuntimeError(
+                        "Monolithic policy unavailable for the configured architecture."
+                    )
+                grad_for_monolithic = proposal_stage_grad + proposal_input_grads
+                if self.MONOLITHIC_POLICY_NAME not in self._frozen_modules:
+                    self.monolithic_policy.backward(
+                        grad_for_monolithic,
+                        lr=resolved_module_lr,
+                    )
+                module_gradient_norms[self.MONOLITHIC_POLICY_NAME] = float(
+                    0.0
+                    if self.MONOLITHIC_POLICY_NAME in self._frozen_modules
+                    else np.linalg.norm(grad_for_monolithic)
+                )
+
+        valence_loss = 0.0
+        valence_grad_norm = 0.0
+        student_valence_probs = np.zeros(0, dtype=float)
+        if (
+            teacher_valence_logits is not None
+            and np.asarray(teacher_valence_logits, dtype=float).size > 0
+            and decision.arbitration_decision is not None
+            and self.arbitration_network is not None
+            and self.arbitration_network.cache is not None
+        ):
+            teacher_valence_logits = np.asarray(teacher_valence_logits, dtype=float)
+            student_valence_probs = np.array(
+                [
+                    float(
+                        decision.arbitration_decision.valence_scores.get(name, 0.0)
+                    )
+                    for name in self.VALENCE_ORDER
+                ],
+                dtype=float,
+            )
+            teacher_valence_probs = softmax(
+                teacher_valence_logits,
+                temperature=temperature,
+            )
+            if student_valence_probs.shape == teacher_valence_probs.shape:
+                grad_valence = (
+                    resolved_loss_weights.valence_weight
+                    * (
+                        student_valence_probs
+                        - teacher_valence_probs
+                    )
+                )
+                valence_loss = (
+                    resolved_loss_weights.valence_weight
+                    * cross_entropy_loss(
+                        np.array(
+                            [
+                                float(
+                                    decision.arbitration_decision.valence_logits.get(
+                                        name,
+                                        0.0,
+                                    )
+                                )
+                                for name in self.VALENCE_ORDER
+                            ],
+                            dtype=float,
+                        ),
+                        teacher_valence_probs,
+                        temperature=temperature,
+                    )
+                )
+                self.arbitration_network.backward(
+                    grad_valence_logits=grad_valence,
+                    grad_gate_adjustments=np.zeros(
+                        self.arbitration_network.gate_dim,
+                        dtype=float,
+                    ),
+                    grad_value=0.0,
+                    lr=resolved_arbitration_lr,
+                )
+                valence_grad_norm = float(np.linalg.norm(grad_valence))
+
+        total_loss = (
+            final_policy_loss
+            + action_center_loss
+            + valence_loss
+            + sum(proposal_alignment_losses.values()) * resolved_loss_weights.proposal_weight
+        )
+        return {
+            "total_loss": float(total_loss),
+            "final_policy_loss": float(final_policy_loss),
+            "action_center_loss": float(action_center_loss),
+            "valence_loss": float(valence_loss),
+            "local_proposal_loss": float(
+                sum(proposal_alignment_losses.values())
+                * resolved_loss_weights.proposal_weight
+            ),
+            "policy_loss": float(final_policy_loss + action_center_loss),
+            "policy_kl": float(
+                0.0
+                if np.asarray(teacher_policy, dtype=float).size != self.action_dim
+                else kl_divergence(
+                    decision.total_logits,
+                    (
+                        softmax(teacher_policy_logits, temperature=temperature)
+                        if teacher_policy_logits is not None
+                        else self._normalized_teacher_probs(
+                            teacher_policy,
+                            shape=decision.policy.shape,
+                        )
+                    ),
+                    temperature=temperature,
+                )
+            ),
+            "final_policy_kl_grad_norm": float(np.linalg.norm(final_policy_grad)),
+            "action_center_grad_norm": float(np.linalg.norm(action_center_direct_grad)),
+            "valence_grad_norm": float(valence_grad_norm),
+            "module_gradient_norms": {
+                name: float(value)
+                for name, value in sorted(module_gradient_norms.items())
+            },
+            "teacher_action_intent_idx": (
+                -1
+                if teacher_action_intent_idx is None
+                else int(teacher_action_intent_idx)
+            ),
+            "student_action_intent_idx": int(decision.action_intent_idx),
+        }
+
+    def _distillation_step(
+        self,
+        sample: DistillationSample,
+        *,
+        distillation_config: DistillationConfig,
+    ) -> Dict[str, float]:
+        return self.distill_step(
+            sample.observation,
+            sample.teacher_policy,
+            sample.teacher_valence_logits,
+            teacher_policy_logits=sample.teacher_total_logits,
+            teacher_action_center_policy=sample.teacher_action_center_policy,
+            teacher_action_center_logits=sample.teacher_action_center_logits,
+            teacher_action_intent_idx=sample.teacher_action_intent_idx,
+            teacher_module_policies=sample.teacher_module_policies,
+            temperature=distillation_config.temperature,
+            module_lr=distillation_config.module_lr,
+            motor_lr=distillation_config.motor_lr,
+            arbitration_lr=distillation_config.arbitration_lr,
+            match_local_proposals=distillation_config.match_local_proposals,
+            loss_weights=distillation_config.loss,
+        )
+
+    def distill(
+        self,
+        dataset: DistillationDataset,
+        *,
+        distillation_config: DistillationConfig,
+    ) -> Dict[str, object]:
+        if len(dataset) <= 0:
+            raise ValueError("Distillation requires at least one collected sample.")
+        epoch_summaries: List[Dict[str, object]] = []
+        rng = np.random.default_rng(int(self.rng.integers(0, 2**31 - 1)))
+        for epoch in range(int(distillation_config.distillation_epochs)):
+            total_loss = 0.0
+            total_final_policy_loss = 0.0
+            total_action_center_loss = 0.0
+            total_valence_loss = 0.0
+            total_local_proposal_loss = 0.0
+            total_policy_kl = 0.0
+            last_episode: int | None = None
+            self.reset_hidden_states()
+            for sample in dataset.iter_samples(
+                shuffle=bool(distillation_config.shuffle),
+                rng=rng,
+            ):
+                if (
+                    distillation_config.shuffle
+                    or last_episode is None
+                    or int(sample.episode) != last_episode
+                ):
+                    self.reset_hidden_states()
+                step_summary = self._distillation_step(
+                    sample,
+                    distillation_config=distillation_config,
+                )
+                total_loss += float(step_summary["total_loss"])
+                total_final_policy_loss += float(
+                    step_summary["final_policy_loss"]
+                )
+                total_action_center_loss += float(
+                    step_summary["action_center_loss"]
+                )
+                total_valence_loss += float(step_summary["valence_loss"])
+                total_local_proposal_loss += float(
+                    step_summary["local_proposal_loss"]
+                )
+                total_policy_kl += float(step_summary["policy_kl"])
+                last_episode = int(sample.episode)
+            sample_count = max(1, len(dataset))
+            epoch_summaries.append(
+                {
+                    "epoch": epoch + 1,
+                    "samples": len(dataset),
+                    "mean_total_loss": float(total_loss / sample_count),
+                    "mean_final_policy_loss": float(
+                        total_final_policy_loss / sample_count
+                    ),
+                    "mean_action_center_loss": float(
+                        total_action_center_loss / sample_count
+                    ),
+                    "mean_valence_loss": float(total_valence_loss / sample_count),
+                    "mean_local_proposal_loss": float(
+                        total_local_proposal_loss / sample_count
+                    ),
+                    "mean_policy_kl": float(total_policy_kl / sample_count),
+                }
+            )
+        return {
+            "epochs": int(distillation_config.distillation_epochs),
+            "samples": len(dataset),
+            "shuffle": bool(distillation_config.shuffle),
+            "loss": distillation_config.loss.to_summary(),
+            "history": epoch_summaries,
+            "final_epoch": dict(epoch_summaries[-1]),
+        }
+
     def _compute_counterfactual_credit(
         self,
         module_results: List[ModuleResult],
@@ -148,8 +606,19 @@ class BrainLearningMixin:
         effective_credit_strategy = self.config.credit_strategy
         uses_counterfactual_credit = self.config.uses_counterfactual_credit
         uses_local_credit_only = self.config.uses_local_credit_only
-        if self.config.is_monolithic and (uses_counterfactual_credit or uses_local_credit_only):
-            # A monolithic policy has no per-module proposal path, so diagnostics
+        if self.config.is_true_monolithic and (
+            uses_counterfactual_credit or uses_local_credit_only
+        ):
+            # A direct policy has no downstream proposal path, so all non-broadcast
+            # credit modes collapse to the applied broadcast update before any
+            # per-module credit logic runs.
+            effective_credit_strategy = "broadcast"
+            uses_counterfactual_credit = False
+            uses_local_credit_only = False
+        elif self.config.is_monolithic and (
+            uses_counterfactual_credit or uses_local_credit_only
+        ):
+            # A monolithic proposer has no per-module proposal path, so diagnostics
             # follow the broadcast-style update that is actually applied below.
             effective_credit_strategy = "broadcast"
             uses_counterfactual_credit = False
@@ -179,7 +648,62 @@ class BrainLearningMixin:
             name: np.asarray(grad, dtype=float).copy()
             for name, grad in self._auxiliary_module_gradients(decision.module_results).items()
         }
+        if self.config.is_true_monolithic:
+            if self.true_monolithic_policy is None:
+                raise RuntimeError(
+                    "True monolithic network unavailable for the configured architecture."
+                )
+            effective_credit_strategy = "broadcast"
+            value_grad = decision.value - td_target
+            module_credit_weights = {self.TRUE_MONOLITHIC_POLICY_NAME: 1.0}
+            entropy = -float(np.sum(decision.policy * np.log(decision.policy + 1e-8)))
+            true_monolithic_grad = np.concatenate(
+                [
+                    np.asarray(grad_policy_logits, dtype=float),
+                    np.array([value_grad], dtype=float),
+                ]
+            )
+            if self.TRUE_MONOLITHIC_POLICY_NAME not in self._frozen_modules:
+                self.true_monolithic_policy.backward(
+                    grad_policy_logits=grad_policy_logits,
+                    grad_value=value_grad,
+                    lr=self.module_lr,
+                )
+            module_gradient_norms = {
+                self.TRUE_MONOLITHIC_POLICY_NAME: float(
+                    0.0
+                    if self.TRUE_MONOLITHIC_POLICY_NAME in self._frozen_modules
+                    else np.linalg.norm(true_monolithic_grad)
+                )
+            }
+            return {
+                "reward": float(reward),
+                "td_target": float(td_target),
+                "td_error": float(advantage),
+                "value": float(decision.value),
+                "next_value": float(next_value),
+                "entropy": entropy,
+                "aux_modules": 0.0,
+                "arbitration_value": 0.0,
+                "arbitration_value_grad": 0.0,
+                "arbitration_grad_valence_norm": 0.0,
+                "arbitration_grad_gate_norm": 0.0,
+                "arbitration_gate_regularization_norm": 0.0,
+                "arbitration_valence_regularization_norm": 0.0,
+                "arbitration_loss": 0.0,
+                "gate_adjustment_magnitude": 0.0,
+                "regularization_loss": 0.0,
+                "credit_strategy": effective_credit_strategy,
+                "module_credit_weights": {
+                    name: float(value)
+                    for name, value in sorted(module_credit_weights.items())
+                },
+                "module_gradient_norms": module_gradient_norms,
+                "counterfactual_credit_weights": {},
+            }
         action_center_value_grad = decision.value - td_target
+        if self.action_center is None:
+            raise RuntimeError("Action center unavailable for the configured architecture.")
         action_center_input_grads = self.action_center.backward(
             grad_policy_logits=grad_policy_logits,
             grad_value=action_center_value_grad,
@@ -338,12 +862,16 @@ class BrainLearningMixin:
         if self.config.is_modular:
             if self.module_bank is None:
                 raise RuntimeError("Module bank unavailable for modular architecture.")
+            trainable_module_names: list[str] = []
             for result, extra_grad in zip(
                 decision.module_results,
                 per_result_input_grads,
                 strict=True,
             ):
                 if not result.active:
+                    continue
+                if result.name in self._frozen_modules:
+                    module_gradient_norms[result.name] = 0.0
                     continue
                 gate_weight = float(result.gate_weight)
                 total_grad = gate_weight * np.asarray(
@@ -364,19 +892,31 @@ class BrainLearningMixin:
                     np.zeros(self.action_dim, dtype=float),
                 ) + total_grad
                 module_gradient_norms[result.name] = float(np.linalg.norm(total_grad))
-            self.module_bank.backward(
-                np.zeros(self.action_dim, dtype=float),
-                lr=self.module_lr,
-                aux_grads=module_total_grads,
-            )
+                trainable_module_names.append(result.name)
+            if trainable_module_names:
+                original_active_names = list(self.module_bank._active_names)
+                try:
+                    self.module_bank._active_names = trainable_module_names
+                    self.module_bank.backward(
+                        np.zeros(self.action_dim, dtype=float),
+                        lr=self.module_lr,
+                        aux_grads=module_total_grads,
+                    )
+                finally:
+                    self.module_bank._active_names = original_active_names
         else:
             if self.monolithic_policy is None:
                 raise RuntimeError("Monolithic network unavailable for the configured architecture.")
             grad_for_monolithic = grad_policy_logits + proposal_input_grads
-            module_gradient_norms[self.MONOLITHIC_POLICY_NAME] = float(
-                np.linalg.norm(grad_for_monolithic)
-            )
-            self.monolithic_policy.backward(grad_for_monolithic, lr=self.module_lr)
+            if self.MONOLITHIC_POLICY_NAME in self._frozen_modules:
+                module_gradient_norms[self.MONOLITHIC_POLICY_NAME] = 0.0
+            else:
+                module_gradient_norms[self.MONOLITHIC_POLICY_NAME] = float(
+                    np.linalg.norm(grad_for_monolithic)
+                )
+                self.monolithic_policy.backward(grad_for_monolithic, lr=self.module_lr)
+        if self.motor_cortex is None:
+            raise RuntimeError("Motor cortex unavailable for the configured architecture.")
         self.motor_cortex.backward(grad_policy_logits, lr=self.motor_lr)
 
         entropy = -float(np.sum(decision.policy * np.log(decision.policy + 1e-8)))

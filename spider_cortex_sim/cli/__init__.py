@@ -45,7 +45,10 @@ from ..claim_tests import claim_test_names
 from ..comparison import (
     compare_ablation_suite,
     compare_behavior_suite,
+    compare_capacity_sweep,
+    compare_capacity_sweeps,
     compare_configurations,
+    compare_ladder_under_profiles,
     compare_learning_evidence,
     compare_noise_robustness,
     compare_training_regimes,
@@ -79,7 +82,10 @@ def _sync_command_patch_points() -> None:
     _commands.run_claim_test_suite = run_claim_test_suite
     _commands.compare_ablation_suite = compare_ablation_suite
     _commands.compare_behavior_suite = compare_behavior_suite
+    _commands.compare_capacity_sweep = compare_capacity_sweep
+    _commands.compare_capacity_sweeps = compare_capacity_sweeps
     _commands.compare_configurations = compare_configurations
+    _commands.compare_ladder_under_profiles = compare_ladder_under_profiles
     _commands.compare_learning_evidence = compare_learning_evidence
     _commands.compare_noise_robustness = compare_noise_robustness
     _commands.compare_training_regimes = compare_training_regimes

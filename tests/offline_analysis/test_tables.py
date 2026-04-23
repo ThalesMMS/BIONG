@@ -4,10 +4,13 @@ import unittest
 
 from spider_cortex_sim.offline_analysis.tables import (
     build_aggregate_benchmark_tables,
+    build_capacity_sweep_tables,
     build_claim_test_tables,
+    compare_capacity_totals,
     build_diagnostics,
     build_effect_size_tables,
 )
+from spider_cortex_sim.offline_analysis.ingestion import normalize_behavior_rows
 
 from .conftest import (
     assert_uncertainty_fields,
@@ -17,12 +20,37 @@ from .conftest import (
 )
 
 class OfflineAnalysisUncertaintyTablesTest(unittest.TestCase):
+    def test_compare_capacity_totals_reports_match_status(self) -> None:
+        result = compare_capacity_totals(
+            {
+                "modular_full": 1000,
+                "monolithic_policy": 1100,
+            }
+        )
+
+        self.assertTrue(result["capacity_matched"])
+        self.assertEqual(result["status"], "matched")
+        self.assertAlmostEqual(result["ratio"], 1.1)
+
+    def test_compare_capacity_totals_reports_larger_variant_when_not_matched(self) -> None:
+        result = compare_capacity_totals(
+            {
+                "modular_full": 840,
+                "monolithic_policy": 1932,
+            }
+        )
+
+        self.assertFalse(result["capacity_matched"])
+        self.assertEqual(result["status"], "monolithic_policy 2.3x larger")
+        self.assertAlmostEqual(result["ratio"], 2.3, places=1)
+
     def test_build_aggregate_benchmark_tables_includes_cis(self) -> None:
         tables = build_aggregate_benchmark_tables(build_uncertainty_summary())
 
         primary_rows = tables["primary_benchmark"]["rows"]
         scenario_rows = tables["per_scenario_success_rates"]["rows"]
         learning_rows = tables["learning_evidence_deltas"]["rows"]
+        architecture_rows = tables["architecture_capacity"]["rows"]
 
         primary_row = next(
             row for row in primary_rows if row["metric"] == "scenario_success_rate"
@@ -42,6 +70,21 @@ class OfflineAnalysisUncertaintyTablesTest(unittest.TestCase):
         assert_uncertainty_fields(self, learning_row)
         for row in learning_rows:
             assert_uncertainty_fields(self, row)
+        modular_row = next(
+            row for row in architecture_rows if row["variant"] == "modular_full"
+        )
+        monolithic_row = next(
+            row for row in architecture_rows if row["variant"] == "monolithic_policy"
+        )
+        self.assertEqual(
+            tables["capacity_analysis"]["status"],
+            "monolithic_policy 2.7x larger",
+        )
+        self.assertEqual(modular_row["capacity_status"], "reference")
+        self.assertEqual(monolithic_row["capacity_status"], "not matched")
+        self.assertEqual(monolithic_row["reference_variant"], "modular_full")
+        self.assertIn("monolithic_policy=1692", monolithic_row["key_components"])
+
     def test_build_aggregate_benchmark_tables_uses_primary_benchmark_guard(self) -> None:
         tables = build_aggregate_benchmark_tables(
             {
@@ -99,6 +142,14 @@ class OfflineAnalysisUncertaintyTablesTest(unittest.TestCase):
         self.assertEqual(scenario_row["source"], "summary.behavior_evaluation.suite.night_rest")
         self.assertEqual(scenario_row["ci_lower"], 0.5)
         self.assertEqual(scenario_row["ci_upper"], 0.7)
+
+    def test_build_capacity_sweep_tables_reports_missing_payload(self) -> None:
+        tables = build_capacity_sweep_tables({})
+
+        self.assertFalse(tables["available"])
+        self.assertEqual(tables["curves"]["rows"], [])
+        self.assertIn("interpretation_guidance", tables["metadata"])
+
     def test_build_claim_test_tables_includes_uncertainty_roles(self) -> None:
         tables = build_claim_test_tables(build_uncertainty_summary())
         rows = tables["claim_results"]["rows"]
@@ -148,6 +199,7 @@ class OfflineAnalysisUncertaintyTablesTest(unittest.TestCase):
         self.assertIn(("learning_evidence", "reflex_only"), pairs)
         self.assertIn(("ablation", "modular_full"), pairs)
         self.assertIn(("ablation", "monolithic_policy"), pairs)
+        self.assertIn(("ladder", "true_monolithic_policy"), pairs)
         for baseline in (
             "random_init",
             "reflex_only",
@@ -179,6 +231,71 @@ class OfflineAnalysisUncertaintyTablesTest(unittest.TestCase):
             self.assertEqual(row["n_seeds"], 2)
             self.assertEqual(row["effect_size_n_seeds"], 2)
             self.assertEqual(row["delta_n_seeds"], 2)
+        ladder_row = next(
+            item
+            for item in rows
+            if item["domain"] == "ladder"
+            and item["baseline"] == "true_monolithic_policy"
+            and item["comparison"] == "monolithic_policy"
+        )
+        self.assertAlmostEqual(ladder_row["raw_delta"], 0.15)
+        self.assertAlmostEqual(ladder_row["cohens_d"], 1.341641, places=6)
+        self.assertEqual(ladder_row["magnitude_label"], "large")
+        self.assertEqual(ladder_row["n_seeds"], 2)
+        self.assertEqual(ladder_row["effect_size_n_seeds"], 2)
+        self.assertEqual(ladder_row["delta_n_seeds"], 2)
+
+    def test_build_effect_size_tables_preserves_ladder_rows_from_behavior_rows(self) -> None:
+        rows = normalize_behavior_rows(
+            [
+                {
+                    "simulation_seed": 1,
+                    "scenario": "night_rest",
+                    "success": False,
+                    "ablation_variant": "true_monolithic_policy",
+                    "ablation_architecture": "true_monolithic",
+                    "eval_reflex_scale": 0.0,
+                },
+                {
+                    "simulation_seed": 2,
+                    "scenario": "night_rest",
+                    "success": True,
+                    "ablation_variant": "true_monolithic_policy",
+                    "ablation_architecture": "true_monolithic",
+                    "eval_reflex_scale": 0.0,
+                },
+                {
+                    "simulation_seed": 1,
+                    "scenario": "night_rest",
+                    "success": True,
+                    "ablation_variant": "monolithic_policy",
+                    "ablation_architecture": "monolithic",
+                    "eval_reflex_scale": 0.0,
+                },
+                {
+                    "simulation_seed": 2,
+                    "scenario": "night_rest",
+                    "success": True,
+                    "ablation_variant": "monolithic_policy",
+                    "ablation_architecture": "monolithic",
+                    "eval_reflex_scale": 0.0,
+                },
+            ]
+        )
+
+        tables = build_effect_size_tables({}, rows)
+        ladder_rows = [
+            row for row in tables["effect_sizes"]["rows"] if row["domain"] == "ladder"
+        ]
+
+        self.assertTrue(ladder_rows)
+        self.assertTrue(
+            any(
+                row["baseline"] == "true_monolithic_policy"
+                and row["comparison"] == "monolithic_policy"
+                for row in ladder_rows
+            )
+        )
 
 
 class OfflineAnalysisDiagnosticsTablesTest(unittest.TestCase):
@@ -203,6 +320,55 @@ class OfflineAnalysisDiagnosticsTablesTest(unittest.TestCase):
 
         labels = {row["label"] for row in diagnostics}
         self.assertNotIn("Most frequent reflex source", labels)
+
+    def test_build_diagnostics_includes_trainable_parameters(self) -> None:
+        diagnostics = build_diagnostics(
+            {"parameter_counts": {"total_trainable": 840}},
+            {"scenarios": []},
+            {},
+            {},
+        )
+
+        labels = {row["label"] for row in diagnostics}
+        self.assertIn("Trainable parameters", labels)
+
+    def test_build_diagnostics_includes_top_components_and_capacity_status(self) -> None:
+        summary = {
+            "parameter_counts": {
+                "per_network": {
+                    "visual_cortex": 120,
+                    "action_center": 96,
+                    "motor_cortex": 80,
+                },
+                "total": 296,
+            }
+        }
+        ablations = {
+            "variants": {
+                "modular_full": {
+                    "summary": {"scenario_success_rate": 0.8},
+                    "parameter_counts": {"total": 840},
+                },
+                "monolithic_policy": {
+                    "summary": {"scenario_success_rate": 0.7},
+                    "parameter_counts": {"total": 1932},
+                },
+            }
+        }
+
+        diagnostics = build_diagnostics(
+            summary,
+            {"scenarios": []},
+            ablations,
+            {},
+        )
+
+        values_by_label = {row["label"]: row["value"] for row in diagnostics}
+        self.assertIn("Parameters: visual_cortex", values_by_label)
+        self.assertEqual(
+            values_by_label["Architecture capacity match"],
+            "monolithic_policy 2.3x larger",
+        )
 
     def test_uncertainty_condition_rejects_empty_values(self) -> None:
         with self.assertRaisesRegex(

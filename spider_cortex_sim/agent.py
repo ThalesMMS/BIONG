@@ -5,11 +5,15 @@ import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Set
 
 import numpy as np
 
-from .ablations import BrainAblationConfig, default_brain_config
+from .ablations import (
+    BrainAblationConfig,
+    TRUE_MONOLITHIC_POLICY_NAME as DEFAULT_TRUE_MONOLITHIC_POLICY_NAME,
+    default_brain_config,
+)
 from .arbitration import (
     ARBITRATION_EVIDENCE_FIELDS as DEFAULT_ARBITRATION_EVIDENCE_FIELDS,
     ARBITRATION_GATE_MODULE_ORDER as DEFAULT_ARBITRATION_GATE_MODULE_ORDER,
@@ -28,6 +32,7 @@ from .arbitration import (
     fixed_formula_valence_scores_from_evidence,
     warm_start_arbitration_network,
 )
+from .capacity_profiles import CapacityProfile, resolve_capacity_profile
 from .bus import MessageBus
 from .interfaces import (
     ACTION_CONTEXT_INTERFACE,
@@ -40,7 +45,14 @@ from .interfaces import (
     interface_registry,
 )
 from .modules import MODULE_HIDDEN_DIMS, CorticalModuleBank, ModuleResult, ReflexDecision
-from .nn import ArbitrationNetwork, MotorNetwork, ProposalNetwork, one_hot, softmax
+from .nn import (
+    ArbitrationNetwork,
+    MotorNetwork,
+    ProposalNetwork,
+    TrueMonolithicNetwork,
+    one_hot,
+    softmax,
+)
 from .noise import _compute_execution_difficulty_core
 from .operational_profiles import OperationalProfile, runtime_operational_profile
 from .reflexes import (
@@ -66,9 +78,10 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
     This is where the interpretable local reflexes and final motor arbitration live.
     """
 
-    ARCHITECTURE_VERSION = 12
+    ARCHITECTURE_VERSION = 13
     _METADATA_FILE = "metadata.json"
     MONOLITHIC_POLICY_NAME = DEFAULT_MONOLITHIC_POLICY_NAME
+    TRUE_MONOLITHIC_POLICY_NAME = DEFAULT_TRUE_MONOLITHIC_POLICY_NAME
     MONOLITHIC_HIDDEN_DIM = sum(MODULE_HIDDEN_DIMS.values())
     VALENCE_ORDER = DEFAULT_VALENCE_ORDER
     ARBITRATION_NETWORK_NAME = DEFAULT_ARBITRATION_NETWORK_NAME
@@ -79,7 +92,11 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
             "sleep_center": "sleep",
             "visual_cortex": "support",
             "sensory_cortex": "support",
+            "perception_center": "support",
+            "homeostasis_center": "hunger",
+            "threat_center": "threat",
             MONOLITHIC_POLICY_NAME: "integrated_policy",
+            TRUE_MONOLITHIC_POLICY_NAME: "integrated_policy",
         }
     )
     PRIORITY_GATING_WEIGHTS = DEFAULT_PRIORITY_GATING_WEIGHTS
@@ -100,6 +117,7 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         arbitration_regularization_weight: float = 0.1,
         arbitration_valence_regularization_weight: float = 0.1,
         config: BrainAblationConfig | None = None,
+        capacity_profile: str | CapacityProfile | None = None,
         operational_profile: str | OperationalProfile | None = None,
     ) -> None:
         """
@@ -120,7 +138,33 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         self.rng = np.random.default_rng(seed)
         self.arbitration_rng = np.random.default_rng(int(seed) + 104729)
         self.action_dim = len(ACTIONS)
-        self.config = config if config is not None else default_brain_config(module_dropout=module_dropout)
+        resolved_capacity_profile = resolve_capacity_profile(
+            capacity_profile
+            if capacity_profile is not None
+            else (
+                config.capacity_profile
+                if config is not None and config.capacity_profile is not None
+                else (
+                    config.capacity_profile_name
+                    if config is not None
+                    else None
+                )
+            )
+        )
+        self.config = (
+            replace(
+                config,
+                capacity_profile=resolved_capacity_profile,
+                capacity_profile_name=resolved_capacity_profile.name,
+                module_hidden_dims=dict(resolved_capacity_profile.module_hidden_dims),
+                integration_hidden_dim=resolved_capacity_profile.integration_hidden_dim,
+            )
+            if config is not None
+            else default_brain_config(
+                module_dropout=module_dropout,
+                capacity_profile=resolved_capacity_profile.name,
+            )
+        )
         self.operational_profile = runtime_operational_profile(operational_profile)
         self.reflex_aux_weights = self.operational_profile.brain_aux_weights
         self.reflex_logit_strengths = self.operational_profile.brain_reflex_logit_strengths
@@ -128,6 +172,14 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         self.current_reflex_scale = float(self.config.reflex_scale)
         self.module_bank: CorticalModuleBank | None = None
         self.monolithic_policy: ProposalNetwork | None = None
+        self.true_monolithic_policy: TrueMonolithicNetwork | None = None
+        self.action_center: MotorNetwork | None = None
+        self.motor_cortex: ProposalNetwork | None = None
+        self.arbitration_network: ArbitrationNetwork | None = None
+        self._frozen_modules: Set[str] = set()
+        module_hidden_dims = dict(resolved_capacity_profile.module_hidden_dims)
+        integration_hidden_dim = int(resolved_capacity_profile.integration_hidden_dim)
+        monolithic_hidden_dim = int(sum(module_hidden_dims.values()))
         if self.config.is_modular:
             self.module_bank = CorticalModuleBank(
                 action_dim=self.action_dim,
@@ -135,49 +187,75 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
                 module_dropout=self.config.module_dropout,
                 disabled_modules=self.config.disabled_modules,
                 recurrent_modules=self.config.recurrent_modules,
+                hidden_dims=module_hidden_dims,
             )
-            action_input_dim = self.action_dim * len(self.module_bank.specs) + ACTION_CONTEXT_INTERFACE.input_dim
-        else:
+            action_input_dim = self.action_dim * len(self.module_bank.enabled_specs) + ACTION_CONTEXT_INTERFACE.input_dim
+            motor_input_dim = self.action_dim + MOTOR_CONTEXT_INTERFACE.input_dim
+            self.action_center = MotorNetwork(
+                input_dim=action_input_dim,
+                hidden_dim=integration_hidden_dim,
+                output_dim=self.action_dim,
+                rng=self.rng,
+                name="action_center",
+            )
+            self.motor_cortex = ProposalNetwork(
+                input_dim=motor_input_dim,
+                hidden_dim=integration_hidden_dim,
+                output_dim=self.action_dim,
+                rng=self.rng,
+                name="motor_cortex",
+            )
+        elif self.config.is_monolithic:
             monolithic_input_dim = sum(spec.input_dim for spec in MODULE_INTERFACES)
             self.monolithic_policy = ProposalNetwork(
                 input_dim=monolithic_input_dim,
-                hidden_dim=self.MONOLITHIC_HIDDEN_DIM,
+                hidden_dim=monolithic_hidden_dim,
                 output_dim=self.action_dim,
                 rng=self.rng,
                 name=self.MONOLITHIC_POLICY_NAME,
             )
             action_input_dim = self.action_dim + ACTION_CONTEXT_INTERFACE.input_dim
-        motor_input_dim = self.action_dim + MOTOR_CONTEXT_INTERFACE.input_dim
-        self.action_center = MotorNetwork(
-            input_dim=action_input_dim,
-            hidden_dim=32,
-            output_dim=self.action_dim,
-            rng=self.rng,
-            name="action_center",
-        )
-        self.motor_cortex = ProposalNetwork(
-            input_dim=motor_input_dim,
-            hidden_dim=32,
-            output_dim=self.action_dim,
-            rng=self.rng,
-            name="motor_cortex",
-        )
-        arbitration_input_dim = arbitration_evidence_input_dim(
-            arbitration_evidence_fields=self.ARBITRATION_EVIDENCE_FIELDS,
-        )
-        self.arbitration_network = ArbitrationNetwork(
-            input_dim=arbitration_input_dim,
-            hidden_dim=32,
-            rng=self.arbitration_rng,
-            name=self.ARBITRATION_NETWORK_NAME,
-            gate_adjustment_min=self.config.gate_adjustment_bounds[0],
-            gate_adjustment_max=self.config.gate_adjustment_bounds[1],
-        )
-        self._warm_start_arbitration_network(self.config.warm_start_scale)
+            motor_input_dim = self.action_dim + MOTOR_CONTEXT_INTERFACE.input_dim
+            self.action_center = MotorNetwork(
+                input_dim=action_input_dim,
+                hidden_dim=integration_hidden_dim,
+                output_dim=self.action_dim,
+                rng=self.rng,
+                name="action_center",
+            )
+            self.motor_cortex = ProposalNetwork(
+                input_dim=motor_input_dim,
+                hidden_dim=integration_hidden_dim,
+                output_dim=self.action_dim,
+                rng=self.rng,
+                name="motor_cortex",
+            )
+        else:
+            monolithic_input_dim = sum(spec.input_dim for spec in MODULE_INTERFACES)
+            self.true_monolithic_policy = TrueMonolithicNetwork(
+                input_dim=monolithic_input_dim,
+                hidden_dim=monolithic_hidden_dim,
+                output_dim=self.action_dim,
+                rng=self.rng,
+                name=self.TRUE_MONOLITHIC_POLICY_NAME,
+            )
+        if not self.config.is_true_monolithic:
+            arbitration_input_dim = arbitration_evidence_input_dim(
+                arbitration_evidence_fields=self.ARBITRATION_EVIDENCE_FIELDS,
+            )
+            self.arbitration_network = ArbitrationNetwork(
+                input_dim=arbitration_input_dim,
+                hidden_dim=integration_hidden_dim,
+                rng=self.arbitration_rng,
+                name=self.ARBITRATION_NETWORK_NAME,
+                gate_adjustment_min=self.config.gate_adjustment_bounds[0],
+                gate_adjustment_max=self.config.gate_adjustment_bounds[1],
+            )
+            self._warm_start_arbitration_network(self.config.warm_start_scale)
         if self.config.name == "learned_arbitration_no_regularization":
             arbitration_regularization_weight = 0.0
             arbitration_valence_regularization_weight = 0.0
-        if not self.config.use_learned_arbitration:
+        if not self.config.use_learned_arbitration or self.config.is_true_monolithic:
             arbitration_regularization_weight = 0.0
             arbitration_valence_regularization_weight = 0.0
         self.gamma = gamma
@@ -187,6 +265,55 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         self.arbitration_valence_regularization_weight = float(arbitration_valence_regularization_weight)
         self.motor_lr = motor_lr
         self.module_dropout = self.config.module_dropout
+
+    def freeze_proposers(
+        self,
+        module_names: Sequence[str] | None = None,
+    ) -> None:
+        """
+        Freeze the active proposer stage so it remains available for inference but is excluded from learning updates.
+
+        Parameters:
+            module_names (Sequence[str] | None): Specific proposer names to freeze. When omitted, freezes every
+                currently active proposer for this architecture.
+        """
+        available = set(self._proposal_stage_names())
+        target_names = available if module_names is None else {str(name) for name in module_names}
+        invalid = sorted(name for name in target_names if name not in available)
+        if invalid:
+            raise ValueError(
+                f"Cannot freeze unknown proposer modules for this architecture: {invalid}."
+            )
+        self._frozen_modules.update(target_names)
+
+    def unfreeze_proposers(
+        self,
+        module_names: Sequence[str] | None = None,
+    ) -> None:
+        """
+        Remove proposer modules from the frozen set.
+
+        Parameters:
+            module_names (Sequence[str] | None): Specific proposer names to unfreeze. When omitted, clears the
+                entire frozen-proposer set.
+        """
+        if module_names is None:
+            self._frozen_modules.clear()
+            return
+        for name in module_names:
+            self._frozen_modules.discard(str(name))
+
+    def frozen_module_names(self) -> List[str]:
+        """
+        Return the sorted names of proposer modules currently frozen for learning.
+        """
+        return sorted(self._frozen_modules)
+
+    def is_module_frozen(self, name: str) -> bool:
+        """
+        Report whether a proposer module is currently frozen for learning.
+        """
+        return str(name) in self._frozen_modules
 
     @staticmethod
     def _clamp_unit(value: float) -> float:
@@ -213,6 +340,8 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
             warm_start_scale (float | None): Optional multiplier to scale the warm-start initialization.
                 If `None`, the value from the brain configuration is used.
         """
+        if self.arbitration_network is None:
+            return
         warm_start_arbitration_network(
             self.arbitration_network,
             ablation_config=self.config,

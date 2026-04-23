@@ -16,6 +16,7 @@ from spider_cortex_sim.curriculum import (
     CurriculumPhaseDefinition,
     PromotionCheckCriteria,
 )
+from spider_cortex_sim.checkpointing import CheckpointSelectionConfig
 from spider_cortex_sim.export import save_behavior_csv, save_summary
 from spider_cortex_sim.interfaces import ACTION_TO_INDEX, LOCOMOTION_ACTIONS
 from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
@@ -129,7 +130,9 @@ class SimulationBudgetAttributesTest(unittest.TestCase):
                 evaluation_episodes=0,
                 capture_evaluation_trace=False,
                 checkpoint_selection="best",
-                checkpoint_metric="not_a_real_metric",
+                checkpoint_selection_config=CheckpointSelectionConfig(
+                    metric="not_a_real_metric",
+                ),
             )
 
         self.assertEqual(run_episode_calls, 0)

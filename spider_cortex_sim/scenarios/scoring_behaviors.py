@@ -38,7 +38,7 @@ from .trace import (
 )
 
 from .scoring_checks import CONFLICT_PASS_RATE, CORRIDOR_GAUNTLET_CHECKS, ENTRANCE_AMBUSH_CHECKS, EXPOSED_DAY_FORAGING_CHECKS, FOOD_DEPRIVATION_CHECKS, FOOD_VS_PREDATOR_CONFLICT_CHECKS, NIGHT_REST_CHECKS, OLFACTORY_AMBUSH_CHECKS, OLFACTORY_AMBUSH_WINDOW_TICKS, OPEN_FIELD_FORAGING_CHECKS, PREDATOR_EDGE_CHECKS, RECOVER_AFTER_FAILED_CHASE_CHECKS, SHELTER_BLOCKADE_CHECKS, SLEEP_VS_EXPLORATION_CONFLICT_CHECKS, TWO_SHELTER_TRADEOFF_CHECKS, VISUAL_HUNTER_OPEN_FIELD_CHECKS, VISUAL_OLFACTORY_PINCER_CHECKS
-from .scoring_diagnostics import _classify_corridor_gauntlet_failure, _classify_exposed_day_foraging_failure, _classify_food_deprivation_failure, _classify_open_field_foraging_failure, _module_response_for_type, _module_share_for_type, _weak_scenario_diagnostics
+from .scoring_diagnostics import _classify_corridor_gauntlet_failure, _classify_exposed_day_foraging_failure, _classify_food_deprivation_failure, _classify_night_rest_failure, _classify_open_field_foraging_failure, _classify_two_shelter_tradeoff_failure, _module_response_for_type, _module_share_for_type, _weak_scenario_diagnostics
 
 def _score_night_rest(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
     """
@@ -58,21 +58,58 @@ def _score_night_rest(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -
     deep_night_rate = float(stats.night_role_distribution.get("deep", 0.0))
     sleep_debt_reduction = float(max(0.0, NIGHT_REST_INITIAL_SLEEP_DEBT - stats.final_sleep_debt))
     deep_sleep_reached = _trace_any_sleep_phase(trace, "DEEP_SLEEP")
+    left_shelter, shelter_exit_tick = _trace_shelter_exit(trace)
+    predator_visible_ticks = (
+        sum(1 for item in trace if _trace_predator_visible(item))
+        if trace
+        else 0
+    )
+    payloads = _trace_action_selection_payloads(trace)
+    sleepy_payloads = []
+    for payload in payloads:
+        sleep_debt = _payload_float(payload, "evidence", "sleep", "sleep_debt")
+        fatigue = _payload_float(payload, "evidence", "sleep", "fatigue")
+        if sleep_debt is None or fatigue is None:
+            continue
+        if sleep_debt >= 0.5 and fatigue >= 0.6:
+            sleepy_payloads.append(payload)
+    sleep_priority_rate = float(
+        sum(
+            1.0
+            for payload in sleepy_payloads
+            if _payload_text(payload, "winning_valence") == "sleep"
+        ) / max(1, len(sleepy_payloads))
+    )
     checks = (
         build_behavior_check(NIGHT_REST_CHECKS[0], passed=deep_night_rate >= 0.95, value=deep_night_rate),
         build_behavior_check(NIGHT_REST_CHECKS[1], passed=deep_sleep_reached, value=deep_sleep_reached),
         build_behavior_check(NIGHT_REST_CHECKS[2], passed=sleep_debt_reduction >= 0.45, value=sleep_debt_reduction),
     )
+    full_success = all(check.passed for check in checks)
+    behavior_metrics = {
+        "deep_night_rate": deep_night_rate,
+        "night_stillness_rate": float(stats.night_stillness_rate),
+        "sleep_debt_reduction": sleep_debt_reduction,
+        "sleep_events": int(stats.sleep_events),
+        "deep_sleep_reached": deep_sleep_reached,
+        "sleep_pressure_tick_count": len(sleepy_payloads),
+        "sleep_priority_rate": sleep_priority_rate,
+        "left_shelter": bool(left_shelter),
+        "shelter_exit_tick": shelter_exit_tick,
+        "predator_visible_ticks": int(predator_visible_ticks),
+        "predator_contacts": int(stats.predator_contacts),
+    }
+    behavior_metrics["failure_mode"] = _classify_night_rest_failure(
+        {
+            **behavior_metrics,
+            "checks_passed": full_success,
+        }
+    )
     return build_behavior_score(
         stats=stats,
         objective="Validate safe, reproducible rest in deep shelter during the night.",
         checks=checks,
-        behavior_metrics={
-            "deep_night_rate": deep_night_rate,
-            "night_stillness_rate": float(stats.night_stillness_rate),
-            "sleep_debt_reduction": sleep_debt_reduction,
-            "sleep_events": int(stats.sleep_events),
-        },
+        behavior_metrics=behavior_metrics,
     )
 
 def _score_predator_edge(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
@@ -356,23 +393,45 @@ def _score_two_shelter_tradeoff(stats: EpisodeStats, trace: Sequence[Dict[str, o
             - "alive" (bool): whether the agent finished the episode alive.
             - "final_health" (float): agent's final health value.
     """
-    del trace
     progress_score = float(max(stats.food_distance_delta, stats.night_shelter_occupancy_rate))
     checks = (
         build_behavior_check(TWO_SHELTER_TRADEOFF_CHECKS[0], passed=bool(stats.alive), value=bool(stats.alive)),
         build_behavior_check(TWO_SHELTER_TRADEOFF_CHECKS[1], passed=(stats.food_distance_delta > 0.0 or stats.night_shelter_occupancy_rate >= 0.9), value=progress_score),
         build_behavior_check(TWO_SHELTER_TRADEOFF_CHECKS[2], passed=stats.night_shelter_occupancy_rate >= 0.9, value=float(stats.night_shelter_occupancy_rate)),
     )
+    full_success = all(check.passed for check in checks)
+    initial_food_distance = _resolve_initial_food_distance(trace)
+    food_distances = _trace_food_distances(trace)
+    min_food_distance_reached = min(food_distances) if food_distances else None
+    left_shelter, shelter_exit_tick = _trace_shelter_exit(trace)
+    predator_visible_ticks = (
+        sum(1 for item in trace if _trace_predator_visible(item))
+        if trace
+        else 0
+    )
+    behavior_metrics = {
+        "food_distance_delta": float(stats.food_distance_delta),
+        "initial_food_distance": initial_food_distance,
+        "min_food_distance_reached": min_food_distance_reached,
+        "night_shelter_occupancy_rate": float(stats.night_shelter_occupancy_rate),
+        "left_shelter": bool(left_shelter),
+        "shelter_exit_tick": shelter_exit_tick,
+        "predator_visible_ticks": int(predator_visible_ticks),
+        "predator_contacts": int(stats.predator_contacts),
+        "alive": bool(stats.alive),
+        "final_health": float(stats.final_health),
+    }
+    behavior_metrics["failure_mode"] = _classify_two_shelter_tradeoff_failure(
+        {
+            **behavior_metrics,
+            "checks_passed": full_success,
+        }
+    )
     return build_behavior_score(
         stats=stats,
         objective="Validate the behavioral trade-off between progress toward food and safe occupancy of an alternative shelter.",
         checks=checks,
-        behavior_metrics={
-            "food_distance_delta": float(stats.food_distance_delta),
-            "night_shelter_occupancy_rate": float(stats.night_shelter_occupancy_rate),
-            "alive": bool(stats.alive),
-            "final_health": float(stats.final_health),
-        },
+        behavior_metrics=behavior_metrics,
     )
 
 def _score_exposed_day_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:

@@ -497,6 +497,7 @@ class SimulationEvaluationMixin:
 
         annotated: List[Dict[str, object]] = []
         architecture_fingerprint = self.brain._architecture_fingerprint()
+        summary = self.brain.config.to_summary()
         eval_noise_profile = resolve_noise_profile(self.world.noise_profile)
         eval_noise_profile_config = noise_profile_csv_value(eval_noise_profile)
         resolved_train_noise_profile = (
@@ -513,6 +514,22 @@ class SimulationEvaluationMixin:
             item = dict(row)
             item["ablation_variant"] = self.brain.config.name
             item["ablation_architecture"] = self.brain.config.architecture
+            item["ablation_architecture_description"] = summary[
+                "architecture_description"
+            ]
+            item["capacity_profile"] = str(summary.get("capacity_profile") or "")
+            item["capacity_profile_version"] = str(
+                summary.get("capacity_profile_version") or ""
+            )
+            item["capacity_scale_factor"] = float(
+                summary.get("capacity_scale_factor") or 0.0
+            )
+            item["integration_hidden_dim"] = int(
+                summary.get("integration_hidden_dim") or 0
+            )
+            item["monolithic_hidden_dim"] = int(
+                summary.get("monolithic_hidden_dim") or 0
+            )
             item["budget_profile"] = self.budget_profile_name
             item["benchmark_strength"] = self.benchmark_strength
             item["architecture_version"] = self.brain.ARCHITECTURE_VERSION

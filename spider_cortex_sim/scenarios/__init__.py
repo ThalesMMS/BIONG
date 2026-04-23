@@ -25,9 +25,11 @@ from .scoring import (
     VISUAL_HUNTER_OPEN_FIELD_CHECKS,
     VISUAL_OLFACTORY_PINCER_CHECKS,
     _classify_corridor_gauntlet_failure,
+    _classify_night_rest_failure,
     _classify_exposed_day_foraging_failure,
     _classify_food_deprivation_failure,
     _classify_open_field_foraging_failure,
+    _classify_two_shelter_tradeoff_failure,
     _food_approached,
     _module_response_for_type,
     _module_share_for_type,
@@ -141,11 +143,15 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         description="Tired spider resting safely in deep shelter at night.",
         objective="Confirm safe rest with deep occupancy and reduced sleep debt.",
         behavior_checks=NIGHT_REST_CHECKS,
-        diagnostic_focus="Deep rest, nighttime stillness, and reduced sleep debt.",
+        diagnostic_focus="Deep rest, nighttime stillness, sleep-priority selection, shelter retention, and trace-backed failure_mode classification.",
         success_interpretation="Success requires consistent deep occupancy and clear sleep recovery.",
-        failure_interpretation="Failure suggests unstable rest, persistent sleep debt, or loss of deep shelter occupancy.",
-        budget_note="This scenario already tends to pass under the short budget and serves as a positive rest control.",
-        max_steps=12,
+        failure_interpretation=(
+            'Use behavior_metrics.failure_mode to separate "never_settles", '
+            '"settles_but_not_deep", "deep_without_recovery", "leaves_shelter", '
+            'and "predator_interrupted" under the fixed sleep-debt threshold.'
+        ),
+        budget_note="This cycle uses a setup-first adjustment via max_steps=14 while keeping the sleep-debt threshold fixed at 0.45.",
+        max_steps=14,
         map_template="central_burrow",
         setup=_night_rest,
         score_episode=_score_night_rest,
@@ -276,10 +282,14 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         description="Map with two shelters forcing a choice between food and a refuge route.",
         objective="Measure the trade-off between food exploration and safety across two shelters.",
         behavior_checks=TWO_SHELTER_TRADEOFF_CHECKS,
-        diagnostic_focus="Trade-off between food progress and maintaining an alternative shelter.",
+        diagnostic_focus="Trade-off between food progress, return-to-shelter timing, and trace-backed failure_mode classification around the central choke.",
         success_interpretation="Success requires survival, preserved nighttime shelter use, and useful progress.",
-        failure_interpretation="Failure suggests a poor choice between exploration and safety or inability to sustain shelter.",
-        budget_note="Useful scenario for comparing policies even when the short budget remains limited.",
+        failure_interpretation=(
+            'Use behavior_metrics.failure_mode to distinguish "frozen_in_left_shelter", '
+            '"progress_then_dies", "no_return_to_shelter", "night_shelter_missed", '
+            'and "central_chokepoint_contact" under the fixed shelter-occupancy checks.'
+        ),
+        budget_note="This cycle keeps the score fixed and only adjusts setup timing plus predator spawn away from the exact central choke column.",
         max_steps=24,
         map_template="two_shelters",
         setup=_two_shelter_tradeoff,
@@ -473,9 +483,11 @@ __all__ = [
     'ScenarioSpec',
     '_clamp01',
     '_classify_corridor_gauntlet_failure',
+    '_classify_night_rest_failure',
     '_classify_exposed_day_foraging_failure',
     '_classify_food_deprivation_failure',
     '_classify_open_field_foraging_failure',
+    '_classify_two_shelter_tradeoff_failure',
     '_corridor_gauntlet',
     '_entrance_ambush',
     '_entrance_ambush_cell',

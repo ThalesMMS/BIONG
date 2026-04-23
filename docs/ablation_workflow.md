@@ -1,6 +1,11 @@
 # Ablation Workflow
 
-This repository exposes a reproducible ablation suite for comparing the current modular architecture against structural variants and a comparable monolithic baseline. No-reflex performance is the primary benchmark: comparisons use `scenario_success_rate` from rows or payloads evaluated with `eval_reflex_scale=0.0`, while reflex-on results are retained as diagnostics for scaffold dependence.
+This repository exposes a reproducible ablation suite for comparing the current modular architecture against structural variants, including both the direct A0 monolithic baseline and the existing A1 monolithic-with-pipeline baseline. No-reflex performance is the primary benchmark: comparisons use `scenario_success_rate` from rows or payloads evaluated with `eval_reflex_scale=0.0`, while reflex-on results are retained as diagnostics for scaffold dependence. For the official progression protocol that asks when to move from monolithic to progressively modular architectures, see `docs/architectural_ladder.md`.
+
+Read the ladder and this workflow together:
+
+- `docs/architectural_ladder.md` is the diagnostic framework for interpreting where an ablation regression likely comes from as modularity increases
+- `docs/ablation_workflow.md` is the detailed execution and reporting guide for canonical variants, competence gap, shaping gap, and benchmark-of-record procedures
 
 ## Canonical Variants
 
@@ -9,6 +14,9 @@ This repository exposes a reproducible ablation suite for comparing the current 
 | `modular_full` | Full modular architecture with `module_dropout`, local reflexes, auxiliary targets, learned arbitration, and broadcast proposal credit. |
 | `no_module_dropout` | Keeps the modular architecture but removes inter-module dropout. |
 | `no_module_reflexes` | Keeps the modules but disables both reflex-logit injection and the auxiliary targets derived from reflexes. |
+| `three_center_modular` | A2 ladder rung: three coarse proposer centers with broadcast proposal credit. |
+| `three_center_modular_local_credit` | A2 ladder rung with the same three-center topology, but proposer modules receive only local credit. |
+| `three_center_modular_counterfactual` | A2 ladder rung with the same three-center topology, but shared proposal credit is weighted by leave-one-out counterfactual importance. |
 | `modular_recurrent` | Keeps the modular architecture and reflex pipeline, but swaps `alert_center`, `sleep_center`, and `hunger_center` to recurrent proposers with per-episode hidden state. |
 | `modular_recurrent_all` | Makes all five proposer modules recurrent, so every proposal stream can accumulate within-episode context. |
 | `local_credit_only` | Preserves the current modular inference path but removes the broadcast of global policy gradients across proposer modules during training. |
@@ -18,6 +26,13 @@ This repository exposes a reproducible ablation suite for comparing the current 
 | `reflex_scale_0_25`, `reflex_scale_0_50`, `reflex_scale_0_75` | Keep the modular architecture but progressively reduce global reflex strength. |
 | `drop_visual_cortex`, `drop_sensory_cortex`, `drop_hunger_center`, `drop_sleep_center`, `drop_alert_center` | Remove one proposer module at a time from locomotion proposal and learning. |
 | `monolithic_policy` | Concatenates the modular observations into a single vector and runs a single proposer before the same `action_center` and `motor_cortex` used by the modular architecture. |
+| `true_monolithic_policy` | The simplest baseline: a single network maps concatenated observations directly to action logits plus a value head, with no downstream pipeline. |
+
+Canonical summaries now include `architecture_description` so the comparison output distinguishes:
+
+- `true monolithic direct control`
+- `monolithic proposer + action/motor pipeline`
+- `full modular with arbitration`
 
 ## Recurrent Module Configuration
 
@@ -25,7 +40,7 @@ This repository exposes a reproducible ablation suite for comparing the current 
 
 - The default is `()`, which keeps every proposer feed-forward.
 - Every name must come from the canonical module set: `visual_cortex`, `sensory_cortex`, `hunger_center`, `sleep_center`, and `alert_center`.
-- Recurrent modules are only valid for the modular architecture. The monolithic baseline rejects `recurrent_modules`.
+- Recurrent modules are only valid for the modular architecture. Monolithic baselines reject `recurrent_modules`.
 - Hidden state is runtime-only. Checkpoints save recurrent weights and biases, but not the live hidden vector from the current episode.
 
 Example:
@@ -91,6 +106,71 @@ The absolute scores are normalized to sum to `1.0`, so modules that helped the t
 - `sleep_vs_exploration_conflict`: validates that sleep overrides residual exploration in a safe nighttime context
 - These scenarios read arbitration directly from `trace.messages[*].payload`, so they do not require `--debug-trace`
 
+## Frozen Proposer Integration Testing
+
+Use frozen proposers when the question is not "can this proposer learn locally?" but "does the downstream integration stack use an already-competent proposer correctly?" This isolates learning in `arbitration_network`, `action_center`, and `motor_cortex` from local proposer learning so failures are easier to attribute.
+
+### API
+
+- `SpiderBrain.freeze_proposers(module_names: Sequence[str] | None = None)`: freezes proposer modules for learning while keeping them active for inference. Pass `None` to freeze every active proposer in the current architecture, or pass a sequence of proposer names to freeze only a subset.
+- `SpiderBrain.unfreeze_proposers(module_names: Sequence[str] | None = None)`: removes proposer modules from the frozen set. Pass `None` to clear the entire frozen set, or pass a sequence of proposer names to unfreeze only those modules.
+- `SpiderBrain.frozen_module_names()`: returns the sorted list of currently frozen proposer-module names.
+- `SpiderBrain.is_module_frozen(name: str)`: returns whether a given proposer module is currently frozen.
+
+Frozen proposers still appear in inference outputs and traces. The only change is that proposer gradient updates are skipped during `learn()`.
+
+### Failure Interpretation
+
+- `proposer_failure`: the expected motivational or action tendency is already wrong at the frozen proposer stage. A common signature is that the expected valence wins, but the resulting action is still wrong because the fixed proposer intent was already bad.
+- `integration_failure`: the frozen proposer looks locally competent, but the downstream stack mishandles it. Typical signatures are the wrong `winning_valence`, incorrect suppression or promotion in `module_gates`, or an `action_center` / `motor_cortex` outcome that discards the correct proposer intent.
+
+This distinction matters because a frozen-proposer failure is evidence against the proposer checkpoint itself, while an integration failure points at arbitration, gating, credit assignment, or motor-stage correction.
+
+### End-to-End Workflow
+
+1. Load the checkpoint that contains the proposer modules you want to treat as locally competent.
+2. Call `freeze_proposers()` for all proposer modules, or only for the specific proposer subset under test.
+3. Disable module dropout for the training run as well. Freezing alone does not keep proposers present during `training=True` episodes if modular dropout is still active. Set `module_dropout=0.0` on the simulation or brain config, or use a `no_module_dropout`-style variant when running integration-only experiments.
+4. Continue training with only the integration layers updating: `arbitration_network`, `action_center`, and `motor_cortex`.
+5. Evaluate on conflict scenarios and inspect `action.selection` traces to confirm:
+   - the expected `winning_valence` is selected,
+   - the expected proposer dominates or suppressed modules are down-weighted correctly,
+   - the final executed action preserves or appropriately corrects the intended action.
+6. If the run fails, classify it as proposer or integration failure before changing the model or the training recipe.
+
+Minimal sketch:
+
+```python
+from spider_cortex_sim.simulation import SpiderSimulation
+
+sim = SpiderSimulation(seed=7, max_steps=30)
+sim.brain.load_checkpoint("/path/to/checkpoint")
+sim.brain.freeze_proposers()
+sim.brain.module_dropout = 0.0
+
+for episode_idx in range(20):
+    sim.run_episode(
+        episode_idx,
+        training=True,
+        sample=True,
+        scenario_name="food_vs_predator_conflict",
+    )
+
+stats, trace = sim.run_episode(
+    999,
+    training=False,
+    sample=False,
+    capture_trace=True,
+    scenario_name="food_vs_predator_conflict",
+)
+```
+
+If you build the simulation with a custom config instead of mutating the instantiated brain, set `module_dropout=0.0` up front or choose a no-dropout ablation variant. The important invariant is that the frozen proposer modules stay both frozen and present during training episodes.
+
+### Summary Output
+
+Frozen module status is recorded in simulation summaries under the top-level `"frozen_modules"` key. The same list also appears under `summary["config"]["frozen_modules"]` so architecture metadata and training metadata stay aligned.
+
 ## Main Commands
 
 Run the publication-grade architecture suite and export `summary` plus CSV:
@@ -113,6 +193,16 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --ablation-suite \
   --full-summary
 ```
+
+Run only the direct A0 baseline:
+
+```bash
+PYTHONPATH=. python3 -m spider_cortex_sim \
+  --ablation-variant true_monolithic_policy \
+  --full-summary
+```
+
+`true_monolithic_policy` is the canonical CLI variant for `A0_true_monolithic` from [architectural_ladder.md](./architectural_ladder.md).
 
 Run a single variant against the modular no-reflex reference in one specific scenario for architecture discussion:
 
@@ -148,7 +238,7 @@ Training regimes package the reflex schedule, optional no-reflex fine-tuning pha
 | `baseline` | No reflex annealing, no fine-tuning, no added penalties. | Matches the historical default behavior and acts as the reference for regime comparisons. |
 | `reflex_annealed` | Linearly anneals reflex scale to `0.0` across the main training budget, with no extra fine-tuning. | Tests whether competence survives after gradually removing reflex support. |
 | `late_finetuning` | Linearly anneals reflex scale to `0.0`, then runs additional learning episodes at no-reflex scale. | Canonical no-reflex learning path and the experiment-of-record regime. |
-| `distillation` | Reserved registry slot. Resolving it currently raises `NotImplementedError`. | Placeholder for a future teacher-student workflow; do not use for claims yet. |
+| `distillation` | Collects teacher rollouts, runs offline policy/action-center/valence distillation, then optionally reuses `finetuning_episodes` for RL on the student. Requires a teacher checkpoint. | Use when the question is "can the modular student represent a policy that a monolithic teacher already learned?" |
 
 Named-regime CLI example:
 
@@ -181,7 +271,58 @@ Expected competence-gap pattern:
 | `baseline` | Reflex-supported performance remains useful as a scaffold diagnostic. | No-reflex rows are the actual benchmark for learned policy competence. | A large gap means the policy still leans on reflex support. |
 | `reflex_annealed` | Scaffolded performance should remain a secondary diagnostic. | Self-sufficient performance should improve if gradual removal taught the policy to stand alone. | A narrower gap than `baseline` is evidence that annealing helped. |
 | `late_finetuning` | Scaffolded results are retained for context, not for claims. | Primary no-reflex benchmark for learning claims. | The target pattern is the smallest gap with the strongest no-reflex success. |
-| `distillation` | Not available. | Not available. | No claim until the workflow is implemented. |
+| `distillation` | Keep teacher performance as the reference. | Read the distilled student with reflex support disabled first; then compare optional post-distillation RL fine-tuning against the distilled-only checkpoint. | If distilled no-reflex performance improves over modular RL from scratch, that is evidence that the modular architecture can express the teacher policy and the bottleneck is training rather than representational capacity. |
+
+## Distillation Workflow
+
+Distillation is implemented. Use it when RL alone cannot tell you whether a modular failure is caused by optimization or by limited representational capacity.
+
+Teacher-student flow:
+
+1. Train a teacher checkpoint with `true_monolithic_policy` (A0) or `monolithic_policy` (A1).
+2. Save that checkpoint.
+3. Run the modular student with `--training-regime distillation` and `--distillation-teacher-checkpoint`.
+4. Read the top-level `distillation` summary block for teacher metadata, dataset size, loss curve, and post-distillation comparisons.
+5. Compare four references together:
+   - monolithic teacher
+   - modular RL from scratch
+   - modular distilled
+   - modular distilled plus RL fine-tuning
+
+Teacher example:
+
+```bash
+PYTHONPATH=. python3 -m spider_cortex_sim \
+  --budget-profile dev \
+  --ablation-variant true_monolithic_policy \
+  --checkpoint-selection best \
+  --checkpoint-dir checkpoints/a0_teacher \
+  --full-summary
+```
+
+Student example:
+
+```bash
+PYTHONPATH=. python3 -m spider_cortex_sim \
+  --budget-profile dev \
+  --training-regime distillation \
+  --distillation-teacher-checkpoint checkpoints/a0_teacher/best \
+  --distillation-epochs 5 \
+  --summary spider_distillation_summary.json \
+  --full-summary
+```
+
+Use distillation when:
+
+- modular RL from scratch underperforms a monolithic teacher and you need to separate architectural limits from training dynamics
+- you want a direct answer to the question "can the modular architecture express an effective policy?"
+- you need post-distillation evidence before deciding whether more RL tuning is worth pursuing
+
+Interpretation guidance:
+
+- If `modular_distilled` already shows no-reflex competence, the modular architecture can represent useful teacher behavior and the remaining bottleneck is mostly training.
+- If only `modular_distilled_plus_rl_finetuning` improves, the representation is plausible but the student still needs RL adaptation to exploit it.
+- If neither `modular_distilled` nor `modular_distilled_plus_rl_finetuning` closes any meaningful part of the teacher gap, treat that as evidence against the current modular parameterization or supervision targets, not just against the RL recipe.
 
 ## Checkpoint Penalty Configuration
 
@@ -259,6 +400,8 @@ Canonical conditions:
 - `trained_without_reflex_support`: primary gate condition for the final checkpoint evaluated with `eval_reflex_scale=0.0`
 - `trained_reflex_annealed`: trains with the named `reflex_annealed` regime and evaluates the final checkpoint with `eval_reflex_scale=0.0`
 - `trained_late_finetuning`: trains with the named `late_finetuning` regime and evaluates the final checkpoint with `eval_reflex_scale=0.0`
+- `trained_distilled`: trains with the `distillation` regime without RL fine-tuning and evaluates the student with `eval_reflex_scale=0.0`
+- `trained_distilled_finetuned`: trains with the `distillation` regime including RL fine-tuning and evaluates the student with `eval_reflex_scale=0.0`
 - `random_init`
 - `reflex_only`
 - `freeze_half_budget`
@@ -441,7 +584,20 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --full-summary
 ```
 
-`--benchmark-package` is intentionally restricted to `--budget-profile paper --checkpoint-selection best`. The package contains the same offline report bundle plus `benchmark_manifest.json`, `resolved_config.json`, `seed_level_rows.csv`, uncertainty-aware aggregate tables, claim-test uncertainty tables, effect-size tables, supporting CSVs, plots, and `limitations.txt`.
+`--benchmark-package` is intentionally restricted to `--budget-profile paper --checkpoint-selection best`. The package contains the same offline report bundle plus `benchmark_manifest.json`, `resolved_config.json`, `pip_freeze.txt`, `seed_level_rows.csv`, uncertainty-aware aggregate tables, claim-test uncertainty tables, effect-size tables, supporting CSVs, plots, and `limitations.txt`.
+
+For release posture, citation guidance, and the minimal benchmark-of-record
+checklist, see [RELEASE.md](../RELEASE.md), [CHANGELOG.md](../CHANGELOG.md),
+and [CITATION.cff](../CITATION.cff). For the operational pre-run and post-run
+procedure, use [release_checklist.md](./release_checklist.md). `requirements.txt`
+remains a development baseline; benchmark-of-record environment capture comes
+from the manifest `environment` block plus `pip_freeze.txt`.
+
+The manifest now records benchmark provenance through its `environment` block,
+including git commit, git tag, dirty-state flag, Python version, and platform.
+`pip_freeze.txt` captures the dependency snapshot as a hashed package artifact.
+Use [release_checklist.md](./release_checklist.md) to verify those fields before
+archiving or citing a benchmark-of-record bundle.
 
 Expected outputs in `spider_ablation_report/`:
 

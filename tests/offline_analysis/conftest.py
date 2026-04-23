@@ -253,8 +253,153 @@ def build_uncertainty_summary() -> dict[str, object]:
     reflex_only = uncertainty_condition("reflex_only", [0.4, 0.6])
     modular_full = uncertainty_condition("modular_full", [0.7, 0.9])
     monolithic = uncertainty_condition("monolithic_policy", [0.3, 0.5])
+    true_monolithic = uncertainty_condition("true_monolithic_policy", [0.2, 0.3])
+    three_center = uncertainty_condition("three_center_modular", [0.55, 0.65])
+    four_center = uncertainty_condition("four_center_modular", [0.65, 0.75])
+    modular_full["config"] = {"architecture": "modular"}
+    modular_full["parameter_counts"] = {
+        "architecture": "modular",
+        "by_network": {
+            "visual_cortex": 120,
+            "sensory_cortex": 120,
+            "alert_center": 120,
+            "hunger_center": 120,
+            "sleep_center": 120,
+            "arbitration_network": 64,
+            "action_center": 96,
+            "motor_cortex": 80,
+        },
+        "total_trainable": 840,
+        "proportions": {
+            "visual_cortex": 120 / 840,
+            "sensory_cortex": 120 / 840,
+            "alert_center": 120 / 840,
+            "hunger_center": 120 / 840,
+            "sleep_center": 120 / 840,
+            "arbitration_network": 64 / 840,
+            "action_center": 96 / 840,
+            "motor_cortex": 80 / 840,
+        },
+        "per_network": {
+            "visual_cortex": 120,
+            "sensory_cortex": 120,
+            "alert_center": 120,
+            "hunger_center": 120,
+            "sleep_center": 120,
+            "arbitration_network": 64,
+            "action_center": 96,
+            "motor_cortex": 80,
+        },
+        "total": 840,
+    }
+    monolithic["config"] = {"architecture": "monolithic"}
+    monolithic["parameter_counts"] = {
+        "architecture": "monolithic",
+        "by_network": {
+            "monolithic_policy": 1692,
+            "arbitration_network": 64,
+            "action_center": 96,
+            "motor_cortex": 80,
+        },
+        "total_trainable": 1932,
+        "proportions": {
+            "monolithic_policy": 1692 / 1932,
+            "arbitration_network": 64 / 1932,
+            "action_center": 96 / 1932,
+            "motor_cortex": 80 / 1932,
+        },
+        "per_network": {
+            "monolithic_policy": 1692,
+            "arbitration_network": 64,
+            "action_center": 96,
+            "motor_cortex": 80,
+        },
+        "total": 1932,
+    }
+    true_monolithic["config"] = {"architecture": "true_monolithic"}
+    true_monolithic["parameter_counts"] = {
+        "architecture": "true_monolithic",
+        "by_network": {
+            "true_monolithic_policy": 1500,
+        },
+        "total_trainable": 1500,
+        "proportions": {
+            "true_monolithic_policy": 1.0,
+        },
+        "per_network": {
+            "true_monolithic_policy": 1500,
+        },
+        "total": 1500,
+    }
+    three_center["config"] = {"architecture": "modular"}
+    three_center["parameter_counts"] = {
+        "architecture": "modular",
+        "by_network": {
+            "perception_center": 180,
+            "homeostasis_center": 150,
+            "threat_center": 150,
+            "arbitration_network": 64,
+            "action_center": 96,
+            "motor_cortex": 80,
+        },
+        "total_trainable": 720,
+        "proportions": {
+            "perception_center": 180 / 720,
+            "homeostasis_center": 150 / 720,
+            "threat_center": 150 / 720,
+            "arbitration_network": 64 / 720,
+            "action_center": 96 / 720,
+            "motor_cortex": 80 / 720,
+        },
+        "per_network": {
+            "perception_center": 180,
+            "homeostasis_center": 150,
+            "threat_center": 150,
+            "arbitration_network": 64,
+            "action_center": 96,
+            "motor_cortex": 80,
+        },
+        "total": 720,
+    }
+    four_center["config"] = {"architecture": "modular"}
+    four_center["parameter_counts"] = {
+        "architecture": "modular",
+        "by_network": {
+            "visual_cortex": 120,
+            "sensory_cortex": 120,
+            "homeostasis_center": 150,
+            "threat_center": 150,
+            "arbitration_network": 64,
+            "action_center": 96,
+            "motor_cortex": 80,
+        },
+        "total_trainable": 780,
+        "proportions": {
+            "visual_cortex": 120 / 780,
+            "sensory_cortex": 120 / 780,
+            "homeostasis_center": 150 / 780,
+            "threat_center": 150 / 780,
+            "arbitration_network": 64 / 780,
+            "action_center": 96 / 780,
+            "motor_cortex": 80 / 780,
+        },
+        "per_network": {
+            "visual_cortex": 120,
+            "sensory_cortex": 120,
+            "homeostasis_center": 150,
+            "threat_center": 150,
+            "arbitration_network": 64,
+            "action_center": 96,
+            "motor_cortex": 80,
+        },
+        "total": 780,
+    }
     return {
         "config": {
+            "brain": {
+                "name": "modular_full",
+                "architecture": "modular",
+            },
             "budget": {
                 "profile": "paper",
                 "benchmark_strength": "paper",
@@ -262,6 +407,14 @@ def build_uncertainty_summary() -> dict[str, object]:
             }
         },
         "checkpointing": {"selection": "best", "metric": "scenario_success_rate"},
+        "parameter_counts": {
+            "architecture": "modular",
+            "by_network": dict(modular_full["parameter_counts"]["by_network"]),
+            "per_network": dict(modular_full["parameter_counts"]["by_network"]),
+            "total": modular_full["parameter_counts"]["total_trainable"],
+            "total_trainable": modular_full["parameter_counts"]["total_trainable"],
+            "proportions": dict(modular_full["parameter_counts"]["proportions"]),
+        },
         "behavior_evaluation": {
             "suite": trained["suite"],
             "summary": trained["summary"],
@@ -331,7 +484,10 @@ def build_uncertainty_summary() -> dict[str, object]:
                 "reference_variant": "modular_full",
                 "variants": {
                     "modular_full": modular_full,
+                    "true_monolithic_policy": true_monolithic,
                     "monolithic_policy": monolithic,
+                    "three_center_modular": three_center,
+                    "four_center_modular": four_center,
                 },
             },
             "claim_tests": {

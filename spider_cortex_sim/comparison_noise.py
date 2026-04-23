@@ -12,11 +12,11 @@ from typing import Dict, List, Sequence
 from .benchmark_types import SeedLevelResult
 from .budget_profiles import BudgetProfile, resolve_budget
 from .checkpointing import (
-    CheckpointPenaltyMode,
     CheckpointSelectionConfig,
     checkpoint_candidate_sort_key,
     checkpoint_preload_fingerprint,
     checkpoint_run_fingerprint,
+    resolve_checkpoint_selection_config,
     resolve_checkpoint_load_dir,
 )
 from .export import compact_behavior_payload
@@ -389,11 +389,7 @@ def _train_brain_for_noise(
     train_condition: str,
     resolved_train_noise_profile: NoiseConfig,
     checkpoint_selection: str,
-    checkpoint_metric: str,
-    checkpoint_override_penalty: float,
-    checkpoint_dominance_penalty: float,
-    checkpoint_penalty_mode: CheckpointPenaltyMode | str,
-    checkpoint_selection_config: CheckpointSelectionConfig | None,
+    checkpoint_selection_config: CheckpointSelectionConfig,
     checkpoint_dir: str | Path | None,
     load_brain: str | Path | None,
     load_modules: Sequence[str] | None,
@@ -464,24 +460,8 @@ def _train_brain_for_noise(
             "architecture": brain_config_summary,
             "architecture_fingerprint": architecture_fingerprint,
             "checkpoint_selection": checkpoint_selection,
-            "checkpoint_metric": checkpoint_metric,
-            "checkpoint_penalty_config": (
-                checkpoint_selection_config.to_summary()
-                if checkpoint_selection_config is not None
-                else {
-                    "metric": checkpoint_metric,
-                    "override_penalty_weight": float(checkpoint_override_penalty),
-                    "dominance_penalty_weight": float(checkpoint_dominance_penalty),
-                    "penalty_mode": (
-                        checkpoint_penalty_mode.value
-                        if isinstance(
-                            checkpoint_penalty_mode,
-                            CheckpointPenaltyMode,
-                        )
-                        else str(checkpoint_penalty_mode)
-                    ),
-                }
-            ),
+            "checkpoint_metric": checkpoint_selection_config.metric,
+            "checkpoint_penalty_config": checkpoint_selection_config.to_summary(),
             "checkpoint_interval": budget.checkpoint_interval,
             "selection_scenario_episodes": budget.selection_scenario_episodes,
             "preload": preload_fingerprint,
@@ -519,10 +499,7 @@ def _train_brain_for_noise(
                 capture_evaluation_trace=False,
                 debug_trace=False,
                 checkpoint_selection=checkpoint_selection,
-                checkpoint_metric=checkpoint_metric,
-                checkpoint_override_penalty=checkpoint_override_penalty,
-                checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                checkpoint_penalty_mode=checkpoint_penalty_mode,
+                checkpoint_selection_config=checkpoint_selection_config,
                 checkpoint_interval=budget.checkpoint_interval,
                 checkpoint_dir=run_checkpoint_dir,
                 checkpoint_scenario_names=scenario_names,
@@ -622,12 +599,7 @@ def compare_noise_robustness(
     episodes_per_scenario: int | None = None,
     robustness_matrix: RobustnessMatrixSpec | None = None,
     checkpoint_selection: str = "none",
-    checkpoint_metric: str = "scenario_success_rate",
-    checkpoint_override_penalty: float = 0.0,
-    checkpoint_dominance_penalty: float = 0.0,
-    checkpoint_penalty_mode: CheckpointPenaltyMode | str = (
-        CheckpointPenaltyMode.TIEBREAKER
-    ),
+    checkpoint_selection_config: CheckpointSelectionConfig | None = None,
     checkpoint_interval: int | None = None,
     checkpoint_dir: str | Path | None = None,
     load_brain: str | Path | None = None,
@@ -637,7 +609,7 @@ def compare_noise_robustness(
     """
     Orchestrate training per train-noise condition and evaluate each trained agent across all eval-noise conditions to produce a nested robustness matrix and flattened per-episode rows.
     
-    Per train condition this function optionally loads or trains a SpiderSimulation for each seed, evaluates it across every eval-noise condition, builds compact per-cell behavior payloads enriched with noise-profile metadata and seed statistics, and computes aggregate robustness metrics (marginals, overall/diagonal/off-diagonal scores, seed-level rows, and uncertainty). If `robustness_matrix` is omitted, a canonical matrix is used. Checkpoint behavior is controlled by `checkpoint_selection`, `checkpoint_metric`, `checkpoint_dir`, and related checkpoint parameters.
+    Per train condition this function optionally loads or trains a SpiderSimulation for each seed, evaluates it across every eval-noise condition, builds compact per-cell behavior payloads enriched with noise-profile metadata and seed statistics, and computes aggregate robustness metrics (marginals, overall/diagonal/off-diagonal scores, seed-level rows, and uncertainty). If `robustness_matrix` is omitted, a canonical matrix is used. Checkpoint behavior is controlled by `checkpoint_selection`, `checkpoint_selection_config`, `checkpoint_dir`, and related checkpoint parameters.
     
     Parameters:
         (See function signature for parameters; each controls world configuration, learning hyperparameters, budget/seed selection, checkpointing, and I/O for loading/saving brains.)
@@ -656,14 +628,10 @@ def compare_noise_robustness(
         raise ValueError(
             "Invalid checkpoint_selection. Use 'none' or 'best'."
         )
-    checkpoint_selection_config: CheckpointSelectionConfig | None = None
+    checkpoint_selection_config = resolve_checkpoint_selection_config(
+        checkpoint_selection_config
+    )
     if checkpoint_selection == "best":
-        checkpoint_selection_config = CheckpointSelectionConfig(
-            metric=checkpoint_metric,
-            override_penalty_weight=checkpoint_override_penalty,
-            dominance_penalty_weight=checkpoint_dominance_penalty,
-            penalty_mode=checkpoint_penalty_mode,
-        )
         checkpoint_candidate_sort_key(
             {},
             selection_config=checkpoint_selection_config,
@@ -735,10 +703,6 @@ def compare_noise_robustness(
                     train_condition=train_condition,
                     resolved_train_noise_profile=resolved_train_noise_profile,
                     checkpoint_selection=checkpoint_selection,
-                    checkpoint_metric=checkpoint_metric,
-                    checkpoint_override_penalty=checkpoint_override_penalty,
-                    checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                    checkpoint_penalty_mode=checkpoint_penalty_mode,
                     checkpoint_selection_config=checkpoint_selection_config,
                     checkpoint_dir=checkpoint_dir,
                     load_brain=load_brain,
@@ -805,21 +769,8 @@ def compare_noise_robustness(
         "budget_profile": budget.profile,
         "benchmark_strength": budget.benchmark_strength,
         "checkpoint_selection": checkpoint_selection,
-        "checkpoint_metric": checkpoint_metric,
-        "checkpoint_penalty_config": (
-            checkpoint_selection_config.to_summary()
-            if checkpoint_selection_config is not None
-            else {
-                "metric": checkpoint_metric,
-                "override_penalty_weight": float(checkpoint_override_penalty),
-                "dominance_penalty_weight": float(checkpoint_dominance_penalty),
-                "penalty_mode": (
-                    checkpoint_penalty_mode.value
-                    if isinstance(checkpoint_penalty_mode, CheckpointPenaltyMode)
-                    else str(checkpoint_penalty_mode)
-                ),
-            }
-        ),
+        "checkpoint_metric": checkpoint_selection_config.metric,
+        "checkpoint_penalty_config": checkpoint_selection_config.to_summary(),
         "reward_profile": reward_profile,
         "map_template": map_template,
         "seeds": list(seed_values),

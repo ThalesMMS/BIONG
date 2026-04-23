@@ -9,6 +9,11 @@ from ..constants import (
     CANONICAL_NOISE_CONDITIONS,
     DEFAULT_MINIMAL_SHAPING_SURVIVAL_THRESHOLD,
     DEFAULT_MODULE_NAMES,
+    LADDER_ACTIVE_RUNGS,
+    LADDER_ADJACENT_COMPARISONS,
+    LADDER_PRIMARY_VARIANT_BY_RUNG,
+    LADDER_PROTOCOL_NAMES,
+    LADDER_RUNG_DESCRIPTIONS,
     REFLEX_DOMINANCE_WARNING_THRESHOLD,
     REFLEX_OVERRIDE_WARNING_THRESHOLD,
     SHAPING_DEPENDENCE_WARNING_THRESHOLD,
@@ -25,6 +30,233 @@ from ..utils import (
 )
 
 from .shaping import _ablation_deltas_vs_reference, _rows_with_minimal_reflex_support, _variant_with_minimal_reflex_support
+
+def _extract_ladder_rungs(
+    variants: Mapping[str, object],
+) -> dict[str, object]:
+    recognized_rungs = [
+        rung
+        for rung in LADDER_ACTIVE_RUNGS
+        if LADDER_PRIMARY_VARIANT_BY_RUNG.get(rung, "") in variants
+    ]
+    applicable_comparisons = [
+        {
+            "baseline_rung": baseline_rung,
+            "comparison_rung": comparison_rung,
+        }
+        for baseline_rung, comparison_rung in LADDER_ADJACENT_COMPARISONS
+        if baseline_rung in recognized_rungs and comparison_rung in recognized_rungs
+    ]
+    return {
+        "recognized_rungs": recognized_rungs,
+        "descriptions": {
+            rung: LADDER_RUNG_DESCRIPTIONS.get(rung, "")
+            for rung in recognized_rungs
+        },
+        "applicable_comparisons": applicable_comparisons,
+    }
+
+
+def extract_ladder_comparison(
+    variants: Mapping[str, object],
+    *,
+    source: str,
+) -> dict[str, object]:
+    rung_to_variant = {
+        rung: variant_name
+        for rung, variant_name in LADDER_PRIMARY_VARIANT_BY_RUNG.items()
+        if variant_name in variants
+    }
+    comparisons: list[dict[str, object]] = []
+    limitations: list[str] = []
+    for baseline_rung, comparison_rung in LADDER_ADJACENT_COMPARISONS:
+        baseline_variant = rung_to_variant.get(baseline_rung, "")
+        comparison_variant = rung_to_variant.get(comparison_rung, "")
+        if not baseline_variant or not comparison_variant:
+            limitations.append(
+                f"Architectural ladder comparison {baseline_rung} vs {comparison_rung} "
+                "was unavailable because one of the required variants was missing."
+            )
+            continue
+        deltas = _ablation_deltas_vs_reference(
+            {
+                baseline_variant: variants[baseline_variant],
+                comparison_variant: variants[comparison_variant],
+            },
+            reference_variant=baseline_variant,
+        )
+        baseline_payload = _mapping_or_empty(variants.get(baseline_variant))
+        comparison_payload = _mapping_or_empty(variants.get(comparison_variant))
+        baseline_summary = _mapping_or_empty(baseline_payload.get("summary"))
+        comparison_summary = _mapping_or_empty(comparison_payload.get("summary"))
+        comparison_delta = _mapping_or_empty(deltas.get(comparison_variant))
+        summary_delta = _mapping_or_empty(comparison_delta.get("summary"))
+        comparisons.append(
+            {
+                "baseline_rung": baseline_rung,
+                "comparison_rung": comparison_rung,
+                "metrics": {
+                    "baseline_variant": baseline_variant,
+                    "comparison_variant": comparison_variant,
+                    "baseline_protocol_name": LADDER_PROTOCOL_NAMES.get(
+                        baseline_rung,
+                        baseline_rung,
+                    ),
+                    "comparison_protocol_name": LADDER_PROTOCOL_NAMES.get(
+                        comparison_rung,
+                        comparison_rung,
+                    ),
+                    "baseline": {
+                        "scenario_success_rate": _coerce_float(
+                            baseline_summary.get("scenario_success_rate")
+                        ),
+                        "episode_success_rate": _coerce_float(
+                            baseline_summary.get("episode_success_rate")
+                        ),
+                        "mean_reward": (
+                            _coerce_optional_float(baseline_summary.get("mean_reward"))
+                            if "mean_reward" in baseline_summary
+                            else None
+                        ),
+                    },
+                    "comparison": {
+                        "scenario_success_rate": _coerce_float(
+                            comparison_summary.get("scenario_success_rate")
+                        ),
+                        "episode_success_rate": _coerce_float(
+                            comparison_summary.get("episode_success_rate")
+                        ),
+                        "mean_reward": (
+                            _coerce_optional_float(comparison_summary.get("mean_reward"))
+                            if "mean_reward" in comparison_summary
+                            else None
+                        ),
+                    },
+                },
+                "deltas": {
+                    "scenario_success_rate_delta": _coerce_float(
+                        summary_delta.get("scenario_success_rate_delta")
+                    ),
+                    "episode_success_rate_delta": _coerce_float(
+                        summary_delta.get("episode_success_rate_delta")
+                    ),
+                    "mean_reward_delta": (
+                        _coerce_optional_float(summary_delta.get("mean_reward_delta"))
+                        if (
+                            "mean_reward" in baseline_summary
+                            and baseline_summary.get("mean_reward") is not None
+                            and "mean_reward" in comparison_summary
+                            and comparison_summary.get("mean_reward") is not None
+                            and "mean_reward_delta" in summary_delta
+                        )
+                        else None
+                    ),
+                },
+                "summary": dict(summary_delta),
+                "scenarios": dict(_mapping_or_empty(comparison_delta.get("scenarios"))),
+                "source": f"{source}.ladder.{baseline_rung}_vs_{comparison_rung}",
+            }
+        )
+
+    return {
+        "available": bool(comparisons),
+        "comparisons": comparisons,
+        "explanatory_notes": dict(LADDER_RUNG_DESCRIPTIONS),
+        "limitations": limitations,
+    }
+
+
+def extract_ladder_profile_comparison(
+    summary: Mapping[str, object],
+) -> dict[str, object]:
+    """Backward-compatible alias for `extract_reward_profile_ladder()`."""
+    return extract_reward_profile_ladder(summary)
+
+
+def extract_reward_profile_ladder(
+    summary: Mapping[str, object],
+) -> dict[str, object]:
+    """Extract and normalize the cross-profile architectural ladder payload."""
+    behavior_evaluation = _mapping_or_empty(summary.get("behavior_evaluation"))
+    payload = _mapping_or_empty(behavior_evaluation.get("ladder_under_profiles"))
+    if not payload:
+        payload = _mapping_or_empty(
+            behavior_evaluation.get("ladder_profile_comparison")
+        )
+    if not payload:
+        return {
+            "available": False,
+            "profiles": {},
+            "cross_profile_deltas": {},
+            "classifications": {},
+            "limitations": [],
+        }
+
+    profile_payloads = _mapping_or_empty(payload.get("profiles"))
+    profiles: dict[str, object] = {}
+    for profile_name, profile_payload in sorted(profile_payloads.items()):
+        if not isinstance(profile_payload, Mapping):
+            continue
+        variants_payload = _mapping_or_empty(profile_payload.get("variants"))
+        normalized_variants = {
+            str(variant_name): _variant_with_minimal_reflex_support(variant_payload)
+            for variant_name, variant_payload in variants_payload.items()
+            if isinstance(variant_payload, Mapping)
+        }
+        profiles[str(profile_name)] = {
+            "reward_profile": str(profile_payload.get("reward_profile") or profile_name),
+            "reference_variant": str(profile_payload.get("reference_variant") or ""),
+            "scenario_names": list(profile_payload.get("scenario_names", []))
+            if isinstance(profile_payload.get("scenario_names"), list)
+            else [],
+            "variants": normalized_variants,
+        }
+
+    variants_payload = _mapping_or_empty(payload.get("variants"))
+    classifications = {
+        str(variant_name): {
+            "classification": dict(
+                _mapping_or_empty(variant_payload.get("classification"))
+            ),
+            "austere_survival": dict(
+                _mapping_or_empty(variant_payload.get("austere_survival"))
+            ),
+            "protocol_name": str(variant_payload.get("protocol_name") or ""),
+            "rung": str(variant_payload.get("rung") or ""),
+        }
+        for variant_name, variant_payload in sorted(variants_payload.items())
+        if isinstance(variant_payload, Mapping)
+    }
+
+    limitations = payload.get("limitations", [])
+    return {
+        "available": bool(payload.get("available", True)),
+        "profiles": profiles,
+        "minimal_profile": str(
+            _mapping_or_empty(payload.get("deltas_vs_austere")).get(
+                "minimal_profile",
+                payload.get("minimal_profile", "austere"),
+            )
+            or "austere"
+        ),
+        "cross_profile_deltas": dict(
+            _mapping_or_empty(
+                _mapping_or_empty(payload.get("deltas_vs_austere")).get(
+                    "deltas_vs_austere"
+                )
+            )
+        ),
+        "classifications": classifications,
+        "classification_summary": dict(
+            _mapping_or_empty(payload.get("classification_summary"))
+        ),
+        "raw_payload": dict(payload),
+        "limitations": (
+            [str(item) for item in limitations if item]
+            if isinstance(limitations, list)
+            else []
+        ),
+    }
 
 def extract_ablations(
     summary: Mapping[str, object],
@@ -66,6 +298,15 @@ def extract_ablations(
             if isinstance(variants_payload, Mapping)
             else {}
         )
+        for variant_name, payload in variants.items():
+            payload["ladder_rung"] = next(
+                (
+                    rung
+                    for rung, canonical_variant in LADDER_PRIMARY_VARIANT_BY_RUNG.items()
+                    if canonical_variant == str(variant_name)
+                ),
+                None,
+            )
         reference_variant = (
             "modular_full"
             if "modular_full" in variants
@@ -81,6 +322,14 @@ def extract_ablations(
             variants,
             reference_variant=reference_variant,
         )
+        ladder_rungs = _extract_ladder_rungs(variants)
+        ladder_comparison = extract_ladder_comparison(
+            variants,
+            source="summary.behavior_evaluation.ablations",
+        )
+        limitations.extend(
+            str(item) for item in ladder_comparison.get("limitations", []) if item
+        )
         predator_type_comparisons = compare_predator_type_ablation_performance(
             {
                 "variants": variants,
@@ -93,6 +342,47 @@ def extract_ablations(
             "reference_variant": reference_variant,
             "variants": variants,
             "deltas_vs_reference": deltas,
+            "ladder_rungs": ladder_rungs,
+            "ladder_comparison": ladder_comparison,
+            "ladder": {
+                "available": bool(ladder_rungs.get("recognized_rungs")),
+                "active_rungs": list(LADDER_ACTIVE_RUNGS),
+                "rungs": {
+                    rung: {
+                        "rung": rung,
+                        "protocol_name": LADDER_PROTOCOL_NAMES.get(rung, rung),
+                        "technical_variant": LADDER_PRIMARY_VARIANT_BY_RUNG.get(rung, ""),
+                        "description": LADDER_RUNG_DESCRIPTIONS.get(rung, ""),
+                        "summary": dict(
+                            _mapping_or_empty(
+                                variants.get(
+                                    LADDER_PRIMARY_VARIANT_BY_RUNG.get(rung, ""),
+                                    {},
+                                )
+                            ).get("summary", {})
+                        ),
+                    }
+                    for rung in ladder_rungs.get("recognized_rungs", [])
+                },
+                "adjacent_comparisons": [
+                    {
+                        "baseline_rung": item.get("baseline_rung"),
+                        "comparison_rung": item.get("comparison_rung"),
+                        "baseline_variant": _mapping_or_empty(item.get("metrics")).get(
+                            "baseline_variant"
+                        ),
+                        "comparison_variant": _mapping_or_empty(item.get("metrics")).get(
+                            "comparison_variant"
+                        ),
+                        "summary": dict(_mapping_or_empty(item.get("summary"))),
+                        "scenarios": dict(_mapping_or_empty(item.get("scenarios"))),
+                        "source": item.get("source"),
+                    }
+                    for item in ladder_comparison.get("comparisons", [])
+                    if isinstance(item, Mapping)
+                ],
+                "limitations": list(ladder_comparison.get("limitations", [])),
+            },
             "predator_type_comparisons": predator_type_comparisons,
             "limitations": limitations,
         }
@@ -124,6 +414,9 @@ def extract_ablations(
         variants[variant] = {
             "config": {
                 "architecture": str(items[0].get("ablation_architecture") or ""),
+                "architecture_description": str(
+                    items[0].get("ablation_architecture_description") or ""
+                ),
             },
             "summary": {
                 "scenario_success_rate": _mean(
@@ -136,9 +429,20 @@ def extract_ablations(
                     _coerce_float(row.get("eval_reflex_scale"), 0.0)
                     for row in items
                 ),
+                "architecture_description": str(
+                    items[0].get("ablation_architecture_description") or ""
+                ),
             },
             "suite": suite,
             "legacy_scenarios": dict(suite),
+            "ladder_rung": next(
+                (
+                    rung
+                    for rung, canonical_variant in LADDER_PRIMARY_VARIANT_BY_RUNG.items()
+                    if canonical_variant == variant
+                ),
+                None,
+            ),
         }
     if variants:
         reference_variant = "modular_full" if "modular_full" in variants else ""
@@ -152,12 +456,61 @@ def extract_ablations(
         variants,
         reference_variant=reference_variant,
     )
+    ladder_rungs = _extract_ladder_rungs(variants)
+    ladder_comparison = extract_ladder_comparison(
+        variants,
+        source="behavior_csv",
+    )
+    limitations.extend(
+        str(item) for item in ladder_comparison.get("limitations", []) if item
+    )
     return {
         "available": bool(variants),
         "source": "behavior_csv",
         "reference_variant": reference_variant,
         "variants": variants,
         "deltas_vs_reference": deltas,
+        "ladder_rungs": ladder_rungs,
+        "ladder_comparison": ladder_comparison,
+        "ladder": {
+            "available": bool(ladder_rungs.get("recognized_rungs")),
+            "active_rungs": list(LADDER_ACTIVE_RUNGS),
+            "rungs": {
+                rung: {
+                    "rung": rung,
+                    "protocol_name": LADDER_PROTOCOL_NAMES.get(rung, rung),
+                    "technical_variant": LADDER_PRIMARY_VARIANT_BY_RUNG.get(rung, ""),
+                    "description": LADDER_RUNG_DESCRIPTIONS.get(rung, ""),
+                    "summary": dict(
+                        _mapping_or_empty(
+                            variants.get(
+                                LADDER_PRIMARY_VARIANT_BY_RUNG.get(rung, ""),
+                                {},
+                            )
+                        ).get("summary", {})
+                    ),
+                }
+                for rung in ladder_rungs.get("recognized_rungs", [])
+            },
+            "adjacent_comparisons": [
+                {
+                    "baseline_rung": item.get("baseline_rung"),
+                    "comparison_rung": item.get("comparison_rung"),
+                    "baseline_variant": _mapping_or_empty(item.get("metrics")).get(
+                        "baseline_variant"
+                    ),
+                    "comparison_variant": _mapping_or_empty(item.get("metrics")).get(
+                        "comparison_variant"
+                    ),
+                    "summary": dict(_mapping_or_empty(item.get("summary"))),
+                    "scenarios": dict(_mapping_or_empty(item.get("scenarios"))),
+                    "source": item.get("source"),
+                }
+                for item in ladder_comparison.get("comparisons", [])
+                if isinstance(item, Mapping)
+            ],
+            "limitations": list(ladder_comparison.get("limitations", [])),
+        },
         "predator_type_comparisons": compare_predator_type_ablation_performance(
             {
                 "variants": variants,

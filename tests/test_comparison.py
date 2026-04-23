@@ -6,6 +6,7 @@ import numpy as np
 from spider_cortex_sim.ablations import canonical_ablation_configs
 from spider_cortex_sim.comparison import (
     build_ablation_deltas,
+    build_distillation_comparison_report,
     build_learning_evidence_deltas,
     build_learning_evidence_summary,
     build_predator_type_specialization_summary,
@@ -29,6 +30,94 @@ from spider_cortex_sim.reward import SCENARIO_AUSTERE_REQUIREMENTS, SHAPING_GAP_
 from spider_cortex_sim.simulation import SpiderSimulation
 
 class ComparisonWorkflowTest(unittest.TestCase):
+    def test_distillation_report_accepts_compact_payload_inputs(self) -> None:
+            report = build_distillation_comparison_report(
+                teacher={
+                    "summary": {
+                        "scenario_success_rate": 0.8,
+                        "episode_success_rate": 0.8,
+                        "mean_reward": 8.0,
+                    }
+                },
+                modular_rl_from_scratch={
+                    "summary": {
+                        "scenario_success_rate": 0.2,
+                        "episode_success_rate": 0.2,
+                        "mean_reward": 2.0,
+                    },
+                    "suite": {},
+                },
+                modular_distilled={
+                    "summary": {
+                        "scenario_success_rate": 0.5,
+                        "episode_success_rate": 0.5,
+                        "mean_reward": 5.0,
+                    },
+                    "suite": {},
+                },
+                modular_distilled_plus_rl_finetuning={
+                    "summary": {
+                        "scenario_success_rate": 0.55,
+                        "episode_success_rate": 0.55,
+                        "mean_reward": 5.5,
+                    },
+                    "suite": {},
+                },
+            )
+
+            self.assertEqual(report["answer"], "yes")
+            self.assertEqual(report["best_student_condition"], "modular_distilled")
+
+    def test_distillation_report_without_baseline_keeps_distilled_selected(self) -> None:
+            report = build_distillation_comparison_report(
+                teacher={
+                    "scenario_success_rate": 0.8,
+                    "episode_success_rate": 0.8,
+                    "mean_reward": 8.0,
+                },
+                modular_rl_from_scratch=None,
+                modular_distilled={
+                    "scenario_success_rate": 0.5,
+                    "episode_success_rate": 0.5,
+                    "mean_reward": 5.0,
+                },
+                modular_distilled_plus_rl_finetuning={
+                    "scenario_success_rate": 0.55,
+                    "episode_success_rate": 0.55,
+                    "mean_reward": 5.5,
+                },
+            )
+
+            self.assertEqual(report["answer"], "yes")
+            self.assertEqual(report["best_student_condition"], "modular_distilled")
+
+    def test_distillation_report_prefers_distilled_when_it_already_beats_baseline(self) -> None:
+            report = build_distillation_comparison_report(
+                teacher={
+                    "scenario_success_rate": 0.8,
+                    "episode_success_rate": 0.8,
+                    "mean_reward": 8.0,
+                },
+                modular_rl_from_scratch={
+                    "scenario_success_rate": 0.2,
+                    "episode_success_rate": 0.2,
+                    "mean_reward": 2.0,
+                },
+                modular_distilled={
+                    "scenario_success_rate": 0.5,
+                    "episode_success_rate": 0.5,
+                    "mean_reward": 5.0,
+                },
+                modular_distilled_plus_rl_finetuning={
+                    "scenario_success_rate": 0.55,
+                    "episode_success_rate": 0.55,
+                    "mean_reward": 5.5,
+                },
+            )
+
+            self.assertEqual(report["answer"], "yes")
+            self.assertEqual(report["best_student_condition"], "modular_distilled")
+
     def test_behavior_comparison_reports_profiles_maps_and_matrix(self) -> None:
             comparisons, rows = compare_behavior_suite(
                 episodes=0,
@@ -498,6 +587,8 @@ class ComparisonWorkflowTest(unittest.TestCase):
             self.assertIn("trained_without_reflex_support", payload["conditions"])
             self.assertIn("trained_reflex_annealed", payload["conditions"])
             self.assertIn("trained_late_finetuning", payload["conditions"])
+            self.assertIn("trained_distilled", payload["conditions"])
+            self.assertIn("trained_distilled_finetuned", payload["conditions"])
             self.assertIn("random_init", payload["conditions"])
             self.assertIn("reflex_only", payload["conditions"])
             self.assertIn("freeze_half_budget", payload["conditions"])

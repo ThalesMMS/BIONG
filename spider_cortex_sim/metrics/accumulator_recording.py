@@ -76,6 +76,7 @@ class AccumulatorRecordingMixin:
             self.dominant_module_counts.setdefault(name, 0)
             self.module_credit_weight_sums.setdefault(name, 0.0)
             self.module_gradient_norm_sums.setdefault(name, 0.0)
+            self.counterfactual_credit_weight_sums.setdefault(name, 0.0)
             for predator_type in PREDATOR_TYPE_NAMES:
                 self.module_response_by_predator_type_counts[predator_type].setdefault(
                     name,
@@ -316,16 +317,22 @@ class AccumulatorRecordingMixin:
         """
         Accumulate per-module learning diagnostics for the current episode.
         
-        Reads optional mappings `module_credit_weights` and `module_gradient_norms` from `learn_stats` and adds their numeric values into the accumulator's running sums; missing module entries are treated as zero (i.e., absent names are created with an initial value of 0.0).
+        Reads optional mappings `module_credit_weights`, `module_gradient_norms`, and
+        `counterfactual_credit_weights` from `learn_stats` and adds their numeric
+        values into the accumulator's running sums; missing module entries are treated
+        as zero (i.e., absent names are created with an initial value of 0.0).
         
         Parameters:
-            learn_stats (Mapping[str, object]): A mapping that may contain `module_credit_weights`
-                and/or `module_gradient_norms`, each itself a mapping from module name to a numeric value.
+            learn_stats (Mapping[str, object]): A mapping that may contain
+                `module_credit_weights`, `module_gradient_norms`, and/or
+                `counterfactual_credit_weights`, each itself a mapping from module
+                name to a numeric value.
         """
         self.learning_steps += 1
         for stats_key, target in [
             ("module_credit_weights", self.module_credit_weight_sums),
             ("module_gradient_norms", self.module_gradient_norm_sums),
+            ("counterfactual_credit_weights", self.counterfactual_credit_weight_sums),
         ]:
             values = learn_stats.get(stats_key, {})
             if isinstance(values, Mapping):

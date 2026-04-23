@@ -22,12 +22,12 @@ from .ablations import (
 from .benchmark_types import SeedLevelResult, UncertaintyEstimate
 from .budget_profiles import BudgetProfile, resolve_budget
 from .checkpointing import (
-    CheckpointPenaltyMode,
     CheckpointSelectionConfig,
     checkpoint_candidate_sort_key,
     checkpoint_preload_fingerprint,
     checkpoint_run_fingerprint,
     mean_reward_from_behavior_payload,
+    resolve_checkpoint_selection_config,
     resolve_checkpoint_load_dir,
 )
 from .curriculum import (
@@ -387,12 +387,7 @@ def compare_behavior_suite(
     names: Sequence[str] | None = None,
     episodes_per_scenario: int | None = None,
     checkpoint_selection: str = "none",
-    checkpoint_metric: str = "scenario_success_rate",
-    checkpoint_override_penalty: float = 0.0,
-    checkpoint_dominance_penalty: float = 0.0,
-    checkpoint_penalty_mode: CheckpointPenaltyMode | str = (
-        CheckpointPenaltyMode.TIEBREAKER
-    ),
+    checkpoint_selection_config: CheckpointSelectionConfig | None = None,
     checkpoint_interval: int | None = None,
     checkpoint_dir: str | Path | None = None,
 ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
@@ -444,6 +439,9 @@ def compare_behavior_suite(
         checkpoint_interval=checkpoint_interval,
         behavior_seeds=seeds,
         ablation_seeds=seeds,
+    )
+    checkpoint_selection_config = resolve_checkpoint_selection_config(
+        checkpoint_selection_config
     )
     scenario_names = list(names or SCENARIO_NAMES)
     profile_names = list(reward_profiles or ("classic",))
@@ -523,10 +521,7 @@ def compare_behavior_suite(
                         capture_evaluation_trace=False,
                         debug_trace=False,
                         checkpoint_selection=checkpoint_selection,
-                        checkpoint_metric=checkpoint_metric,
-                        checkpoint_override_penalty=checkpoint_override_penalty,
-                        checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                        checkpoint_penalty_mode=checkpoint_penalty_mode,
+                        checkpoint_selection_config=checkpoint_selection_config,
                         checkpoint_interval=budget.checkpoint_interval,
                         checkpoint_dir=run_checkpoint_dir,
                         checkpoint_scenario_names=scenario_names,
@@ -638,13 +633,8 @@ def compare_behavior_suite(
         "budget_profile": budget.profile,
         "benchmark_strength": budget.benchmark_strength,
         "checkpoint_selection": checkpoint_selection,
-        "checkpoint_metric": checkpoint_metric,
-        "checkpoint_penalty_config": CheckpointSelectionConfig(
-            metric=checkpoint_metric,
-            override_penalty_weight=checkpoint_override_penalty,
-            dominance_penalty_weight=checkpoint_dominance_penalty,
-            penalty_mode=checkpoint_penalty_mode,
-        ).to_summary(),
+        "checkpoint_metric": checkpoint_selection_config.metric,
+        "checkpoint_penalty_config": checkpoint_selection_config.to_summary(),
         "seeds": list(seed_values),
         "scenario_names": scenario_names,
         "episodes_per_scenario": run_count,

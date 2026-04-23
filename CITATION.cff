@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+title: "Biologically-Inspired Organism, Not a Game"
+message: "If you use this repository, cite the software below. When citing a benchmark package, include the package manifest timestamp and git commit recorded in its provenance."
+type: software
+authors:
+  - given-names: Thales
+    family-names: Matheus
+version: "research-prerelease"
+license: MIT
+repository-code: "https://github.com/ThalesMMS/BIONG"
+url: "https://github.com/ThalesMMS/BIONG"
+keywords:
+  - biologically inspired simulation
+  - modular reinforcement learning
+  - reproducibility
+  - benchmark-of-record
+abstract: "Experimental research codebase for a modular spider simulator with benchmark-of-record packaging and reproducibility guidance."

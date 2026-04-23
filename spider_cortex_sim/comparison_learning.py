@@ -6,6 +6,7 @@ named ``_short_robustness_matrix_summary``.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import math
 from copy import deepcopy
@@ -22,12 +23,12 @@ from .ablations import (
 from .benchmark_types import SeedLevelResult, UncertaintyEstimate
 from .budget_profiles import BudgetProfile, resolve_budget
 from .checkpointing import (
-    CheckpointPenaltyMode,
     CheckpointSelectionConfig,
     checkpoint_candidate_sort_key,
     checkpoint_preload_fingerprint,
     checkpoint_run_fingerprint,
     mean_reward_from_behavior_payload,
+    resolve_checkpoint_selection_config,
     resolve_checkpoint_load_dir,
 )
 from .curriculum import (
@@ -35,6 +36,7 @@ from .curriculum import (
     empty_curriculum_summary,
     validate_curriculum_profile,
 )
+from .distillation import DistillationConfig
 from .export import compact_aggregate, compact_behavior_payload
 from .learning_evidence import resolve_learning_evidence_conditions
 from .memory import memory_leakage_audit
@@ -65,9 +67,211 @@ from .reward import (
 from .scenarios import SCENARIO_NAMES, get_scenario
 from .simulation import EXPERIMENT_OF_RECORD_REGIME, SpiderSimulation
 from .statistics import bootstrap_confidence_interval, cohens_d
-from .training_regimes import resolve_training_regime
+from .training_regimes import TrainingRegimeSpec, resolve_training_regime
 
 from .comparison_utils import aggregate_with_uncertainty, attach_behavior_seed_statistics, condition_compact_summary, condition_mean_reward, metric_seed_values_from_payload, noise_profile_metadata, paired_seed_delta_rows, seed_level_dicts
+
+
+def build_distillation_comparison_report(
+    *,
+    teacher: Mapping[str, object],
+    modular_rl_from_scratch: Mapping[str, object] | None,
+    modular_distilled: Mapping[str, object],
+    modular_distilled_plus_rl_finetuning: Mapping[str, object] | None = None,
+) -> Dict[str, object]:
+    def _summary(summary: Mapping[str, object] | None) -> Dict[str, float]:
+        raw_payload = dict(summary or {})
+        payload = (
+            raw_payload
+            if "summary" in raw_payload or "suite" in raw_payload
+            else {"summary": raw_payload}
+        )
+        return condition_compact_summary(payload)
+
+    def _metric_delta(
+        candidate_summary: Dict[str, float],
+        reference_summary: Dict[str, float],
+    ) -> Dict[str, float]:
+        return {
+            "scenario_success_rate_delta": round(
+                candidate_summary["scenario_success_rate"]
+                - reference_summary["scenario_success_rate"],
+                6,
+            ),
+            "episode_success_rate_delta": round(
+                candidate_summary["episode_success_rate"]
+                - reference_summary["episode_success_rate"],
+                6,
+            ),
+            "mean_reward_delta": round(
+                candidate_summary["mean_reward"]
+                - reference_summary["mean_reward"],
+                6,
+            ),
+        }
+
+    def _gap_closed_fraction(
+        *,
+        baseline_value: float,
+        teacher_value: float,
+        candidate_value: float,
+    ) -> float | None:
+        teacher_gap = float(teacher_value) - float(baseline_value)
+        if teacher_gap <= 0.0 or math.isclose(
+            teacher_gap,
+            0.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            return None
+        return round(
+            (float(candidate_value) - float(baseline_value)) / teacher_gap,
+            6,
+        )
+
+    teacher_summary = _summary(teacher)
+    baseline_summary = (
+        None
+        if modular_rl_from_scratch is None
+        else _summary(modular_rl_from_scratch)
+    )
+    distilled_summary = _summary(modular_distilled)
+    finetuned_summary = (
+        None
+        if modular_distilled_plus_rl_finetuning is None
+        else _summary(modular_distilled_plus_rl_finetuning)
+    )
+
+    baseline_success = (
+        None
+        if baseline_summary is None
+        else baseline_summary["scenario_success_rate"]
+    )
+    distilled_success = distilled_summary["scenario_success_rate"]
+    finetuned_success = (
+        None
+        if finetuned_summary is None
+        else finetuned_summary["scenario_success_rate"]
+    )
+    teacher_success = teacher_summary["scenario_success_rate"]
+    best_condition_name = "modular_distilled"
+    best_summary = distilled_summary
+    if baseline_success is not None and distilled_summary["scenario_success_rate"] <= baseline_success:
+        if (
+            finetuned_summary is not None
+            and finetuned_summary["scenario_success_rate"]
+            > best_summary["scenario_success_rate"]
+        ):
+            best_condition_name = "modular_distilled_plus_rl_finetuning"
+            best_summary = finetuned_summary
+
+    if baseline_success is None:
+        if teacher_success <= 0.0:
+            answer = "inconclusive"
+            rationale = (
+                "The teacher did not establish a positive no-reflex reference, so expressivity remains unproven."
+            )
+        elif distilled_success > 0.0:
+            answer = "yes"
+            rationale = (
+                f"modular_distilled achieved scenario_success_rate "
+                f"{distilled_success:.3f} against a teacher reference of {teacher_success:.3f}."
+            )
+        elif finetuned_summary is not None and finetuned_success is not None and finetuned_success > 0.0:
+            best_condition_name = "modular_distilled_plus_rl_finetuning"
+            best_summary = finetuned_summary
+            answer = "yes_after_rl_finetuning"
+            rationale = (
+                f"modular_distilled_plus_rl_finetuning achieved scenario_success_rate "
+                f"{finetuned_success:.3f} against a teacher reference of {teacher_success:.3f}."
+            )
+        else:
+            answer = "no"
+            rationale = (
+                "The modular student did not achieve positive no-reflex success after distillation."
+            )
+    elif teacher_success <= baseline_success:
+        answer = "inconclusive"
+        rationale = (
+            "The teacher did not outperform the modular RL baseline, so expressivity remains unproven."
+        )
+    elif best_summary["scenario_success_rate"] > baseline_success:
+        answer = (
+            "yes"
+            if best_condition_name == "modular_distilled"
+            else "yes_after_rl_finetuning"
+        )
+        rationale = (
+            f"{best_condition_name} improved scenario_success_rate from "
+            f"{baseline_success:.3f} to {best_summary['scenario_success_rate']:.3f} "
+            f"against a teacher reference of {teacher_success:.3f}."
+        )
+    elif best_summary["scenario_success_rate"] > 0.0:
+        answer = "partially"
+        rationale = (
+            f"The modular student achieved non-zero scenario_success_rate "
+            f"({best_summary['scenario_success_rate']:.3f}) but did not surpass the RL-only modular baseline ({baseline_success:.3f})."
+        )
+    else:
+        answer = "no"
+        rationale = (
+            "The modular student did not achieve positive no-reflex success after distillation."
+        )
+
+    quantitative_evidence = {
+        "modular_distilled_vs_teacher": _metric_delta(
+            distilled_summary,
+            teacher_summary,
+        ),
+    }
+    if baseline_summary is not None and baseline_success is not None:
+        quantitative_evidence["teacher_vs_modular_rl_from_scratch"] = _metric_delta(
+            teacher_summary,
+            baseline_summary,
+        )
+        quantitative_evidence[
+            "modular_distilled_vs_modular_rl_from_scratch"
+        ] = _metric_delta(
+            distilled_summary,
+            baseline_summary,
+        )
+        quantitative_evidence["gap_closed_fraction"] = {
+            "modular_distilled": _gap_closed_fraction(
+                baseline_value=baseline_success,
+                teacher_value=teacher_success,
+                candidate_value=distilled_success,
+            ),
+            "modular_distilled_plus_rl_finetuning": (
+                None
+                if finetuned_success is None
+                else _gap_closed_fraction(
+                    baseline_value=baseline_success,
+                    teacher_value=teacher_success,
+                    candidate_value=finetuned_success,
+                )
+            ),
+        }
+    if finetuned_summary is not None:
+        quantitative_evidence[
+            "modular_distilled_plus_rl_finetuning_vs_teacher"
+        ] = _metric_delta(finetuned_summary, teacher_summary)
+        if baseline_summary is not None:
+            quantitative_evidence[
+                "modular_distilled_plus_rl_finetuning_vs_modular_rl_from_scratch"
+            ] = _metric_delta(finetuned_summary, baseline_summary)
+
+    return {
+        "question": "Can modular architecture express an effective policy?",
+        "answer": answer,
+        "rationale": rationale,
+        "primary_metric": "scenario_success_rate",
+        "teacher": teacher_summary,
+        "modular_rl_from_scratch": baseline_summary,
+        "modular_distilled": distilled_summary,
+        "modular_distilled_plus_rl_finetuning": finetuned_summary,
+        "best_student_condition": best_condition_name,
+        "quantitative_evidence": quantitative_evidence,
+    }
 
 def build_learning_evidence_deltas(
     conditions: Dict[str, Dict[str, object]],
@@ -440,14 +644,11 @@ def compare_learning_evidence(
     condition_names: Sequence[str] | None = None,
     episodes_per_scenario: int | None = None,
     checkpoint_selection: str = "none",
-    checkpoint_metric: str = "scenario_success_rate",
-    checkpoint_override_penalty: float = 0.0,
-    checkpoint_dominance_penalty: float = 0.0,
-    checkpoint_penalty_mode: CheckpointPenaltyMode | str = (
-        CheckpointPenaltyMode.TIEBREAKER
-    ),
+    checkpoint_selection_config: CheckpointSelectionConfig | None = None,
     checkpoint_interval: int | None = None,
     checkpoint_dir: str | Path | None = None,
+    distillation_config: DistillationConfig | None = None,
+    distillation_training_regime: TrainingRegimeSpec | None = None,
 ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
     """
     Run a registry of learning-evidence conditions across seeds and scenarios and produce compact comparison results.
@@ -490,6 +691,9 @@ def compare_learning_evidence(
         behavior_seeds=seeds,
         ablation_seeds=seeds,
     )
+    checkpoint_selection_config = resolve_checkpoint_selection_config(
+        checkpoint_selection_config
+    )
     scenario_names = list(names or SCENARIO_NAMES)
     condition_specs = resolve_learning_evidence_conditions(condition_names)
     primary_reference_condition = "trained_without_reflex_support"
@@ -516,13 +720,39 @@ def compare_learning_evidence(
 
     for condition_index, condition in enumerate(condition_specs):
         policy_mode = condition.policy_mode.replace("-", "_")
+        training_regime = condition.training_regime
+        training_regime_name = ""
+        resolved_training_regime: str | TrainingRegimeSpec | None = None
+        resolved_training_regime_spec: TrainingRegimeSpec | None = None
+        if isinstance(training_regime, TrainingRegimeSpec):
+            resolved_training_regime = training_regime
+            resolved_training_regime_spec = training_regime
+            training_regime_name = training_regime.name
+        elif training_regime is not None:
+            training_regime_name = str(training_regime)
+            resolved_training_regime = training_regime_name
+            resolved_training_regime_spec = resolve_training_regime(
+                training_regime_name
+            )
+        if (
+            resolved_training_regime_spec is not None
+            and bool(resolved_training_regime_spec.distillation_enabled)
+            and distillation_training_regime is not None
+        ):
+            resolved_training_regime_spec = replace(
+                distillation_training_regime,
+                finetuning_episodes=resolved_training_regime_spec.finetuning_episodes,
+                finetuning_reflex_scale=resolved_training_regime_spec.finetuning_reflex_scale,
+            )
+            resolved_training_regime = resolved_training_regime_spec
+            training_regime_name = resolved_training_regime_spec.name
         if base_config.architecture not in condition.supports_architectures:
             conditions[condition.name] = {
                 "condition": condition.name,
                 "description": condition.description,
                 "policy_mode": policy_mode,
                 "train_budget": condition.train_budget,
-                "training_regime": condition.training_regime,
+                "training_regime": training_regime_name,
                 "checkpoint_source": condition.checkpoint_source,
                 "budget_profile": (
                     long_budget.profile
@@ -535,9 +765,49 @@ def compare_learning_evidence(
                     else base_budget.benchmark_strength
                 ),
                 "config": base_config.to_summary(),
+                "training_regime_summary": (
+                    None
+                    if resolved_training_regime_spec is None
+                    else resolved_training_regime_spec.to_summary()
+                ),
                 "skipped": True,
                 "reason": (
                     f"Condition incompatible with architecture {base_config.architecture!r}."
+                ),
+                **noise_profile_metadata(resolved_noise_profile),
+            }
+            continue
+        if (
+            resolved_training_regime_spec is not None
+            and bool(resolved_training_regime_spec.distillation_enabled)
+            and distillation_config is None
+        ):
+            conditions[condition.name] = {
+                "condition": condition.name,
+                "description": condition.description,
+                "policy_mode": policy_mode,
+                "train_budget": condition.train_budget,
+                "training_regime": training_regime_name,
+                "checkpoint_source": condition.checkpoint_source,
+                "budget_profile": (
+                    long_budget.profile
+                    if condition.train_budget == "long"
+                    else base_budget.profile
+                ),
+                "benchmark_strength": (
+                    long_budget.benchmark_strength
+                    if condition.train_budget == "long"
+                    else base_budget.benchmark_strength
+                ),
+                "config": base_config.to_summary(),
+                "training_regime_summary": (
+                    None
+                    if resolved_training_regime_spec is None
+                    else resolved_training_regime_spec.to_summary()
+                ),
+                "skipped": True,
+                "reason": (
+                    f"Condition {condition.name!r} requires a distillation teacher checkpoint."
                 ),
                 **noise_profile_metadata(resolved_noise_profile),
             }
@@ -551,7 +821,7 @@ def compare_learning_evidence(
                 "description": condition.description,
                 "policy_mode": policy_mode,
                 "train_budget": condition.train_budget,
-                "training_regime": condition.training_regime,
+                "training_regime": training_regime_name,
                 "checkpoint_source": condition.checkpoint_source,
                 "budget_profile": (
                     long_budget.profile
@@ -564,6 +834,11 @@ def compare_learning_evidence(
                     else base_budget.benchmark_strength
                 ),
                 "config": base_config.to_summary(),
+                "training_regime_summary": (
+                    None
+                    if resolved_training_regime_spec is None
+                    else resolved_training_regime_spec.to_summary()
+                ),
                 "skipped": True,
                 "reason": (
                     f"Condition {condition.name!r} requires reflexes to be enabled, "
@@ -626,15 +901,18 @@ def compare_learning_evidence(
                     capture_evaluation_trace=False,
                     debug_trace=False,
                     checkpoint_selection=checkpoint_selection,
-                    checkpoint_metric=checkpoint_metric,
-                    checkpoint_override_penalty=checkpoint_override_penalty,
-                    checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                    checkpoint_penalty_mode=checkpoint_penalty_mode,
+                    checkpoint_selection_config=checkpoint_selection_config,
                     checkpoint_interval=condition_budget.checkpoint_interval,
                     checkpoint_dir=run_checkpoint_dir,
                     checkpoint_scenario_names=scenario_names,
                     selection_scenario_episodes=condition_budget.selection_scenario_episodes,
-                    training_regime=condition.training_regime,
+                    training_regime=resolved_training_regime,
+                    teacher_checkpoint=(
+                        None
+                        if distillation_config is None
+                        else distillation_config.teacher_checkpoint
+                    ),
+                    distillation_config=distillation_config,
                 )
                 train_episodes = int(
                     sim._latest_training_regime_summary.get(
@@ -661,15 +939,18 @@ def compare_learning_evidence(
                     capture_evaluation_trace=False,
                     debug_trace=False,
                     checkpoint_selection=checkpoint_selection,
-                    checkpoint_metric=checkpoint_metric,
-                    checkpoint_override_penalty=checkpoint_override_penalty,
-                    checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                    checkpoint_penalty_mode=checkpoint_penalty_mode,
+                    checkpoint_selection_config=checkpoint_selection_config,
                     checkpoint_interval=long_budget.checkpoint_interval,
                     checkpoint_dir=run_checkpoint_dir,
                     checkpoint_scenario_names=scenario_names,
                     selection_scenario_episodes=long_budget.selection_scenario_episodes,
-                    training_regime=condition.training_regime,
+                    training_regime=resolved_training_regime,
+                    teacher_checkpoint=(
+                        None
+                        if distillation_config is None
+                        else distillation_config.teacher_checkpoint
+                    ),
+                    distillation_config=distillation_config,
                 )
                 train_episodes = int(
                     sim._latest_training_regime_summary.get(
@@ -697,15 +978,18 @@ def compare_learning_evidence(
                     capture_evaluation_trace=False,
                     debug_trace=False,
                     checkpoint_selection=checkpoint_selection,
-                    checkpoint_metric=checkpoint_metric,
-                    checkpoint_override_penalty=checkpoint_override_penalty,
-                    checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                    checkpoint_penalty_mode=checkpoint_penalty_mode,
+                    checkpoint_selection_config=checkpoint_selection_config,
                     checkpoint_interval=base_budget.checkpoint_interval,
                     checkpoint_dir=run_checkpoint_dir,
                     checkpoint_scenario_names=scenario_names,
                     selection_scenario_episodes=base_budget.selection_scenario_episodes,
-                    training_regime=condition.training_regime,
+                    training_regime=resolved_training_regime,
+                    teacher_checkpoint=(
+                        None
+                        if distillation_config is None
+                        else distillation_config.teacher_checkpoint
+                    ),
+                    distillation_config=distillation_config,
                 )
                 train_episodes = int(
                     sim._latest_training_regime_summary.get(
@@ -767,9 +1051,7 @@ def compare_learning_evidence(
             extra_row_metadata = {
                 "learning_evidence_condition": condition.name,
                 "learning_evidence_policy_mode": policy_mode,
-                "learning_evidence_training_regime": (
-                    "" if condition.training_regime is None else condition.training_regime
-                ),
+                "learning_evidence_training_regime": training_regime_name,
                 "learning_evidence_train_episodes": int(train_episodes),
                 "learning_evidence_frozen_after_episode": (
                     "" if frozen_after_episode is None else int(frozen_after_episode)
@@ -834,7 +1116,12 @@ def compare_learning_evidence(
                 "description": condition.description,
                 "policy_mode": policy_mode,
                 "train_budget": condition.train_budget,
-                "training_regime": condition.training_regime,
+                "training_regime": training_regime_name,
+                "training_regime_summary": (
+                    None
+                    if resolved_training_regime_spec is None
+                    else resolved_training_regime_spec.to_summary()
+                ),
                 "train_episodes": int(train_episodes),
                 "frozen_after_episode": frozen_after_episode,
                 "checkpoint_source": (
@@ -858,13 +1145,8 @@ def compare_learning_evidence(
         "long_budget_profile": long_budget.profile,
         "long_budget_benchmark_strength": long_budget.benchmark_strength,
         "checkpoint_selection": checkpoint_selection,
-        "checkpoint_metric": checkpoint_metric,
-        "checkpoint_penalty_config": CheckpointSelectionConfig(
-            metric=checkpoint_metric,
-            override_penalty_weight=checkpoint_override_penalty,
-            dominance_penalty_weight=checkpoint_dominance_penalty,
-            penalty_mode=checkpoint_penalty_mode,
-        ).to_summary(),
+        "checkpoint_metric": checkpoint_selection_config.metric,
+        "checkpoint_penalty_config": checkpoint_selection_config.to_summary(),
         "reference_condition": reference_condition,
         "seeds": list(seed_values),
         "scenario_names": scenario_names,

@@ -2,7 +2,7 @@
 
 Covers:
 - architecture_signature() new structure (action_center, motor_cortex keys)
-- SpiderBrain.ARCHITECTURE_VERSION = 12
+- SpiderBrain.ARCHITECTURE_VERSION = 13
 - SpiderBrain.action_center / motor_cortex network types
 - BrainStep new fields (action_center_logits, action_center_policy,
   action_intent_idx, motor_override, action_center_input)
@@ -81,7 +81,7 @@ class SpiderBrainArchitectureTest(unittest.TestCase):
         self.brain = SpiderBrain(seed=42, module_dropout=0.0)
 
     def test_architecture_version(self) -> None:
-        self.assertEqual(SpiderBrain.ARCHITECTURE_VERSION, 12)
+        self.assertEqual(SpiderBrain.ARCHITECTURE_VERSION, 13)
 
     def test_action_center_is_motor_network(self) -> None:
         """action_center must be a MotorNetwork (has value head)."""
@@ -144,6 +144,24 @@ class SpiderBrainArchitectureTest(unittest.TestCase):
     def test_parameter_norms_motor_cortex_still_present(self) -> None:
         norms = self.brain.parameter_norms()
         self.assertIn("motor_cortex", norms)
+
+    def test_freeze_proposers_defaults_to_active_proposer_modules(self) -> None:
+        self.brain.freeze_proposers()
+        self.assertEqual(
+            self.brain.frozen_module_names(),
+            sorted(spec.name for spec in self.brain.module_bank.enabled_specs),
+        )
+        self.assertFalse(self.brain.is_module_frozen("action_center"))
+        self.assertFalse(self.brain.is_module_frozen("motor_cortex"))
+
+    def test_unfreeze_proposers_can_remove_subset(self) -> None:
+        self.brain.freeze_proposers(("alert_center", "sleep_center"))
+        self.brain.unfreeze_proposers(("sleep_center",))
+        self.assertEqual(self.brain.frozen_module_names(), ["alert_center"])
+
+    def test_freeze_proposers_rejects_non_proposer_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown proposer modules"):
+            self.brain.freeze_proposers(("action_center",))
 
 class BrainStepNewFieldsTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -365,7 +383,7 @@ class BrainStepNewFieldsTest(unittest.TestCase):
     def test_action_center_input_has_expected_dim(self) -> None:
         """action_center_input must equal num_modules*action_dim + action_context_dim."""
         step = self.brain.act(self.obs, bus=None, sample=False)
-        num_modules = len(self.brain.module_bank.specs)
+        num_modules = len(self.brain.module_bank.enabled_specs)
         action_dim = self.brain.action_dim
         expected_dim = num_modules * action_dim + ACTION_CONTEXT_INTERFACE.input_dim
         self.assertEqual(step.action_center_input.shape, (expected_dim,))

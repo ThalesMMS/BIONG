@@ -290,6 +290,21 @@ class ScenarioRegressionTest(ScenarioWorldHelpers, unittest.TestCase):
         self.assertIn("failure_mode", scenario.failure_interpretation)
         self.assertIn("geometric race condition", scenario.budget_note)
 
+    def test_night_rest_metadata_documents_failure_modes_and_budget(self) -> None:
+        scenario = get_scenario("night_rest")
+        self.assertIn("failure_mode", scenario.failure_interpretation)
+        self.assertIn('"never_settles"', scenario.failure_interpretation)
+        self.assertIn('"deep_without_recovery"', scenario.failure_interpretation)
+        self.assertIn("max_steps=14", scenario.budget_note)
+        self.assertEqual(scenario.max_steps, 14)
+
+    def test_two_shelter_tradeoff_metadata_documents_failure_modes(self) -> None:
+        scenario = get_scenario("two_shelter_tradeoff")
+        self.assertIn("failure_mode", scenario.failure_interpretation)
+        self.assertIn('"frozen_in_left_shelter"', scenario.failure_interpretation)
+        self.assertIn('"central_chokepoint_contact"', scenario.failure_interpretation)
+        self.assertIn("central choke column", scenario.budget_note)
+
 class ConflictScenarioMetadataTest(unittest.TestCase):
     """Tests for the new conflict scenarios added in this PR."""
 

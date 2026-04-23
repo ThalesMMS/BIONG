@@ -291,6 +291,17 @@ class ProposalNetworkParameterNormTest(unittest.TestCase):
         ))
         self.assertAlmostEqual(net.parameter_norm(), expected, places=10)
 
+    def test_count_parameters_matches_manual_calculation(self) -> None:
+        net = ProposalNetwork(
+            input_dim=4,
+            hidden_dim=8,
+            output_dim=5,
+            rng=np.random.default_rng(23),
+            name="manual_count",
+        )
+        expected = net.W1.size + net.b1.size + net.W2.size + net.b2.size
+        self.assertEqual(net.count_parameters(), expected)
+
 class RecurrentProposalNetworkTest(unittest.TestCase):
     """RecurrentProposalNetwork exposes the same training surface as ProposalNetwork."""
 
@@ -543,6 +554,17 @@ class RecurrentProposalNetworkTest(unittest.TestCase):
         ))
         self.assertAlmostEqual(net.parameter_norm(), expected, places=10)
 
+    def test_count_parameters_matches_manual_calculation(self) -> None:
+        net = self._make_net(input_dim=6, hidden_dim=10, output_dim=5)
+        expected = (
+            net.W_xh.size
+            + net.W_hh.size
+            + net.b_h.size
+            + net.W_out.size
+            + net.b_out.size
+        )
+        self.assertEqual(net.count_parameters(), expected)
+
     def test_state_dict_values_are_copies(self) -> None:
         net = self._make_net()
         state = net.state_dict()
@@ -602,3 +624,46 @@ class ProposalNetworkForwardDeterminismTest(unittest.TestCase):
         out1 = net.forward(x, store_cache=False)
         out2 = net.forward(x, store_cache=False)
         np.testing.assert_array_equal(out1, out2)
+
+
+class MotorNetworkParameterCountTest(unittest.TestCase):
+    """count_parameters() should include the shared trunk and both output heads."""
+
+    def test_count_parameters_matches_manual_calculation(self) -> None:
+        net = MotorNetwork(
+            input_dim=7,
+            hidden_dim=11,
+            output_dim=5,
+            rng=np.random.default_rng(500),
+        )
+        expected = (
+            net.W1.size
+            + net.b1.size
+            + net.W2_policy.size
+            + net.b2_policy.size
+            + net.W2_value.size
+            + net.b2_value.size
+        )
+        self.assertEqual(net.count_parameters(), expected)
+
+
+class ArbitrationNetworkParameterCountTest(unittest.TestCase):
+    """count_parameters() should include all arbitration heads and the shared trunk."""
+
+    def test_count_parameters_matches_manual_calculation(self) -> None:
+        net = ArbitrationNetwork(
+            input_dim=ArbitrationNetwork.INPUT_DIM,
+            hidden_dim=13,
+            rng=np.random.default_rng(501),
+        )
+        expected = (
+            net.W1.size
+            + net.b1.size
+            + net.W2_valence.size
+            + net.b2_valence.size
+            + net.W2_gate.size
+            + net.b2_gate.size
+            + net.W2_value.size
+            + net.b2_value.size
+        )
+        self.assertEqual(net.count_parameters(), expected)

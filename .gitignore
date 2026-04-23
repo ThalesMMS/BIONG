@@ -182,3 +182,4 @@ cython_debug/
 .DS_Store
 AGENTS.md
 /spider_brain
+/artifacts

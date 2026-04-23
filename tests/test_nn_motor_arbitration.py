@@ -284,6 +284,23 @@ class MotorNetworkParameterNormTest(unittest.TestCase):
         ))
         self.assertAlmostEqual(net.parameter_norm(), expected, places=10)
 
+    def test_count_parameters_matches_manual_calculation(self) -> None:
+        net = MotorNetwork(
+            input_dim=5,
+            hidden_dim=8,
+            output_dim=5,
+            rng=np.random.default_rng(83),
+        )
+        expected = (
+            net.W1.size
+            + net.b1.size
+            + net.W2_policy.size
+            + net.b2_policy.size
+            + net.W2_value.size
+            + net.b2_value.size
+        )
+        self.assertEqual(net.count_parameters(), expected)
+
 class ArbitrationNetworkArchitectureTest(unittest.TestCase):
     """ArbitrationNetwork has a shared hidden layer with valence, gate, and value heads."""
 
@@ -319,8 +336,8 @@ class ArbitrationNetworkArchitectureTest(unittest.TestCase):
         self.assertEqual(net.b1.shape, (12,))
         self.assertEqual(net.W2_valence.shape, (4, 12))
         self.assertEqual(net.b2_valence.shape, (4,))
-        self.assertEqual(net.W2_gate.shape, (6, 12))
-        self.assertEqual(net.b2_gate.shape, (6,))
+        self.assertEqual(net.W2_gate.shape, (ArbitrationNetwork.GATE_DIM, 12))
+        self.assertEqual(net.b2_gate.shape, (ArbitrationNetwork.GATE_DIM,))
         self.assertEqual(net.W2_value.shape, (1, 12))
         self.assertEqual(net.b2_value.shape, (1,))
 
@@ -329,7 +346,7 @@ class ArbitrationNetworkArchitectureTest(unittest.TestCase):
         x = np.random.default_rng(92).standard_normal(ArbitrationNetwork.INPUT_DIM)
         valence_logits, gate_adjustments, value = net.forward(x)
         self.assertEqual(valence_logits.shape, (4,))
-        self.assertEqual(gate_adjustments.shape, (6,))
+        self.assertEqual(gate_adjustments.shape, (ArbitrationNetwork.GATE_DIM,))
         self.assertIsInstance(value, float)
 
     def test_forward_stores_arbitration_cache_with_h_field(self) -> None:
@@ -388,7 +405,7 @@ class ArbitrationNetworkArchitectureTest(unittest.TestCase):
         w2value_before = net.W2_value.copy()
         grad_x = net.backward(
             grad_valence_logits=np.ones(4) * 0.1,
-            grad_gate_adjustments=np.ones(6) * 0.1,
+            grad_gate_adjustments=np.ones(ArbitrationNetwork.GATE_DIM) * 0.1,
             grad_value=0.1,
             lr=0.01,
         )
@@ -402,7 +419,12 @@ class ArbitrationNetworkArchitectureTest(unittest.TestCase):
     def test_backward_raises_without_cache(self) -> None:
         net = self._make_net()
         with self.assertRaises(RuntimeError):
-            net.backward(np.ones(4), np.ones(6), 0.1, lr=0.01)
+            net.backward(
+                np.ones(4),
+                np.ones(ArbitrationNetwork.GATE_DIM),
+                0.1,
+                lr=0.01,
+            )
 
 class ArbitrationNetworkStateDictTest(unittest.TestCase):
     """state_dict and load_state_dict for the arbitration network."""
@@ -533,6 +555,24 @@ class ArbitrationNetworkParameterNormTest(unittest.TestCase):
             + np.sum(net.b2_value ** 2)
         ))
         self.assertAlmostEqual(net.parameter_norm(), expected, places=10)
+
+    def test_count_parameters_matches_manual_calculation(self) -> None:
+        net = ArbitrationNetwork(
+            input_dim=ArbitrationNetwork.INPUT_DIM,
+            hidden_dim=8,
+            rng=np.random.default_rng(123),
+        )
+        expected = (
+            net.W1.size
+            + net.b1.size
+            + net.W2_valence.size
+            + net.b2_valence.size
+            + net.W2_gate.size
+            + net.b2_gate.size
+            + net.W2_value.size
+            + net.b2_value.size
+        )
+        self.assertEqual(net.count_parameters(), expected)
 
 class MotorNetworkValueOnlyTest(unittest.TestCase):
     """value_only() should agree with forward() and not store a cache."""

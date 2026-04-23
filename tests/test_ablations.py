@@ -16,6 +16,7 @@ from spider_cortex_sim.ablations import (
     VISUAL_PREDATOR_SCENARIOS,
     OLFACTORY_PREDATOR_SCENARIOS,
     MONOLITHIC_POLICY_NAME,
+    TRUE_MONOLITHIC_POLICY_NAME,
     canonical_ablation_configs,
     canonical_ablation_scenario_groups,
     compare_predator_type_ablation_performance,
@@ -275,6 +276,44 @@ class BrainAblationConfigValidationTest(unittest.TestCase):
         self.assertTrue(config.is_monolithic)
         self.assertFalse(config.is_modular)
 
+    def test_is_true_monolithic_property_true_only_for_true_monolithic(self) -> None:
+        config = BrainAblationConfig(name="test", architecture="true_monolithic")
+        self.assertTrue(config.is_true_monolithic)
+        self.assertFalse(config.is_modular)
+        self.assertFalse(config.is_monolithic)
+
+    def test_is_true_monolithic_property_false_for_other_architectures(self) -> None:
+        self.assertFalse(
+            BrainAblationConfig(name="test", architecture="modular").is_true_monolithic
+        )
+        self.assertFalse(
+            BrainAblationConfig(name="test", architecture="monolithic").is_true_monolithic
+        )
+
+    def test_true_monolithic_with_disabled_modules_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            BrainAblationConfig(
+                name="test",
+                architecture="true_monolithic",
+                disabled_modules=("alert_center",),
+            )
+
+    def test_true_monolithic_with_recurrent_modules_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            BrainAblationConfig(
+                name="test",
+                architecture="true_monolithic",
+                recurrent_modules=("alert_center",),
+            )
+
+    def test_true_monolithic_with_module_reflex_scales_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            BrainAblationConfig(
+                name="test",
+                architecture="true_monolithic",
+                module_reflex_scales={"alert_center": 0.5},
+            )
+
     def test_is_recurrent_property_true_when_recurrent_modules_present(self) -> None:
         config = BrainAblationConfig(
             name="test",
@@ -302,6 +341,27 @@ class BrainAblationConfigValidationTest(unittest.TestCase):
         self.assertEqual(summary["disabled_modules"], ["visual_cortex"])
         self.assertEqual(summary["recurrent_modules"], [])
         self.assertFalse(summary["is_recurrent"])
+        self.assertEqual(
+            summary["architecture_description"],
+            "full modular with arbitration",
+        )
+
+    def test_to_summary_includes_true_monolithic_architecture_description(self) -> None:
+        config = BrainAblationConfig(
+            name=TRUE_MONOLITHIC_POLICY_NAME,
+            architecture="true_monolithic",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            use_learned_arbitration=False,
+            reflex_scale=0.0,
+        )
+        summary = config.to_summary()
+        self.assertIn("architecture_description", summary)
+        self.assertEqual(
+            summary["architecture_description"],
+            "true monolithic direct control",
+        )
 
     def test_to_summary_disabled_modules_is_list(self) -> None:
         config = BrainAblationConfig(name="test", disabled_modules=("hunger_center",))
@@ -587,6 +647,52 @@ class CanonicalAblationConfigsTest(unittest.TestCase):
         self.assertTrue(counterfactual.uses_counterfactual_credit)
         self.assertFalse(counterfactual.uses_local_credit_only)
 
+    def test_contains_three_center_modular_local_credit(self) -> None:
+        configs = canonical_ablation_configs()
+        variant = configs["three_center_modular_local_credit"]
+        three_center = configs["three_center_modular"]
+        self.assertTrue(variant.is_modular)
+        self.assertTrue(variant.uses_local_credit_only)
+        self.assertEqual(variant.disabled_modules, three_center.disabled_modules)
+        self.assertEqual(variant.recurrent_modules, three_center.recurrent_modules)
+
+    def test_contains_three_center_modular_counterfactual(self) -> None:
+        configs = canonical_ablation_configs()
+        variant = configs["three_center_modular_counterfactual"]
+        three_center = configs["three_center_modular"]
+        self.assertTrue(variant.is_modular)
+        self.assertTrue(variant.uses_counterfactual_credit)
+        self.assertEqual(variant.disabled_modules, three_center.disabled_modules)
+        self.assertEqual(variant.recurrent_modules, three_center.recurrent_modules)
+
+    def test_contains_four_center_modular(self) -> None:
+        configs = canonical_ablation_configs()
+        variant = configs["four_center_modular"]
+        self.assertTrue(variant.is_modular)
+        self.assertEqual(
+            variant.disabled_modules,
+            ("alert_center", "hunger_center", "perception_center", "sleep_center"),
+        )
+        self.assertEqual(variant.recurrent_modules, ())
+
+    def test_contains_four_center_modular_local_credit(self) -> None:
+        configs = canonical_ablation_configs()
+        variant = configs["four_center_modular_local_credit"]
+        four_center = configs["four_center_modular"]
+        self.assertTrue(variant.is_modular)
+        self.assertTrue(variant.uses_local_credit_only)
+        self.assertEqual(variant.disabled_modules, four_center.disabled_modules)
+        self.assertEqual(variant.recurrent_modules, four_center.recurrent_modules)
+
+    def test_contains_four_center_modular_counterfactual(self) -> None:
+        configs = canonical_ablation_configs()
+        variant = configs["four_center_modular_counterfactual"]
+        four_center = configs["four_center_modular"]
+        self.assertTrue(variant.is_modular)
+        self.assertTrue(variant.uses_counterfactual_credit)
+        self.assertEqual(variant.disabled_modules, four_center.disabled_modules)
+        self.assertEqual(variant.recurrent_modules, four_center.recurrent_modules)
+
     def test_contains_constrained_arbitration(self) -> None:
         configs = canonical_ablation_configs()
         constrained = configs["constrained_arbitration"]
@@ -682,6 +788,16 @@ class CanonicalAblationConfigsTest(unittest.TestCase):
         self.assertEqual(mono.architecture, "monolithic")
         self.assertFalse(mono.enable_reflexes)
 
+    def test_contains_true_monolithic_policy(self) -> None:
+        configs = canonical_ablation_configs()
+        mono = configs["true_monolithic_policy"]
+        self.assertEqual(mono.architecture, "true_monolithic")
+        self.assertFalse(mono.enable_reflexes)
+        self.assertFalse(mono.enable_auxiliary_targets)
+        self.assertFalse(mono.use_learned_arbitration)
+        self.assertAlmostEqual(mono.reflex_scale, 0.0)
+        self.assertAlmostEqual(mono.module_dropout, 0.0)
+
     def test_contains_drop_variants_for_all_modules(self) -> None:
         configs = canonical_ablation_configs()
         for module_name in MODULE_NAMES:
@@ -706,22 +822,63 @@ class CanonicalAblationConfigsTest(unittest.TestCase):
         names = canonical_ablation_variant_names()
         self.assertIn("monolithic_policy", names)
 
+    def test_variant_names_include_three_center_modular(self) -> None:
+        names = canonical_ablation_variant_names()
+        self.assertIn("three_center_modular", names)
+
+    def test_three_center_modular_config_matches_three_center_topology(self) -> None:
+        config = canonical_ablation_configs()["three_center_modular"]
+        disabled = set(config.disabled_modules)
+        enabled = set(MODULE_NAMES) - disabled
+        self.assertEqual(
+            disabled,
+            {
+                "visual_cortex",
+                "sensory_cortex",
+                "hunger_center",
+                "sleep_center",
+                "alert_center",
+            },
+        )
+        self.assertEqual(
+            enabled,
+            {
+                "perception_center",
+                "homeostasis_center",
+                "threat_center",
+            },
+        )
+
+    def test_variant_names_include_true_monolithic_policy(self) -> None:
+        names = canonical_ablation_variant_names()
+        self.assertIn("true_monolithic_policy", names)
+        self.assertGreater(
+            names.index("true_monolithic_policy"),
+            names.index("monolithic_policy"),
+        )
+
     def test_variant_names_count(self) -> None:
         """
         Verify the canonical ablation variant name registry contains the expected number of variants.
         
         The test asserts that canonical_ablation_variant_names() returns a list whose length equals:
-        15 (core variants including recurrent, credit, reflex-scale, and arbitration variants)
-        + one drop variant per module (len(MODULE_NAMES)) + 1 (monolithic_policy).
+        21 (core variants including the three-center and four-center rungs plus their
+        local/counterfactual credit variants,
+        recurrent, credit, reflex-scale, and arbitration variants)
+        + one drop variant per module (len(MODULE_NAMES)) + 2 monolithic baselines.
         """
         names = canonical_ablation_variant_names()
-        # modular_full + no_module_dropout + no_module_reflexes
+        # modular_full + no_module_dropout + no_module_reflexes + three_center_modular
+        # + three_center_modular_local_credit + three_center_modular_counterfactual
+        # + four_center_modular + four_center_modular_local_credit
+        # + four_center_modular_counterfactual
         # + modular_recurrent + modular_recurrent_all
         # + local_credit_only + counterfactual_credit
         # + constrained_arbitration + weaker_prior_arbitration + minimal_arbitration
         # + fixed_arbitration_baseline + learned_arbitration_no_regularization
         # + reflex_scale_0_25/_0_50/_0_75 + drop_ variants + monolithic_policy
-        expected_count = 15 + len(MODULE_NAMES) + 1
+        # + true_monolithic_policy
+        expected_count = 21 + len(MODULE_NAMES) + 2
         self.assertEqual(len(names), expected_count)
 
     def test_contains_reflex_scale_0_25(self) -> None:
@@ -769,6 +926,11 @@ class CanonicalAblationConfigsTest(unittest.TestCase):
         variant = configs["monolithic_policy"]
         self.assertAlmostEqual(variant.reflex_scale, 0.0)
 
+    def test_true_monolithic_policy_has_reflex_scale_zero(self) -> None:
+        configs = canonical_ablation_configs()
+        variant = configs["true_monolithic_policy"]
+        self.assertAlmostEqual(variant.reflex_scale, 0.0)
+
     def test_modular_full_has_reflex_scale_one(self) -> None:
         configs = canonical_ablation_configs()
         variant = configs["modular_full"]
@@ -808,9 +970,12 @@ class ResolveAblationConfigsTest(unittest.TestCase):
         self.assertEqual(names, list(canonical_ablation_variant_names()))
 
     def test_specific_names_returns_correct_order(self) -> None:
-        configs = resolve_ablation_configs(["monolithic_policy", "modular_full"])
+        configs = resolve_ablation_configs(
+            ["monolithic_policy", "true_monolithic_policy", "modular_full"]
+        )
         self.assertEqual(configs[0].name, "monolithic_policy")
-        self.assertEqual(configs[1].name, "modular_full")
+        self.assertEqual(configs[1].name, "true_monolithic_policy")
+        self.assertEqual(configs[2].name, "modular_full")
 
     def test_single_name_returns_single_config(self) -> None:
         configs = resolve_ablation_configs(["no_module_dropout"])
@@ -853,6 +1018,26 @@ class ResolveAblationConfigsTest(unittest.TestCase):
         configs = resolve_ablation_configs(["counterfactual_credit"])
         self.assertEqual(configs[0].name, "counterfactual_credit")
         self.assertTrue(configs[0].uses_counterfactual_credit)
+
+    def test_three_center_credit_variants_resolve(self) -> None:
+        configs = resolve_ablation_configs(
+            [
+                "three_center_modular_local_credit",
+                "three_center_modular_counterfactual",
+            ]
+        )
+        self.assertTrue(configs[0].uses_local_credit_only)
+        self.assertTrue(configs[1].uses_counterfactual_credit)
+
+    def test_four_center_credit_variants_resolve(self) -> None:
+        configs = resolve_ablation_configs(
+            [
+                "four_center_modular_local_credit",
+                "four_center_modular_counterfactual",
+            ]
+        )
+        self.assertTrue(configs[0].uses_local_credit_only)
+        self.assertTrue(configs[1].uses_counterfactual_credit)
 
     def test_unknown_name_raises_key_error(self) -> None:
         with self.assertRaises(KeyError):

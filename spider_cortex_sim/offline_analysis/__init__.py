@@ -5,14 +5,25 @@ from __future__ import annotations
 # scope. __all__ still excludes underscore-prefixed helpers from wildcard imports.
 from .cli import build_parser, main, run_offline_analysis
 from .constants import (
+    AUSTERE_SURVIVAL_THRESHOLD,
     BOOTSTRAP_RANDOM_SEED,
     CANONICAL_NOISE_CONDITIONS,
+    CLASSIFICATION_LABELS,
     DEFAULT_BOOTSTRAP_RESAMPLES,
     DEFAULT_CONFIDENCE_LEVEL,
     DEFAULT_MINIMAL_SHAPING_SURVIVAL_THRESHOLD,
     DEFAULT_MODULE_NAMES,
+    FAILS_WITH_SHAPING_THRESHOLD,
+    LADDER_ACTIVE_RUNGS,
+    LADDER_ADJACENT_COMPARISONS,
+    LADDER_PRIMARY_VARIANT_BY_RUNG,
+    LADDER_PROTOCOL_NAMES,
+    LADDER_RUNG_DESCRIPTIONS,
+    LADDER_RUNG_MAPPING,
+    MODULAR_CREDIT_RUNGS,
     REFLEX_DOMINANCE_WARNING_THRESHOLD,
     REFLEX_OVERRIDE_WARNING_THRESHOLD,
+    SHAPING_DEPENDENCE_THRESHOLD,
     SHAPING_DEPENDENCE_WARNING_THRESHOLD,
 )
 from .extractors import (
@@ -26,8 +37,11 @@ from .extractors import (
     _extract_first_present_float,
     _extract_first_present_float_map,
     _extract_reward_from_episode,
+    _compare_credit_across_architectures,
+    extract_credit_metrics,
     _fallback_group_summary,
     _format_failure_indicator,
+    _interpret_credit_failure,
     _noise_robustness_cell_summary,
     _noise_robustness_marginal,
     _noise_robustness_mean,
@@ -50,8 +64,14 @@ from .extractors import (
     _variant_with_minimal_reflex_support,
     build_primary_benchmark,
     build_reflex_dependence_indicators,
+    compute_modularity_conclusion,
+    detect_missing_experiments,
     extract_ablations,
+    extract_ladder_comparison,
+    extract_ladder_profile_comparison,
+    extract_reward_profile_ladder,
     extract_comparisons,
+    extract_unified_ladder_report,
     extract_noise_robustness,
     extract_predator_type_specialization,
     extract_reflex_frequency,
@@ -66,6 +86,7 @@ from .ingestion import (
     load_trace,
     normalize_behavior_rows,
 )
+from .plots import build_capacity_comparison_plot
 from .renderers import (
     _chart_bounds,
     render_bar_chart,
@@ -77,9 +98,14 @@ from .report import build_report_data, write_report
 from .tables import (
     _claim_uncertainty_for_condition,
     build_aggregate_benchmark_tables,
+    build_capacity_sweep_tables,
     build_claim_test_tables,
+    build_credit_assignment_tables,
+    build_credit_table,
     build_diagnostics,
     build_effect_size_tables,
+    build_reward_profile_ladder_tables,
+    build_unified_ladder_tables,
     build_reward_component_rows,
     build_scenario_checks_rows,
 )

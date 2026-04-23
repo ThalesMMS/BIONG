@@ -742,7 +742,9 @@ class PriorityGatingWeightsTest(unittest.TestCase):
     def test_each_valence_has_all_module_entries(self) -> None:
         expected_modules = {
             "alert_center", "hunger_center", "sleep_center",
-            "visual_cortex", "sensory_cortex", SpiderBrain.MONOLITHIC_POLICY_NAME,
+            "visual_cortex", "sensory_cortex",
+            "perception_center", "homeostasis_center", "threat_center",
+            SpiderBrain.MONOLITHIC_POLICY_NAME,
         }
         for valence, weights in PRIORITY_GATING_WEIGHTS.items():
             self.assertEqual(set(weights.keys()), expected_modules,

@@ -151,6 +151,100 @@ def render_line_chart(
     return "".join(lines)
 
 
+def render_multi_line_chart(
+    title: str,
+    series_by_name: Mapping[str, Sequence[Mapping[str, object]]],
+    *,
+    x_key: str = "index",
+    y_key: str = "reward",
+) -> str:
+    populated = {
+        str(name): list(series)
+        for name, series in series_by_name.items()
+        if series
+    }
+    if not populated:
+        return render_placeholder_svg(title, "No data available.")
+    width = 920
+    height = 360
+    left = 70
+    right = 180
+    top = 55
+    bottom = 45
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    all_points = [
+        point
+        for series in populated.values()
+        for point in series
+    ]
+    all_y = [_coerce_float(point.get(y_key)) for point in all_points]
+    min_y, max_y = _chart_bounds(all_y)
+    max_x = max(_coerce_float(point.get(x_key), 1.0) for point in all_points)
+    max_x = max(max_x, 1.0)
+
+    def x_coord(value: float) -> float:
+        return left + (value / max_x) * plot_width
+
+    def y_coord(value: float) -> float:
+        if math.isclose(max_y, min_y):
+            return top + plot_height / 2.0
+        normalized = (value - min_y) / (max_y - min_y)
+        return top + (1.0 - normalized) * plot_height
+
+    colors = (
+        "#2563eb",
+        "#dc2626",
+        "#16a34a",
+        "#9333ea",
+        "#ea580c",
+        "#0891b2",
+    )
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" />',
+        f'<text x="{left}" y="32" font-size="22" font-family="monospace" fill="#0f172a">{escape(title)}</text>',
+        f'<line x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}" stroke="#94a3b8" stroke-width="1"/>',
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" stroke="#94a3b8" stroke-width="1"/>',
+    ]
+    for label in (min_y, (min_y + max_y) / 2.0, max_y):
+        y = y_coord(label)
+        lines.append(
+            f'<text x="12" y="{y + 5:.2f}" font-size="12" font-family="monospace" fill="#475569">{label:.2f}</text>'
+        )
+        lines.append(
+            f'<line x1="{left}" y1="{y:.2f}" x2="{left + plot_width}" y2="{y:.2f}" stroke="#e2e8f0" stroke-width="1"/>'
+        )
+    for index, (name, series) in enumerate(sorted(populated.items())):
+        color = colors[index % len(colors)]
+        points_attr = " ".join(
+            f"{x_coord(_coerce_float(point.get(x_key), 0.0)):.2f},{y_coord(_coerce_float(point.get(y_key), 0.0)):.2f}"
+            for point in sorted(
+                series,
+                key=lambda item: _coerce_float(item.get(x_key), 0.0),
+            )
+        )
+        lines.append(
+            f'<polyline fill="none" stroke="{color}" stroke-width="2.5" points="{points_attr}" />'
+        )
+        for point in series:
+            px = x_coord(_coerce_float(point.get(x_key), 0.0))
+            py = y_coord(_coerce_float(point.get(y_key), 0.0))
+            lines.append(
+                f'<circle cx="{px:.2f}" cy="{py:.2f}" r="3.5" fill="{color}" />'
+            )
+        legend_y = top + 18 + index * 22
+        legend_x = left + plot_width + 20
+        lines.append(
+            f'<line x1="{legend_x}" y1="{legend_y}" x2="{legend_x + 18}" y2="{legend_y}" stroke="{color}" stroke-width="3"/>'
+        )
+        lines.append(
+            f'<text x="{legend_x + 26}" y="{legend_y + 4}" font-size="12" font-family="monospace" fill="#334155">{escape(name)}</text>'
+        )
+    lines.append("</svg>")
+    return "".join(lines)
+
+
 def render_bar_chart(
     title: str,
     items: Sequence[Mapping[str, object]],

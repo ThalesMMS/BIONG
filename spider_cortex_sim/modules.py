@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from math import ceil
+from typing import TYPE_CHECKING, Dict, List, Mapping, Sequence, Union
 
 import numpy as np
 
-from .interfaces import MODULE_INTERFACES, ModuleInterface
+from .interfaces import (
+    MODULE_INTERFACES,
+    MODULE_INTERFACE_BY_NAME,
+    ModuleInterface,
+    VARIANT_MODULES,
+    get_interface_variant,
+    get_variant_levels,
+)
 from .nn import ProposalNetwork, RecurrentProposalNetwork, softmax
+
+logger = logging.getLogger(__name__)
 
 
 MODULE_HIDDEN_DIMS: Dict[str, int] = {
@@ -15,7 +26,41 @@ MODULE_HIDDEN_DIMS: Dict[str, int] = {
     "hunger_center": 26,
     "sleep_center": 24,
     "alert_center": 28,
+    "perception_center": 36,
+    "homeostasis_center": 28,
+    "threat_center": 28,
 }
+
+VARIANT_HIDDEN_DIMS: Dict[tuple[str, int], int] = {
+    (module_name, level): (
+        MODULE_HIDDEN_DIMS[module_name]
+        if level == 4
+        else max(
+            1,
+            ceil(
+                MODULE_HIDDEN_DIMS[module_name]
+                * (
+                    get_interface_variant(module_name, level).input_dim
+                    / MODULE_INTERFACE_BY_NAME[module_name].input_dim
+                )
+            ),
+        )
+    )
+    for module_name in VARIANT_MODULES
+    for level in get_variant_levels(module_name)
+}
+
+
+def get_variant_hidden_dim(module_name: str, level: int) -> int:
+    """
+    Return the hidden size assigned to a diagnostic interface variant.
+    """
+    try:
+        return VARIANT_HIDDEN_DIMS[(module_name, level)]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown variant hidden dim for module '{module_name}' at level {level}."
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -102,7 +147,51 @@ DEFAULT_MODULE_SPECS: List[ModuleSpec] = [
     for interface in MODULE_INTERFACES
 ]
 
-ModuleNetwork = ProposalNetwork | RecurrentProposalNetwork
+
+def _validated_hidden_dims(
+    hidden_dims: Mapping[str, int] | None = None,
+) -> dict[str, int]:
+    if hidden_dims is None:
+        return {}
+    normalized_hidden_dims = dict(hidden_dims)
+    unknown_names = sorted(
+        str(name)
+        for name in normalized_hidden_dims
+        if str(name) not in MODULE_HIDDEN_DIMS
+    )
+    if unknown_names:
+        raise ValueError(f"Unknown module hidden-dim overrides: {unknown_names}")
+    validated: dict[str, int] = {}
+    for raw_name, raw_hidden_dim in normalized_hidden_dims.items():
+        name = str(raw_name)
+        if isinstance(raw_hidden_dim, bool) or not isinstance(raw_hidden_dim, int):
+            raise ValueError(
+                f"hidden_dims[{name!r}] must be an int > 0; got {raw_hidden_dim!r}."
+            )
+        if raw_hidden_dim <= 0:
+            raise ValueError(
+                f"hidden_dims[{name!r}] must be an int > 0; got {raw_hidden_dim!r}."
+            )
+        validated[name] = int(raw_hidden_dim)
+    return validated
+
+
+def module_specs_from_hidden_dims(
+    hidden_dims: Mapping[str, int] | None = None,
+) -> List[ModuleSpec]:
+    merged_hidden_dims = dict(MODULE_HIDDEN_DIMS)
+    merged_hidden_dims.update(_validated_hidden_dims(hidden_dims))
+    return [
+        ModuleSpec(interface=interface, hidden_dim=merged_hidden_dims[interface.name])
+        for interface in MODULE_INTERFACES
+    ]
+
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    ModuleNetwork: TypeAlias = ProposalNetwork | RecurrentProposalNetwork
+else:
+    ModuleNetwork = Union[ProposalNetwork, RecurrentProposalNetwork]
 
 
 class CorticalModuleBank:
@@ -115,6 +204,7 @@ class CorticalModuleBank:
         module_dropout: float = 0.05,
         disabled_modules: Sequence[str] = (),
         recurrent_modules: Sequence[str] = (),
+        hidden_dims: Mapping[str, int] | None = None,
     ) -> None:
         """
         Create a CorticalModuleBank configured to produce proposals for each default module spec.
@@ -126,7 +216,7 @@ class CorticalModuleBank:
             disabled_modules (Sequence[str]): Iterable of module names to mark as permanently disabled; converted to a set of strings internally.
             recurrent_modules (Sequence[str]): Iterable of module names whose proposal networks should maintain recurrent hidden state.
         """
-        self.specs = list(DEFAULT_MODULE_SPECS)
+        self.specs = module_specs_from_hidden_dims(hidden_dims)
         self.action_dim = action_dim
         self.rng = rng
         self.module_dropout = float(module_dropout)
@@ -139,6 +229,13 @@ class CorticalModuleBank:
         unknown_recurrent = self.recurrent_modules - known_names
         if unknown_recurrent:
             raise ValueError(f"Invalid recurrent modules: {sorted(unknown_recurrent)}")
+        self.enabled_specs = [
+            spec for spec in self.specs if spec.name not in self.disabled_modules
+        ]
+        if not self.enabled_specs:
+            raise ValueError(
+                "Invalid disabled modules: all modules were disabled; at least one module must be enabled."
+            )
         self.modules: Dict[str, ModuleNetwork] = {
             spec.name: (
                 RecurrentProposalNetwork
@@ -151,9 +248,9 @@ class CorticalModuleBank:
                 rng=rng,
                 name=spec.name,
             )
-            for spec in self.specs
+            for spec in self.enabled_specs
         }
-        self._active_names: List[str] = [spec.name for spec in self.specs]
+        self._active_names: List[str] = [spec.name for spec in self.enabled_specs]
 
     @property
     def has_recurrent_modules(self) -> bool:
@@ -218,25 +315,22 @@ class CorticalModuleBank:
         outputs: List[ModuleResult] = []
         active_names: List[str] = []
 
-        drop_mask = np.zeros(len(self.specs), dtype=bool)
-        eligible_indices = [
-            idx for idx, spec in enumerate(self.specs)
-            if spec.name not in self.disabled_modules
-        ]
-        if training and self.module_dropout > 0.0 and len(self.specs) > 1:
-            drop_mask = self.rng.random(len(self.specs)) < self.module_dropout
+        drop_mask = np.zeros(len(self.enabled_specs), dtype=bool)
+        eligible_indices = list(range(len(self.enabled_specs)))
+        if training and self.module_dropout > 0.0 and len(self.enabled_specs) > 1:
+            drop_mask = self.rng.random(len(self.enabled_specs)) < self.module_dropout
             if eligible_indices and all(drop_mask[idx] for idx in eligible_indices):
                 keep_idx = eligible_indices[int(self.rng.integers(0, len(eligible_indices)))]
                 drop_mask[keep_idx] = False
 
-        for idx, spec in enumerate(self.specs):
+        for idx, spec in enumerate(self.enabled_specs):
             obs = np.nan_to_num(
                 np.asarray(observation[spec.observation_key], dtype=float),
                 nan=0.0,
                 posinf=1.0,
                 neginf=-1.0,
             )
-            active = spec.name not in self.disabled_modules and not bool(drop_mask[idx])
+            active = not bool(drop_mask[idx])
             if active:
                 logits = self.modules[spec.name].forward(
                     obs,
@@ -297,12 +391,14 @@ class CorticalModuleBank:
         Parameters:
             state (Dict[str, object]): Mapping from module name to its saved state dictionary.
             modules (List[str] | None): Optional list of module names to load. If None, loads all names present in `state`.
+                Entries whose names are not present in `self.modules` are skipped, so absent bank
+                modules do not raise during loading.
         
         Returns:
             List[str]: Names of modules whose state was loaded successfully, in the order processed.
         
         Raises:
-            KeyError: If a requested `name` is not present in `state` ("Module '<name>' not found in the state_dict.") or if `name` is not a known module in the bank ("Module '<name>' does not exist in the module bank.").
+            KeyError: If a requested `name` is not present in `state` ("Module '<name>' not found in the state_dict.").
         """
         loaded: List[str] = []
         targets = modules if modules is not None else list(state.keys())
@@ -310,10 +406,17 @@ class CorticalModuleBank:
             if name not in state:
                 raise KeyError(f"Module '{name}' not found in the state_dict.")
             if name not in self.modules:
-                raise KeyError(f"Module '{name}' does not exist in the module bank.")
+                logger.debug(
+                    "Skipping module %r while loading state_dict: not present in current module bank.",
+                    name,
+                )
+                continue
             self.modules[name].load_state_dict(state[name])
             loaded.append(name)
         return loaded
 
     def parameter_norms(self) -> Dict[str, float]:
         return {name: net.parameter_norm() for name, net in self.modules.items()}
+
+    def parameter_counts(self) -> Dict[str, int]:
+        return {name: net.count_parameters() for name, net in self.modules.items()}

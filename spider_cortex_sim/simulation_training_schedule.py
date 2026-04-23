@@ -19,6 +19,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Sequence
 
+import numpy as np
+
 from .ablations import (
     BrainAblationConfig,
     PROPOSAL_SOURCE_NAMES,
@@ -72,6 +74,7 @@ from .curriculum import (
     resolve_curriculum_profile,
     validate_curriculum_profile,
 )
+from .distillation import DistillationConfig, DistillationDataset
 from .export import (
     compact_aggregate,
     compact_behavior_payload,
@@ -104,6 +107,115 @@ from .simulation_helpers import EXPERIMENT_OF_RECORD_REGIME, CAPABILITY_PROBE_SC
 
 
 class SimulationTrainingScheduleMixin:
+    def _execute_distillation_phase(
+        self,
+        *,
+        dataset: DistillationDataset,
+        distillation_config: DistillationConfig,
+    ) -> Dict[str, object]:
+        """
+        Run offline distillation epochs over a teacher dataset and return the loss curve summary.
+
+        The phase iterates over the dataset for the configured number of epochs,
+        calling `brain.distill_step()` once per sample and aggregating per-epoch
+        mean losses for summary serialization.
+        """
+        if len(dataset) <= 0:
+            raise ValueError("Distillation requires at least one collected sample.")
+        if int(distillation_config.distillation_epochs) <= 0:
+            raise ValueError("Distillation requires distillation_epochs > 0.")
+        epoch_summaries: List[Dict[str, object]] = []
+        rng = np.random.default_rng(int(self.brain.rng.integers(0, 2**31 - 1)))
+        for epoch in range(int(distillation_config.distillation_epochs)):
+            totals = {
+                "total_loss": 0.0,
+                "policy_loss": 0.0,
+                "final_policy_loss": 0.0,
+                "action_center_loss": 0.0,
+                "valence_loss": 0.0,
+                "local_proposal_loss": 0.0,
+                "policy_kl": 0.0,
+            }
+            last_episode: int | None = None
+            self.brain.reset_hidden_states()
+            for sample in dataset.iter_samples(
+                shuffle=bool(distillation_config.shuffle),
+                rng=rng,
+            ):
+                if (
+                    distillation_config.shuffle
+                    or last_episode is None
+                    or int(sample.episode) != last_episode
+                ):
+                    self.brain.reset_hidden_states()
+                step_summary = self.brain.distill_step(
+                    sample.observation,
+                    sample.teacher_policy,
+                    sample.teacher_valence_logits,
+                    teacher_policy_logits=sample.teacher_total_logits,
+                    teacher_action_center_policy=sample.teacher_action_center_policy,
+                    teacher_action_center_logits=sample.teacher_action_center_logits,
+                    teacher_action_intent_idx=sample.teacher_action_intent_idx,
+                    teacher_module_policies=sample.teacher_module_policies,
+                    temperature=distillation_config.temperature,
+                    module_lr=distillation_config.module_lr,
+                    motor_lr=distillation_config.motor_lr,
+                    arbitration_lr=distillation_config.arbitration_lr,
+                    match_local_proposals=distillation_config.match_local_proposals,
+                    loss_weights=distillation_config.loss,
+                )
+                for key in totals:
+                    totals[key] += float(step_summary.get(key, 0.0))
+                last_episode = int(sample.episode)
+            sample_count = max(1, len(dataset))
+            epoch_summaries.append(
+                {
+                    "epoch": int(epoch + 1),
+                    "samples": int(len(dataset)),
+                    "mean_total_loss": float(totals["total_loss"] / sample_count),
+                    "mean_policy_loss": float(totals["policy_loss"] / sample_count),
+                    "mean_final_policy_loss": float(
+                        totals["final_policy_loss"] / sample_count
+                    ),
+                    "mean_action_center_loss": float(
+                        totals["action_center_loss"] / sample_count
+                    ),
+                    "mean_valence_loss": float(
+                        totals["valence_loss"] / sample_count
+                    ),
+                    "mean_local_proposal_loss": float(
+                        totals["local_proposal_loss"] / sample_count
+                    ),
+                    "mean_policy_kl": float(totals["policy_kl"] / sample_count),
+                }
+            )
+        return {
+            "epochs": int(distillation_config.distillation_epochs),
+            "samples": int(len(dataset)),
+            "shuffle": bool(distillation_config.shuffle),
+            "temperature": float(distillation_config.temperature),
+            "learning_rates": {
+                "module_lr": (
+                    float(self.brain.module_lr)
+                    if distillation_config.module_lr is None
+                    else float(distillation_config.module_lr)
+                ),
+                "motor_lr": (
+                    float(self.brain.motor_lr)
+                    if distillation_config.motor_lr is None
+                    else float(distillation_config.motor_lr)
+                ),
+                "arbitration_lr": (
+                    float(self.brain.arbitration_lr)
+                    if distillation_config.arbitration_lr is None
+                    else float(distillation_config.arbitration_lr)
+                ),
+            },
+            "loss": distillation_config.loss.to_summary(),
+            "history": epoch_summaries,
+            "final_epoch": dict(epoch_summaries[-1]),
+        }
+
     def _set_training_regime_metadata(
         self,
         *,
@@ -151,6 +263,7 @@ class SimulationTrainingScheduleMixin:
             )
             regime_summary = {
                 "name": str(training_regime_name or "baseline"),
+                "distillation_enabled": False,
                 "annealing_schedule": schedule.value,
                 "anneal_target_scale": (
                     float(self.brain.config.reflex_scale)
@@ -166,6 +279,9 @@ class SimulationTrainingScheduleMixin:
                 "finetuning_reflex_scale": max(0.0, float(finetuning_reflex_scale)),
                 "loss_override_penalty_weight": 0.0,
                 "loss_dominance_penalty_weight": 0.0,
+                "distillation_epochs": 0,
+                "distillation_temperature": 1.0,
+                "distillation_lr": 0.0,
             }
         main_training_episodes = max(0, int(episodes))
         resolved_finetuning_episodes = max(

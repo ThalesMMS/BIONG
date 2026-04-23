@@ -3,7 +3,22 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 
+from .constants import (
+    AUSTERE_SURVIVAL_THRESHOLD,
+    CLASSIFICATION_LABELS,
+    DEFAULT_CONFIDENCE_LEVEL,
+    LADDER_ADJACENT_COMPARISONS,
+    LADDER_PRIMARY_VARIANT_BY_RUNG,
+    LADDER_PROTOCOL_NAMES,
+    LADDER_RUNG_MAPPING,
+    MODULAR_CREDIT_RUNGS,
+)
 from .extractors import (
+    compare_capacity_totals,
+    extract_architecture_capacity,
+    extract_capacity_sweeps,
+    extract_credit_metrics,
+    extract_reward_profile_ladder,
     _format_failure_indicator,
     _variant_with_minimal_reflex_support,
     build_primary_benchmark,
@@ -21,8 +36,1105 @@ from .uncertainty import (
     _uncertainty_or_empty,
     _uncertainty_or_seed_delta,
 )
-from .utils import _coerce_float, _coerce_optional_float, _mapping_or_empty
+from .utils import (
+    _coerce_float,
+    _coerce_optional_float,
+    _dominant_module_by_score,
+    _mapping_or_empty,
+)
 from .writers import _table
+
+CAPACITY_SWEEP_INTERPRETATION_GUIDANCE = (
+    "Improvement with capacity -> possible undercapacity; "
+    "no improvement -> likely interface/connection/reward issue."
+)
+CREDIT_ASSIGNMENT_SUCCESS_DELTA_THRESHOLD = 0.05
+CREDIT_ASSIGNMENT_STRATEGY_ORDER: tuple[str, ...] = (
+    "broadcast",
+    "local_only",
+    "counterfactual",
+)
+CREDIT_ASSIGNMENT_VARIANT_CANDIDATES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("A2", "broadcast"): ("three_center_modular",),
+    ("A2", "local_only"): (
+        "three_center_modular_local_credit",
+        "three_center_local_credit",
+    ),
+    ("A2", "counterfactual"): (
+        "three_center_modular_counterfactual",
+        "three_center_counterfactual_credit",
+    ),
+    ("A3", "broadcast"): ("four_center_modular",),
+    ("A3", "local_only"): ("four_center_modular_local_credit",),
+    ("A3", "counterfactual"): ("four_center_modular_counterfactual",),
+    ("A4", "broadcast"): ("modular_full",),
+    ("A4", "local_only"): ("local_credit_only",),
+    ("A4", "counterfactual"): ("counterfactual_credit",),
+}
+
+REWARD_PROFILE_LADDER_CONFIDENCE_LEVEL = DEFAULT_CONFIDENCE_LEVEL
+
+UNIFIED_LADDER_HIGH_PRIORITY_EXPERIMENTS: frozenset[str] = frozenset(
+    {
+        "complete_architectural_ladder",
+        "capacity_matched_ladder",
+        "module_interface_sufficiency_suite",
+        "no_reflex_competence_validation",
+        "credit_assignment_variants",
+    }
+)
+UNIFIED_LADDER_MEDIUM_PRIORITY_EXPERIMENTS: frozenset[str] = frozenset(
+    {
+        "cross_profile_ladder_runs",
+        "five_seed_ladder_replication",
+    }
+)
+
+
+def _credit_assignment_rung(variant_name: str) -> str | None:
+    if variant_name in {
+        "three_center_modular",
+        "three_center_modular_local_credit",
+        "three_center_modular_counterfactual",
+        "three_center_local_credit",
+        "three_center_counterfactual_credit",
+    }:
+        return "A2"
+    if variant_name in {
+        "four_center_modular",
+        "four_center_modular_local_credit",
+        "four_center_modular_counterfactual",
+    }:
+        return "A3"
+    if variant_name in {
+        "modular_full",
+        "local_credit_only",
+        "counterfactual_credit",
+    }:
+        return "A4"
+    return None
+
+
+def _unified_ladder_priority(experiment_name: str) -> str:
+    if experiment_name in UNIFIED_LADDER_HIGH_PRIORITY_EXPERIMENTS:
+        return "high"
+    if experiment_name in UNIFIED_LADDER_MEDIUM_PRIORITY_EXPERIMENTS:
+        return "medium"
+    return "low"
+
+
+def _unified_ladder_interpretation(row: Mapping[str, object]) -> str:
+    delta = _coerce_optional_float(row.get("delta"))
+    effect_size = _coerce_optional_float(row.get("cohens_d"))
+    ci_lower = _coerce_optional_float(row.get("ci_lower"))
+    ci_upper = _coerce_optional_float(row.get("ci_upper"))
+    magnitude = str(row.get("effect_magnitude") or "")
+    if delta is None:
+        return "insufficient data"
+    if (
+        ci_lower is not None
+        and ci_upper is not None
+        and ci_lower <= 0.0 <= ci_upper
+    ):
+        return "confidence interval crosses zero"
+    if effect_size is None:
+        return "effect size unavailable"
+    direction = "positive" if delta >= 0.0 else "negative"
+    label = magnitude or "unlabeled"
+    return f"{direction} {label} effect"
+
+
+def build_unified_ladder_tables(
+    unified_ladder_report: Mapping[str, object],
+) -> dict[str, object]:
+    ladder = (
+        dict(unified_ladder_report)
+        if isinstance(unified_ladder_report, Mapping)
+        else {}
+    )
+    if not ladder.get("available"):
+        missing_experiments = [
+            item
+            for item in ladder.get("missing_experiments", [])
+            if isinstance(item, Mapping)
+        ]
+        missing_experiments_rows = [
+            {
+                "experiment": str(item.get("experiment_name") or ""),
+                "description": str(item.get("description") or ""),
+                "priority": _unified_ladder_priority(
+                    str(item.get("experiment_name") or "")
+                ),
+            }
+            for item in missing_experiments
+        ]
+        limitations = [
+            str(item)
+            for item in ladder.get("limitations", [])
+            if item
+        ]
+        if not limitations:
+            limitations.append("No unified architectural ladder report was available.")
+        empty_rows: dict[str, list[dict[str, object]]] = {
+            "primary_rung_table": [],
+            "adjacent_comparison_table": [],
+            "capacity_summary_table": [],
+            "conclusion_table": [],
+            "missing_experiments_table": missing_experiments_rows,
+            "credit_assignment_summary": [],
+            "reward_shaping_sensitivity_summary": [],
+            "no_reflex_competence_summary": [],
+            "capability_probe_boundaries": [],
+        }
+        empty_tables = {
+            name: _table((), ())
+            for name in empty_rows
+            if name != "missing_experiments_table"
+        }
+        empty_tables["missing_experiments_table"] = _table(
+            ("experiment", "description", "priority"),
+            missing_experiments_rows,
+        )
+        return {
+            "available": False,
+            "rows": empty_rows,
+            "tables": empty_tables,
+            "conclusion": "",
+            "conclusion_rationale": "",
+            "missing_experiments": missing_experiments_rows,
+            "limitations": limitations,
+        }
+
+    ladder_table = _mapping_or_empty(ladder.get("ladder_table"))
+    ladder_rows = [
+        row
+        for row in ladder_table.get("rows", [])
+        if isinstance(row, Mapping)
+    ]
+    primary_rung_rows = [
+        {
+            "rung": str(row.get("rung") or ""),
+            "protocol_name": str(row.get("protocol_name") or ""),
+            "variant": str(row.get("variant") or ""),
+            "present": bool(row.get("present")),
+            "total_parameters": int(_coerce_float(row.get("total_trainable"), 0.0)),
+            "scenario_success_rate": _coerce_optional_float(
+                row.get("scenario_success_rate")
+            ),
+            "ci_lower": _coerce_optional_float(
+                row.get("scenario_success_rate_ci_lower")
+            ),
+            "ci_upper": _coerce_optional_float(
+                row.get("scenario_success_rate_ci_upper")
+            ),
+            "effect_size_vs_a0": _coerce_optional_float(row.get("effect_size_vs_a0")),
+            "effect_magnitude": str(row.get("effect_magnitude_vs_a0") or ""),
+            "n_seeds": int(_coerce_float(row.get("n_seeds"), 0.0)),
+            "limitations": (
+                list(row.get("limitations", []))
+                if isinstance(row.get("limitations"), list)
+                else str(row.get("limitations") or "")
+            ),
+        }
+        for row in ladder_rows
+    ]
+
+    adjacent_comparison_rows = [
+        {
+            "baseline_rung": str(item.get("baseline_rung") or ""),
+            "comparison_rung": str(item.get("comparison_rung") or ""),
+            "delta": _coerce_optional_float(item.get("scenario_success_rate_delta")),
+            "ci_lower": _coerce_optional_float(item.get("delta_ci_lower")),
+            "ci_upper": _coerce_optional_float(item.get("delta_ci_upper")),
+            "cohens_d": _coerce_optional_float(item.get("cohens_d")),
+            "effect_magnitude": str(item.get("magnitude_label") or ""),
+            "interpretation": _unified_ladder_interpretation(
+                {
+                    "delta": item.get("scenario_success_rate_delta"),
+                    "ci_lower": item.get("delta_ci_lower"),
+                    "ci_upper": item.get("delta_ci_upper"),
+                    "cohens_d": item.get("cohens_d"),
+                    "effect_magnitude": item.get("magnitude_label"),
+                }
+            ),
+        }
+        for item in ladder.get("adjacent_comparisons", [])
+        if isinstance(item, Mapping)
+    ]
+
+    capacity = _mapping_or_empty(ladder.get("capacity_matched_comparison"))
+    capacity_summary_rows = (
+        [
+            {
+                "capacity_matched": bool(capacity.get("capacity_matched")),
+                "ratio": _coerce_optional_float(capacity.get("ratio")),
+                "largest_variant": str(capacity.get("largest_variant") or ""),
+                "smallest_variant": str(capacity.get("smallest_variant") or ""),
+            }
+        ]
+        if bool(capacity.get("available"))
+        else []
+    )
+
+    confounds = ladder.get("confounds", [])
+    confounding_factors = (
+        "; ".join(str(item) for item in confounds if item)
+        if isinstance(confounds, list) and confounds
+        else ""
+    )
+    overall = _mapping_or_empty(ladder.get("overall_comparison"))
+    conclusion_table_rows = (
+        [
+            {
+                "conclusion": str(ladder.get("conclusion") or ""),
+                "rationale": str(ladder.get("conclusion_rationale") or ""),
+                "confidence_level": _coerce_optional_float(
+                    overall.get("confidence_level")
+                )
+                or DEFAULT_CONFIDENCE_LEVEL,
+                "confounding_factors": confounding_factors,
+            }
+        ]
+        if bool(ladder.get("conclusion"))
+        else []
+    )
+
+    missing_experiment_rows = (
+        [
+            {
+                "experiment": str(item.get("experiment_name") or ""),
+                "description": str(item.get("description") or ""),
+                "priority": _unified_ladder_priority(
+                    str(item.get("experiment_name") or "")
+                ),
+            }
+            for item in ladder.get("missing_experiments", [])
+            if isinstance(item, Mapping)
+        ]
+        if bool(ladder.get("available"))
+        else []
+    )
+
+    credit_assignment = _mapping_or_empty(ladder.get("credit_assignment_comparison"))
+    credit_assignment_rows = (
+        [
+            {
+                "rung": str(item.get("rung") or ""),
+                "local_only_delta_vs_broadcast": _coerce_optional_float(
+                    item.get("local_only_delta_vs_broadcast")
+                ),
+                "counterfactual_delta_vs_broadcast": _coerce_optional_float(
+                    item.get("counterfactual_delta_vs_broadcast")
+                ),
+                "strategies_present": ", ".join(
+                    str(entry)
+                    for entry in item.get("strategies_present", [])
+                )
+                if isinstance(item.get("strategies_present"), list)
+                else "",
+            }
+            for item in credit_assignment.get("rows", [])
+            if isinstance(item, Mapping)
+        ]
+        if bool(credit_assignment.get("available"))
+        else []
+    )
+
+    reward_shaping = _mapping_or_empty(ladder.get("reward_shaping_sensitivity"))
+    reward_shaping_rows = (
+        [
+            {
+                "rung": str(item.get("rung") or ""),
+                "classic_minus_austere": _coerce_optional_float(
+                    item.get("classic_minus_austere")
+                ),
+                "classic_effect_size": _coerce_optional_float(
+                    item.get("classic_effect_size")
+                ),
+                "ecological_minus_austere": _coerce_optional_float(
+                    item.get("ecological_minus_austere")
+                ),
+                "ecological_effect_size": _coerce_optional_float(
+                    item.get("ecological_effect_size")
+                ),
+            }
+            for item in reward_shaping.get("rows", [])
+            if isinstance(item, Mapping)
+        ]
+        if bool(reward_shaping.get("available"))
+        else []
+    )
+
+    no_reflex = _mapping_or_empty(ladder.get("no_reflex_competence"))
+    no_reflex_rows = (
+        [
+            {
+                "rung": str(item.get("rung") or ""),
+                "no_reflex_evaluated": bool(item.get("no_reflex_evaluated")),
+                "eval_reflex_scale": _coerce_optional_float(
+                    item.get("eval_reflex_scale")
+                ),
+                "scenario_success_rate": _coerce_optional_float(
+                    item.get("scenario_success_rate")
+                ),
+            }
+            for item in no_reflex.get("rungs", [])
+            if isinstance(item, Mapping)
+        ]
+        if bool(no_reflex.get("available"))
+        else []
+    )
+
+    capability_probes = _mapping_or_empty(ladder.get("capability_probe_boundaries"))
+    capability_probe_rows = (
+        [
+            {
+                "scenario": str(item.get("scenario") or ""),
+                "requirement_level": str(item.get("requirement_level") or ""),
+                "first_competent_rung": str(item.get("first_competent_rung") or ""),
+                "highest_competent_rung": str(item.get("highest_competent_rung") or ""),
+                "rationale": str(item.get("rationale") or ""),
+            }
+            for item in capability_probes.get("rows", [])
+            if isinstance(item, Mapping)
+        ]
+        if bool(capability_probes.get("available"))
+        else []
+    )
+
+    limitations = [
+        str(item)
+        for item in ladder.get("limitations", [])
+        if item
+    ]
+    if not primary_rung_rows:
+        limitations.append("Unified ladder primary rung table had no rows.")
+    if not adjacent_comparison_rows:
+        limitations.append("Unified ladder adjacent comparison table had no rows.")
+
+    rows = {
+        "primary_rung_table": primary_rung_rows,
+        "adjacent_comparison_table": adjacent_comparison_rows,
+        "capacity_summary_table": capacity_summary_rows,
+        "conclusion_table": conclusion_table_rows,
+        "missing_experiments_table": missing_experiment_rows,
+        "credit_assignment_summary": credit_assignment_rows,
+        "reward_shaping_sensitivity_summary": reward_shaping_rows,
+        "no_reflex_competence_summary": no_reflex_rows,
+        "capability_probe_boundaries": capability_probe_rows,
+    }
+    tables = {
+        "primary_rung_table": _table(
+            (
+                "rung",
+                "protocol_name",
+                "variant",
+                "present",
+                "total_parameters",
+                "scenario_success_rate",
+                "ci_lower",
+                "ci_upper",
+                "effect_size_vs_a0",
+                "effect_magnitude",
+                "n_seeds",
+                "limitations",
+            ),
+            primary_rung_rows,
+        ),
+        "adjacent_comparison_table": _table(
+            (
+                "baseline_rung",
+                "comparison_rung",
+                "delta",
+                "ci_lower",
+                "ci_upper",
+                "cohens_d",
+                "effect_magnitude",
+                "interpretation",
+            ),
+            adjacent_comparison_rows,
+        ),
+        "capacity_summary_table": _table(
+            (
+                "capacity_matched",
+                "ratio",
+                "largest_variant",
+                "smallest_variant",
+            ),
+            capacity_summary_rows,
+        ),
+        "conclusion_table": _table(
+            (
+                "conclusion",
+                "rationale",
+                "confidence_level",
+                "confounding_factors",
+            ),
+            conclusion_table_rows,
+        ),
+        "missing_experiments_table": _table(
+            ("experiment", "description", "priority"),
+            missing_experiment_rows,
+        ),
+        "credit_assignment_summary": _table(
+            (
+                "rung",
+                "local_only_delta_vs_broadcast",
+                "counterfactual_delta_vs_broadcast",
+                "strategies_present",
+            ),
+            credit_assignment_rows,
+        ),
+        "reward_shaping_sensitivity_summary": _table(
+            (
+                "rung",
+                "classic_minus_austere",
+                "classic_effect_size",
+                "ecological_minus_austere",
+                "ecological_effect_size",
+            ),
+            reward_shaping_rows,
+        ),
+        "no_reflex_competence_summary": _table(
+            (
+                "rung",
+                "no_reflex_evaluated",
+                "eval_reflex_scale",
+                "scenario_success_rate",
+            ),
+            no_reflex_rows,
+        ),
+        "capability_probe_boundaries": _table(
+            (
+                "scenario",
+                "requirement_level",
+                "first_competent_rung",
+                "highest_competent_rung",
+                "rationale",
+            ),
+            capability_probe_rows,
+        ),
+    }
+    return {
+        "available": True,
+        "rows": rows,
+        "tables": tables,
+        "conclusion": str(ladder.get("conclusion") or ""),
+        "conclusion_rationale": str(ladder.get("conclusion_rationale") or ""),
+        "confounds": list(confounds) if isinstance(confounds, list) else [],
+        "missing_experiments": list(missing_experiment_rows),
+        "limitations": limitations,
+        "credit_assignment_comparison": dict(
+            _mapping_or_empty(ladder.get("credit_assignment_comparison"))
+        ),
+        "reward_shaping_sensitivity": dict(
+            _mapping_or_empty(ladder.get("reward_shaping_sensitivity"))
+        ),
+        "no_reflex_competence": dict(
+            _mapping_or_empty(ladder.get("no_reflex_competence"))
+        ),
+        "capability_probe_boundaries_data": dict(
+            _mapping_or_empty(ladder.get("capability_probe_boundaries"))
+        ),
+        "source_report": ladder,
+    }
+
+
+def _credit_assignment_strategy(
+    variant_name: str,
+    payload: Mapping[str, object],
+) -> str:
+    config = _mapping_or_empty(payload.get("config"))
+    strategy = str(config.get("credit_strategy") or "")
+    if strategy in CREDIT_ASSIGNMENT_STRATEGY_ORDER:
+        return strategy
+    if variant_name in {
+        "three_center_modular_local_credit",
+        "three_center_local_credit",
+        "four_center_modular_local_credit",
+        "local_credit_only",
+    }:
+        return "local_only"
+    if variant_name in {
+        "three_center_modular_counterfactual",
+        "three_center_counterfactual_credit",
+        "four_center_modular_counterfactual",
+        "counterfactual_credit",
+    }:
+        return "counterfactual"
+    return "broadcast"
+
+
+def _credit_assignment_variant_rows(
+    ablations: Mapping[str, object],
+) -> tuple[
+    dict[tuple[str, str], tuple[str, Mapping[str, object]]],
+    list[str],
+]:
+    variants = {
+        str(variant_name): _variant_with_minimal_reflex_support(payload)
+        for variant_name, payload in _mapping_or_empty(ablations.get("variants")).items()
+        if isinstance(payload, Mapping)
+    }
+    selected: dict[tuple[str, str], tuple[str, Mapping[str, object]]] = {}
+    limitations: list[str] = []
+    for key, candidates in CREDIT_ASSIGNMENT_VARIANT_CANDIDATES.items():
+        selected_variant: tuple[str, Mapping[str, object]] | None = None
+        for candidate in candidates:
+            payload = variants.get(candidate)
+            if isinstance(payload, Mapping):
+                selected_variant = (candidate, payload)
+                break
+        if selected_variant is None:
+            rung, strategy = key
+            for variant_name, payload in sorted(variants.items()):
+                if (
+                    _credit_assignment_rung(variant_name) == rung
+                    and _credit_assignment_strategy(variant_name, payload) == strategy
+                ):
+                    selected_variant = (variant_name, payload)
+                    break
+        if selected_variant is None:
+            limitations.append(
+                f"Credit-assignment comparison is missing {key[0]} {key[1]}."
+            )
+            continue
+        selected[key] = selected_variant
+    return selected, limitations
+
+
+def _credit_assignment_interpretations(
+    strategy_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    rows_by_key = {
+        (str(row.get("rung") or ""), str(row.get("credit_strategy") or "")): row
+        for row in strategy_rows
+    }
+    interpretations: list[dict[str, object]] = []
+
+    local_failures: list[str] = []
+    global_credit_failures: list[str] = []
+    counterfactual_deltas: dict[str, float] = {}
+
+    for rung in MODULAR_CREDIT_RUNGS:
+        broadcast = rows_by_key.get((rung, "broadcast"))
+        local_only = rows_by_key.get((rung, "local_only"))
+        counterfactual = rows_by_key.get((rung, "counterfactual"))
+        if isinstance(broadcast, Mapping) and isinstance(local_only, Mapping):
+            local_delta = _coerce_float(local_only.get("scenario_success_delta_vs_broadcast"))
+            if local_delta <= -CREDIT_ASSIGNMENT_SUCCESS_DELTA_THRESHOLD:
+                local_failures.append(rung)
+                interpretations.append(
+                    {
+                        "scope": rung,
+                        "finding": "Failure by local credit insufficiency",
+                        "evidence": round(local_delta, 6),
+                        "interpretation": (
+                            f"`local_only` trails broadcast by {local_delta:.2f} on {rung}, "
+                            "so purely local gradients look insufficient at this rung."
+                        ),
+                    }
+                )
+            elif local_delta >= CREDIT_ASSIGNMENT_SUCCESS_DELTA_THRESHOLD:
+                global_credit_failures.append(rung)
+                interpretations.append(
+                    {
+                        "scope": rung,
+                        "finding": "Failure by excessive global credit",
+                        "evidence": round(local_delta, 6),
+                        "interpretation": (
+                            f"`local_only` beats broadcast by {local_delta:.2f} on {rung}, "
+                            "so uniform global broadcast looks over-distributed here."
+                        ),
+                    }
+                )
+        if isinstance(broadcast, Mapping) and isinstance(counterfactual, Mapping):
+            counterfactual_delta = _coerce_float(
+                counterfactual.get("scenario_success_delta_vs_broadcast")
+            )
+            counterfactual_deltas[rung] = counterfactual_delta
+            if counterfactual_delta >= CREDIT_ASSIGNMENT_SUCCESS_DELTA_THRESHOLD:
+                interpretations.append(
+                    {
+                        "scope": rung,
+                        "finding": "Counterfactual credit improvement",
+                        "evidence": round(counterfactual_delta, 6),
+                        "interpretation": (
+                            f"`counterfactual` beats broadcast by {counterfactual_delta:.2f} "
+                            f"on {rung}, suggesting targeted global credit is more useful than "
+                            "uniform broadcast at this architecture."
+                        ),
+                    }
+                )
+
+    if local_failures:
+        if set(local_failures) == set(MODULAR_CREDIT_RUNGS):
+            scope_text = "`local_only` fails across every modular rung that was evaluated."
+        elif len(local_failures) == 1:
+            scope_text = (
+                f"`local_only` fails primarily at {local_failures[0]} in the modular ladder."
+            )
+        else:
+            scope_text = (
+                "`local_only` shows mixed failures across the modular ladder: "
+                + ", ".join(local_failures)
+                + "."
+            )
+        interpretations.append(
+            {
+                "scope": "/".join(MODULAR_CREDIT_RUNGS),
+                "finding": "Local-only failure scope",
+                "evidence": ", ".join(local_failures),
+                "interpretation": scope_text,
+            }
+        )
+
+    if global_credit_failures:
+        interpretations.append(
+            {
+                "scope": "/".join(MODULAR_CREDIT_RUNGS),
+                "finding": "Global-credit failure scope",
+                "evidence": ", ".join(global_credit_failures),
+                "interpretation": (
+                    "Uniform broadcast underperforms a local-only baseline at "
+                    + ", ".join(global_credit_failures)
+                    + "."
+                ),
+            }
+        )
+
+    available_counterfactual_rungs = [
+        rung for rung in MODULAR_CREDIT_RUNGS if rung in counterfactual_deltas
+    ]
+    if len(available_counterfactual_rungs) >= 2:
+        first_rung = available_counterfactual_rungs[0]
+        last_rung = available_counterfactual_rungs[-1]
+        cf_first = counterfactual_deltas[first_rung]
+        cf_last = counterfactual_deltas[last_rung]
+        diff = cf_last - cf_first
+        if diff >= CREDIT_ASSIGNMENT_SUCCESS_DELTA_THRESHOLD:
+            text = (
+                f"`counterfactual` helps more in {last_rung} than {first_rung} "
+                f"({cf_last:.2f} vs {cf_first:.2f} "
+                "delta vs broadcast), consistent with larger gains when there are more modules."
+            )
+        elif diff <= -CREDIT_ASSIGNMENT_SUCCESS_DELTA_THRESHOLD:
+            text = (
+                f"`counterfactual` helps more in {first_rung} than {last_rung} "
+                f"({cf_first:.2f} vs {cf_last:.2f} "
+                "delta vs broadcast), so extra modularity did not amplify its benefit here."
+            )
+        else:
+            text = (
+                f"`counterfactual` has similar impact across {first_rung} and {last_rung} "
+                f"({cf_first:.2f} vs {cf_last:.2f} delta vs broadcast)."
+            )
+        interpretations.append(
+            {
+                "scope": f"{first_rung}/{last_rung}",
+                "finding": "Counterfactual scaling across the ladder",
+                "evidence": round(diff, 6),
+                "interpretation": text,
+            }
+        )
+    return interpretations
+
+
+def build_credit_assignment_tables(
+    ablations: Mapping[str, object],
+) -> dict[str, object]:
+    """
+    Build credit-assignment tables for the modular ladder stages.
+
+    The output is organized as three tables:
+    - `strategy_summary`: one row per architecture rung and credit strategy.
+    - `module_credit`: one row per architecture rung, credit strategy, and module.
+    - `scenario_success`: one row per architecture rung, credit strategy, and scenario.
+    """
+    selected, limitations = _credit_assignment_variant_rows(ablations)
+    strategy_rows: list[dict[str, object]] = []
+    module_rows: list[dict[str, object]] = []
+    scenario_rows: list[dict[str, object]] = []
+
+    for rung in MODULAR_CREDIT_RUNGS:
+        broadcast_payload_tuple = selected.get((rung, "broadcast"))
+        broadcast_summary = (
+            _mapping_or_empty(broadcast_payload_tuple[1].get("summary"))
+            if broadcast_payload_tuple is not None
+            else {}
+        )
+        broadcast_success = _coerce_optional_float(
+            broadcast_summary.get("scenario_success_rate")
+        )
+        for strategy in CREDIT_ASSIGNMENT_STRATEGY_ORDER:
+            selected_payload = selected.get((rung, strategy))
+            if selected_payload is None:
+                continue
+            variant_name, payload = selected_payload
+            summary = _mapping_or_empty(payload.get("summary"))
+            suite = _mapping_or_empty(payload.get("suite"))
+            summary_row = {
+                "rung": rung,
+                "protocol_name": LADDER_PROTOCOL_NAMES.get(rung, rung),
+                "variant": variant_name,
+                "architecture": str(
+                    _mapping_or_empty(payload.get("config")).get("architecture") or ""
+                ),
+                "credit_strategy": strategy,
+                "scenario_success_rate": round(
+                    _coerce_float(summary.get("scenario_success_rate")),
+                    6,
+                ),
+                "episode_success_rate": round(
+                    _coerce_float(summary.get("episode_success_rate")),
+                    6,
+                ),
+                "scenario_success_delta_vs_broadcast": (
+                    round(
+                        _coerce_float(summary.get("scenario_success_rate"))
+                        - broadcast_success,
+                        6,
+                    )
+                    if broadcast_success is not None
+                    else None
+                ),
+                "dominant_module": str(
+                    summary.get("dominant_module")
+                    or _dominant_module_by_score(
+                        _mapping_or_empty(summary.get("dominant_module_distribution"))
+                    )
+                    or ""
+                ),
+                "mean_dominant_module_share": round(
+                    _coerce_float(summary.get("mean_dominant_module_share")),
+                    6,
+                ),
+                "mean_effective_module_count": round(
+                    _coerce_float(summary.get("mean_effective_module_count")),
+                    6,
+                ),
+                "source": f"ablations.variants.{variant_name}.summary",
+            }
+            strategy_rows.append(summary_row)
+
+            module_credit_weights = _mapping_or_empty(
+                summary.get("mean_module_credit_weights")
+            )
+            module_gradient_norms = _mapping_or_empty(
+                summary.get("module_gradient_norm_means")
+            )
+            counterfactual_credit_weights = _mapping_or_empty(
+                summary.get("mean_counterfactual_credit_weights")
+            )
+            module_contribution_share = _mapping_or_empty(
+                summary.get("mean_module_contribution_share")
+            )
+            dominant_module_distribution = _mapping_or_empty(
+                summary.get("dominant_module_distribution")
+            )
+            dominant_module_name = str(summary.get("dominant_module") or "")
+            module_names = sorted(
+                {
+                    *module_credit_weights.keys(),
+                    *module_gradient_norms.keys(),
+                    *counterfactual_credit_weights.keys(),
+                    *module_contribution_share.keys(),
+                    *dominant_module_distribution.keys(),
+                    *((dominant_module_name,) if dominant_module_name else ()),
+                }
+            )
+            for module_name in module_names:
+                module_rows.append(
+                    {
+                        "rung": rung,
+                        "protocol_name": summary_row["protocol_name"],
+                        "variant": variant_name,
+                        "credit_strategy": strategy,
+                        "module": str(module_name),
+                        "mean_module_credit_weight": round(
+                            _coerce_float(module_credit_weights.get(module_name)),
+                            6,
+                        ),
+                        "mean_module_gradient_norm": round(
+                            _coerce_float(module_gradient_norms.get(module_name)),
+                            6,
+                        ),
+                        "mean_counterfactual_credit_weight": round(
+                            _coerce_float(counterfactual_credit_weights.get(module_name)),
+                            6,
+                        ),
+                        "mean_module_contribution_share": round(
+                            _coerce_float(module_contribution_share.get(module_name)),
+                            6,
+                        ),
+                        "dominant_module_rate": round(
+                            _coerce_float(dominant_module_distribution.get(module_name)),
+                            6,
+                        ),
+                        "scenario_success_rate": summary_row["scenario_success_rate"],
+                    }
+                )
+
+            for scenario_name, scenario_payload in sorted(suite.items()):
+                if not isinstance(scenario_payload, Mapping):
+                    continue
+                scenario_rows.append(
+                    {
+                        "rung": rung,
+                        "protocol_name": summary_row["protocol_name"],
+                        "variant": variant_name,
+                        "credit_strategy": strategy,
+                        "scenario": str(scenario_name),
+                        "success_rate": round(
+                            _coerce_float(scenario_payload.get("success_rate")),
+                            6,
+                        ),
+                        "source": f"ablations.variants.{variant_name}.suite.{scenario_name}",
+                    }
+                )
+
+    interpretation_rows = _credit_assignment_interpretations(strategy_rows)
+    if not strategy_rows:
+        limitations.append(
+            "No modular-ladder credit-assignment variants were available in the ablation payload."
+        )
+    return {
+        "available": bool(strategy_rows),
+        "strategy_summary": _table(
+            (
+                "rung",
+                "protocol_name",
+                "variant",
+                "architecture",
+                "credit_strategy",
+                "scenario_success_rate",
+                "episode_success_rate",
+                "scenario_success_delta_vs_broadcast",
+                "dominant_module",
+                "mean_dominant_module_share",
+                "mean_effective_module_count",
+                "source",
+            ),
+            strategy_rows,
+        ),
+        "module_credit": _table(
+            (
+                "rung",
+                "protocol_name",
+                "variant",
+                "credit_strategy",
+                "module",
+                "mean_module_credit_weight",
+                "mean_module_gradient_norm",
+                "mean_counterfactual_credit_weight",
+                "mean_module_contribution_share",
+                "dominant_module_rate",
+                "scenario_success_rate",
+            ),
+            module_rows,
+        ),
+        "scenario_success": _table(
+            (
+                "rung",
+                "protocol_name",
+                "variant",
+                "credit_strategy",
+                "scenario",
+                "success_rate",
+                "source",
+            ),
+            scenario_rows,
+        ),
+        "interpretations": list(interpretation_rows),
+        "limitations": limitations,
+    }
+
+
+def build_credit_table(
+    summary: Mapping[str, object],
+) -> dict[str, object]:
+    """
+    Build a machine-readable credit metrics table for benchmark packages.
+
+    Rows are emitted per variant and module using the credit metrics available in
+    summary blocks. The table is intentionally flat and light on interpretation.
+    """
+    credit_metrics = extract_credit_metrics(summary, ())
+    behavior_evaluation = _mapping_or_empty(summary.get("behavior_evaluation"))
+    ablations = _mapping_or_empty(behavior_evaluation.get("ablations"))
+    ablation_variants = _mapping_or_empty(ablations.get("variants"))
+    config = _mapping_or_empty(summary.get("config"))
+    brain_config = _mapping_or_empty(config.get("brain"))
+
+    rows: list[dict[str, object]] = []
+    mean_credit_by_strategy_module: list[dict[str, object]] = []
+    concentration_rows: list[dict[str, object]] = []
+    limitations: list[str] = []
+
+    credit_means_by_strategy_module: defaultdict[tuple[str, str], list[float]] = defaultdict(list)
+    effective_module_count_by_strategy: defaultdict[str, list[float]] = defaultdict(list)
+
+    def variant_summary_payload(variant_name: str) -> Mapping[str, object]:
+        ablation_payload = _mapping_or_empty(ablation_variants.get(variant_name))
+        if ablation_payload:
+            normalized_payload = _variant_with_minimal_reflex_support(ablation_payload)
+            return _mapping_or_empty(normalized_payload.get("summary"))
+        current_name = str(
+            brain_config.get("name")
+            or config.get("name")
+            or "current_run"
+        )
+        if variant_name != current_name:
+            return {}
+        for block in (
+            _mapping_or_empty(summary.get("evaluation_without_reflex_support")).get("summary"),
+            summary.get("evaluation"),
+            behavior_evaluation.get("summary"),
+            summary.get("training"),
+        ):
+            payload = _mapping_or_empty(block)
+            if payload:
+                return payload
+        return {}
+
+    for variant_name, payload in sorted(credit_metrics.items()):
+        summary_payload = variant_summary_payload(variant_name)
+        config_payload = _mapping_or_empty(
+            _mapping_or_empty(ablation_variants.get(variant_name)).get("config")
+        )
+        brain_variant_name = str(brain_config.get("name") or config.get("name") or "")
+        architecture_rung = str(
+            payload.get("architecture_rung")
+            or _credit_assignment_rung(variant_name)
+            or LADDER_RUNG_MAPPING.get(variant_name)
+            or _credit_assignment_rung(brain_variant_name)
+            or LADDER_RUNG_MAPPING.get(brain_variant_name)
+            or ""
+        )
+        inferred_strategy = ""
+        if config_payload or _credit_assignment_rung(variant_name):
+            inferred_strategy = _credit_assignment_strategy(
+                variant_name,
+                {"config": config_payload},
+            )
+        elif brain_variant_name:
+            inferred_strategy = _credit_assignment_strategy(
+                brain_variant_name,
+                {"config": brain_config},
+            )
+        strategy = str(
+            payload.get("strategy")
+            or config_payload.get("credit_strategy")
+            or config.get("credit_strategy")
+            or brain_config.get("credit_strategy")
+            or inferred_strategy
+            or "broadcast"
+        )
+        scenario_success_rate = _coerce_optional_float(
+            summary_payload.get("scenario_success_rate")
+        )
+        mean_effective_module_count = _coerce_optional_float(
+            summary_payload.get("mean_effective_module_count")
+        )
+        weights = _mapping_or_empty(payload.get("weights"))
+        gradient_norms = _mapping_or_empty(payload.get("gradient_norms"))
+        counterfactual_weights = _mapping_or_empty(
+            payload.get("counterfactual_weights")
+        )
+        raw_weight_keys = set(weights.keys())
+        module_names = sorted(
+            {
+                *weights.keys(),
+                *gradient_norms.keys(),
+                *counterfactual_weights.keys(),
+            }
+        )
+        for module_name in module_names:
+            credit_weight = _coerce_float(weights.get(module_name))
+            gradient_norm = _coerce_float(gradient_norms.get(module_name))
+            counterfactual_weight = _coerce_float(
+                counterfactual_weights.get(module_name)
+            )
+            rows.append(
+                {
+                    "variant": variant_name,
+                    "architecture_rung": architecture_rung,
+                    "credit_strategy": strategy,
+                    "module_name": str(module_name),
+                    "credit_weight": round(credit_weight, 6),
+                    "gradient_norm": round(gradient_norm, 6),
+                    "counterfactual_weight": round(counterfactual_weight, 6),
+                    "scenario_success_rate": (
+                        round(float(scenario_success_rate), 6)
+                        if scenario_success_rate is not None
+                        else None
+                    ),
+                }
+            )
+            if module_name in raw_weight_keys:
+                credit_means_by_strategy_module[(strategy, str(module_name))].append(
+                    credit_weight
+                )
+        if mean_effective_module_count is not None:
+            effective_module_count_by_strategy[strategy].append(
+                float(mean_effective_module_count)
+            )
+
+    for (strategy, module_name), values in sorted(credit_means_by_strategy_module.items()):
+        mean_credit_by_strategy_module.append(
+            {
+                "credit_strategy": strategy,
+                "module_name": module_name,
+                "mean_credit_weight": round(
+                    sum(values) / len(values),
+                    6,
+                ),
+                "variant_count": len(values),
+            }
+        )
+    for strategy, values in sorted(effective_module_count_by_strategy.items()):
+        concentration_rows.append(
+            {
+                "credit_strategy": strategy,
+                "mean_effective_module_count": round(
+                    sum(values) / len(values),
+                    6,
+                ),
+                "variant_count": len(values),
+            }
+        )
+
+    if not credit_metrics:
+        limitations.append("No credit metrics were available in the summary payload.")
+
+    return {
+        "available": bool(rows),
+        "table": _table(
+            (
+                "variant",
+                "architecture_rung",
+                "credit_strategy",
+                "module_name",
+                "credit_weight",
+                "gradient_norm",
+                "counterfactual_weight",
+                "scenario_success_rate",
+            ),
+            rows,
+        ),
+        "summary_statistics": {
+            "mean_credit_per_module_by_strategy": _table(
+                ("credit_strategy", "module_name", "mean_credit_weight", "variant_count"),
+                mean_credit_by_strategy_module,
+            ),
+            "credit_concentration": _table(
+                ("credit_strategy", "mean_effective_module_count", "variant_count"),
+                concentration_rows,
+            ),
+        },
+        "limitations": limitations,
+    }
+
 
 def build_scenario_checks_rows(
     scenario_success: Mapping[str, object],
@@ -209,6 +1321,43 @@ def build_diagnostics(
                 },
             ]
         )
+    parameter_counts = _mapping_or_empty(summary.get("parameter_counts"))
+    total_trainable = int(
+        _coerce_float(
+            parameter_counts.get("total"),
+            _coerce_float(parameter_counts.get("total_trainable"), 0.0),
+        )
+    )
+    if total_trainable > 0:
+        diagnostics.append(
+            {
+                "label": "Trainable parameters",
+                "value": total_trainable,
+            }
+        )
+    per_network = _mapping_or_empty(parameter_counts.get("per_network"))
+    if not per_network:
+        per_network = _mapping_or_empty(parameter_counts.get("by_network"))
+    sorted_components = sorted(
+        (
+            (str(name), int(_coerce_float(count, 0.0)))
+            for name, count in per_network.items()
+            if _coerce_float(count, 0.0) > 0.0
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    for component_name, component_count in sorted_components[:3]:
+        proportion = (
+            0.0
+            if total_trainable <= 0
+            else float(component_count / total_trainable)
+        )
+        diagnostics.append(
+            {
+                "label": f"Parameters: {component_name}",
+                "value": f"{component_count} ({proportion:.2%})",
+            }
+        )
 
     reflex_dependence = build_reflex_dependence_indicators(summary, reflex_frequency)
     indicators = reflex_dependence.get("failure_indicators", {})
@@ -269,11 +1418,26 @@ def build_diagnostics(
 
     variants = ablations.get("variants", {})
     if isinstance(variants, Mapping) and variants:
+        capacity_totals: dict[str, int] = {}
         sortable = []
         for variant_name, payload in variants.items():
             if not isinstance(payload, Mapping):
                 continue
             minimal_payload = _variant_with_minimal_reflex_support(payload)
+            variant_parameter_counts = _mapping_or_empty(
+                minimal_payload.get("parameter_counts")
+            )
+            variant_total = int(
+                _coerce_float(
+                    variant_parameter_counts.get("total"),
+                    _coerce_float(
+                        variant_parameter_counts.get("total_trainable"),
+                        0.0,
+                    ),
+                )
+            )
+            if variant_total > 0:
+                capacity_totals[str(variant_name)] = variant_total
             summary_payload = minimal_payload.get("summary", {})
             if not isinstance(summary_payload, Mapping):
                 continue
@@ -294,6 +1458,16 @@ def build_diagnostics(
                     "value": f"{best_variant} ({best_score:.2f})",
                 }
             )
+        capacity_summary = compare_capacity_totals(capacity_totals)
+        if capacity_summary.get("available") and int(
+            _coerce_float(capacity_summary.get("variant_count"), 0.0)
+        ) > 1:
+            diagnostics.append(
+                {
+                    "label": "Architecture capacity match",
+                    "value": str(capacity_summary.get("status") or ""),
+                }
+            )
 
     modules = reflex_frequency.get("modules", [])
     if isinstance(modules, list) and modules:
@@ -310,6 +1484,103 @@ def build_diagnostics(
                 }
             )
     return diagnostics
+
+
+def build_capacity_sweep_tables(
+    summary: Mapping[str, object],
+) -> dict[str, object]:
+    capacity_sweeps = extract_capacity_sweeps(summary)
+    capacity_sweep_rows = list(capacity_sweeps.get("rows", []))
+    if not capacity_sweep_rows:
+        return {
+            "available": False,
+            "curves": _table(
+                (
+                    "variant",
+                    "architecture",
+                    "capacity_profile",
+                    "capacity_profile_version",
+                    "scale_factor",
+                    "total_trainable",
+                    "approximate_compute_cost_total",
+                    "approximate_compute_cost_unit",
+                    "scenario_success_rate",
+                    "episode_success_rate",
+                    "capability_probe_success_rate",
+                    "source",
+                ),
+                (),
+            ),
+            "matrices": {},
+            "interpretations": list(capacity_sweeps.get("interpretations", [])),
+            "metadata": {
+                "interpretation_guidance": CAPACITY_SWEEP_INTERPRETATION_GUIDANCE,
+            },
+            "limitations": [
+                str(item)
+                for item in capacity_sweeps.get("limitations", [])
+                if item
+            ],
+        }
+
+    matrices: dict[str, dict[str, dict[str, object]]] = {
+        "scenario_success_rate": {},
+        "episode_success_rate": {},
+        "capability_probe_success_rate": {},
+        "total_trainable": {},
+        "approximate_compute_cost_total": {},
+    }
+    for row in capacity_sweep_rows:
+        if not isinstance(row, Mapping):
+            continue
+        variant_name = str(row.get("variant") or "")
+        profile_name = str(row.get("capacity_profile") or "")
+        if not variant_name or not profile_name:
+            continue
+        matrices["scenario_success_rate"].setdefault(variant_name, {})[profile_name] = (
+            row.get("scenario_success_rate")
+        )
+        matrices["episode_success_rate"].setdefault(variant_name, {})[profile_name] = (
+            row.get("episode_success_rate")
+        )
+        matrices["capability_probe_success_rate"].setdefault(
+            variant_name,
+            {},
+        )[profile_name] = row.get("capability_probe_success_rate")
+        matrices["total_trainable"].setdefault(variant_name, {})[profile_name] = (
+            row.get("total_trainable")
+        )
+        matrices["approximate_compute_cost_total"].setdefault(
+            variant_name,
+            {},
+        )[profile_name] = row.get("approximate_compute_cost_total")
+
+    return {
+        "available": True,
+        "curves": _table(
+            (
+                "variant",
+                "architecture",
+                "capacity_profile",
+                "capacity_profile_version",
+                "scale_factor",
+                "total_trainable",
+                "approximate_compute_cost_total",
+                "approximate_compute_cost_unit",
+                "scenario_success_rate",
+                "episode_success_rate",
+                "capability_probe_success_rate",
+                "source",
+            ),
+            capacity_sweep_rows,
+        ),
+        "matrices": matrices,
+        "interpretations": list(capacity_sweeps.get("interpretations", [])),
+        "metadata": {
+            "interpretation_guidance": CAPACITY_SWEEP_INTERPRETATION_GUIDANCE,
+        },
+        "limitations": [],
+    }
 
 
 def build_aggregate_benchmark_tables(
@@ -329,6 +1600,7 @@ def build_aggregate_benchmark_tables(
             - primary_benchmark (dict): Table dict with columns for metric, label, value, CI bounds, std error, n_seeds, confidence_level, reference_variant, and source.
             - per_scenario_success_rates (dict): Table dict with per-scenario rows and CI columns for scenario_success_rate.
             - learning_evidence_deltas (dict): Table dict with delta rows (e.g., scenario_success_rate_delta) and CI columns for learning-evidence comparisons.
+            - architecture_capacity (dict): Table dict with per-architecture trainable-parameter totals and capacity-match status versus the reference variant.
             - limitations (list[str]): Human-readable messages explaining missing data when any of the tables are empty.
     """
     scenario_success = _primary_benchmark_scenario_success(summary)
@@ -413,6 +1685,16 @@ def build_aggregate_benchmark_tables(
             )
             learning_rows.append(row)
 
+    architecture_capacity = extract_architecture_capacity(summary)
+    capacity_sweep_tables = build_capacity_sweep_tables(summary)
+    architecture_rows = list(architecture_capacity.get("rows", []))
+    capacity_sweep_rows = list(
+        _mapping_or_empty(capacity_sweep_tables.get("curves")).get("rows", [])
+    )
+    capacity_analysis = _mapping_or_empty(
+        architecture_capacity.get("capacity_analysis")
+    )
+
     limitations: list[str] = []
     if not primary_rows:
         limitations.append("No primary benchmark row with uncertainty was available.")
@@ -420,8 +1702,26 @@ def build_aggregate_benchmark_tables(
         limitations.append("No per-scenario benchmark rows with uncertainty were available.")
     if not learning_rows:
         limitations.append("No learning-evidence delta uncertainty rows were available.")
+    if not architecture_rows:
+        limitations.extend(
+            str(item)
+            for item in architecture_capacity.get("limitations", [])
+            if item
+        )
+    if not capacity_sweep_rows:
+        limitations.extend(
+            str(item)
+            for item in capacity_sweep_tables.get("limitations", [])
+            if item
+        )
     return {
-        "available": bool(primary_rows or scenario_rows or learning_rows),
+        "available": bool(
+            primary_rows
+            or scenario_rows
+            or learning_rows
+            or architecture_rows
+            or capacity_sweep_rows
+        ),
         "confidence_level": (
             primary_rows[0].get("confidence_level")
             if primary_rows and primary_rows[0].get("confidence_level") is not None
@@ -470,6 +1770,28 @@ def build_aggregate_benchmark_tables(
             ),
             learning_rows,
         ),
+        "architecture_capacity": _table(
+            (
+                "variant",
+                "architecture",
+                "total_trainable",
+                "key_components",
+                "capacity_status",
+                "capacity_matched",
+                "reference_variant",
+                "reference_total_trainable",
+                "total_ratio_vs_reference",
+                "source",
+            ),
+            architecture_rows,
+        ),
+        "capacity_sweep_curves": dict(
+            _mapping_or_empty(capacity_sweep_tables.get("curves"))
+        ),
+        "capacity_sweep_metadata": dict(
+            _mapping_or_empty(capacity_sweep_tables.get("metadata"))
+        ),
+        "capacity_analysis": dict(capacity_analysis),
         "limitations": limitations,
     }
 
@@ -655,13 +1977,399 @@ def build_claim_test_tables(summary: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def build_effect_size_tables(summary: Mapping[str, object]) -> dict[str, object]:
+def build_reward_profile_ladder_tables(
+    summary: Mapping[str, object] | None = None,
+    *,
+    ladder_profile_comparison: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """
+    Build structured tables from the cross-profile architectural ladder payload.
+
+    Returns four tables:
+    - ladder_by_profile
+    - shaping_gap_by_variant
+    - architecture_classifications
+    - austere_survival_by_variant
+    """
+    ladder = (
+        dict(ladder_profile_comparison)
+        if isinstance(ladder_profile_comparison, Mapping)
+        else extract_reward_profile_ladder(summary or {})
+    )
+    if not ladder.get("available"):
+        limitations = list(ladder.get("limitations", []))
+        if not limitations:
+            limitations.append(
+                "No cross-profile architectural ladder comparison was available."
+            )
+        return {
+            "available": False,
+            "confidence_level": REWARD_PROFILE_LADDER_CONFIDENCE_LEVEL,
+            "rows": {
+                "ladder_by_profile": [],
+                "shaping_gap_by_variant": [],
+                "architecture_classifications": [],
+                "austere_survival_by_variant": [],
+            },
+            "ladder_by_profile": _table(
+                (
+                    "variant",
+                    "protocol_name",
+                    "profile",
+                    "scenario_success_rate",
+                    "scenario_success_rate_ci_lower",
+                    "scenario_success_rate_ci_upper",
+                    "episode_success_rate",
+                    "episode_success_rate_ci_lower",
+                    "episode_success_rate_ci_upper",
+                    "mean_reward",
+                    "mean_reward_ci_lower",
+                    "mean_reward_ci_upper",
+                    "n_seeds",
+                ),
+                (),
+            ),
+            "shaping_gap_by_variant": _table(
+                (
+                    "variant",
+                    "protocol_name",
+                    "classic_vs_austere_delta",
+                    "classic_vs_austere_ci_lower",
+                    "classic_vs_austere_ci_upper",
+                    "classic_vs_austere_effect_size",
+                    "ecological_vs_austere_delta",
+                    "ecological_vs_austere_ci_lower",
+                    "ecological_vs_austere_ci_upper",
+                    "ecological_vs_austere_effect_size",
+                    "n_seeds",
+                ),
+                (),
+            ),
+            "architecture_classifications": _table(
+                (
+                    "variant",
+                    "protocol_name",
+                    "classification",
+                    "austere_success_rate",
+                    "classic_success_rate",
+                    "ecological_success_rate",
+                    "classic_minus_austere",
+                    "ecological_minus_austere",
+                    "austere_survival_threshold",
+                    "classic_gap_limit",
+                    "ecological_gap_limit",
+                    "reason",
+                ),
+                (),
+            ),
+            "austere_survival_by_variant": _table(
+                (
+                    "variant",
+                    "protocol_name",
+                    "survives",
+                    "austere_success_rate",
+                    "threshold",
+                ),
+                (),
+            ),
+            "limitations": limitations,
+        }
+
+    profiles = _mapping_or_empty(ladder.get("profiles"))
+    cross_profile_deltas = _mapping_or_empty(ladder.get("cross_profile_deltas"))
+    classifications = _mapping_or_empty(ladder.get("classifications"))
+    raw_payload = _mapping_or_empty(ladder.get("raw_payload"))
+    raw_variants = _mapping_or_empty(raw_payload.get("variants"))
+
+    ladder_by_profile_rows: list[dict[str, object]] = []
+    for profile_name, profile_payload in sorted(profiles.items()):
+        if not isinstance(profile_payload, Mapping):
+            continue
+        variants = _mapping_or_empty(profile_payload.get("variants"))
+        for variant_name, variant_payload in sorted(variants.items()):
+            if not isinstance(variant_payload, Mapping):
+                continue
+            summary_payload = _mapping_or_empty(variant_payload.get("summary"))
+            uncertainty = _mapping_or_empty(variant_payload.get("uncertainty"))
+            scenario_uncertainty = _mapping_or_empty(
+                uncertainty.get("scenario_success_rate")
+            )
+            episode_uncertainty = _mapping_or_empty(
+                uncertainty.get("episode_success_rate")
+            )
+            reward_uncertainty = _mapping_or_empty(uncertainty.get("mean_reward"))
+            protocol_name = str(
+                _mapping_or_empty(raw_variants.get(variant_name)).get("protocol_name")
+                or LADDER_PROTOCOL_NAMES.get(LADDER_RUNG_MAPPING.get(variant_name, ""), "")
+            )
+            ladder_by_profile_rows.append(
+                {
+                    "variant": str(variant_name),
+                    "protocol_name": protocol_name,
+                    "profile": str(profile_name),
+                    "scenario_success_rate": _coerce_float(
+                        summary_payload.get("scenario_success_rate"),
+                    ),
+                    "scenario_success_rate_ci_lower": _coerce_optional_float(
+                        scenario_uncertainty.get("ci_lower")
+                    ),
+                    "scenario_success_rate_ci_upper": _coerce_optional_float(
+                        scenario_uncertainty.get("ci_upper")
+                    ),
+                    "episode_success_rate": _coerce_float(
+                        summary_payload.get("episode_success_rate"),
+                    ),
+                    "episode_success_rate_ci_lower": _coerce_optional_float(
+                        episode_uncertainty.get("ci_lower")
+                    ),
+                    "episode_success_rate_ci_upper": _coerce_optional_float(
+                        episode_uncertainty.get("ci_upper")
+                    ),
+                    "mean_reward": _coerce_optional_float(
+                        summary_payload.get("mean_reward")
+                    ),
+                    "mean_reward_ci_lower": _coerce_optional_float(
+                        reward_uncertainty.get("ci_lower")
+                    ),
+                    "mean_reward_ci_upper": _coerce_optional_float(
+                        reward_uncertainty.get("ci_upper")
+                    ),
+                    "n_seeds": int(
+                        _coerce_float(scenario_uncertainty.get("n_seeds"), 0.0)
+                    ),
+                }
+            )
+
+    shaping_gap_rows: list[dict[str, object]] = []
+    for variant_name, deltas_payload in sorted(cross_profile_deltas.items()):
+        if not isinstance(deltas_payload, Mapping):
+            continue
+        classic_payload = _mapping_or_empty(deltas_payload.get("classic"))
+        ecological_payload = _mapping_or_empty(deltas_payload.get("ecological"))
+        classic_metric = _mapping_or_empty(
+            _mapping_or_empty(classic_payload.get("metrics")).get(
+                "scenario_success_rate"
+            )
+        )
+        ecological_metric = _mapping_or_empty(
+            _mapping_or_empty(ecological_payload.get("metrics")).get(
+                "scenario_success_rate"
+            )
+        )
+        classic_uncertainty = _mapping_or_empty(classic_metric.get("delta_uncertainty"))
+        ecological_uncertainty = _mapping_or_empty(
+            ecological_metric.get("delta_uncertainty")
+        )
+        protocol_name = str(
+            _mapping_or_empty(raw_variants.get(variant_name)).get("protocol_name")
+            or LADDER_PROTOCOL_NAMES.get(LADDER_RUNG_MAPPING.get(variant_name, ""), "")
+        )
+        shaping_gap_rows.append(
+            {
+                "variant": str(variant_name),
+                "protocol_name": protocol_name,
+                "classic_vs_austere_delta": _coerce_optional_float(
+                    _mapping_or_empty(classic_payload.get("summary")).get(
+                        "scenario_success_rate_delta"
+                    )
+                ),
+                "classic_vs_austere_ci_lower": _coerce_optional_float(
+                    classic_uncertainty.get("ci_lower")
+                ),
+                "classic_vs_austere_ci_upper": _coerce_optional_float(
+                    classic_uncertainty.get("ci_upper")
+                ),
+                "classic_vs_austere_effect_size": _coerce_optional_float(
+                    classic_metric.get("cohens_d")
+                ),
+                "ecological_vs_austere_delta": _coerce_optional_float(
+                    _mapping_or_empty(ecological_payload.get("summary")).get(
+                        "scenario_success_rate_delta"
+                    )
+                ),
+                "ecological_vs_austere_ci_lower": _coerce_optional_float(
+                    ecological_uncertainty.get("ci_lower")
+                ),
+                "ecological_vs_austere_ci_upper": _coerce_optional_float(
+                    ecological_uncertainty.get("ci_upper")
+                ),
+                "ecological_vs_austere_effect_size": _coerce_optional_float(
+                    ecological_metric.get("cohens_d")
+                ),
+                "n_seeds": max(
+                    int(_coerce_float(classic_uncertainty.get("n_seeds"), 0.0)),
+                    int(_coerce_float(ecological_uncertainty.get("n_seeds"), 0.0)),
+                ),
+            }
+        )
+
+    classification_rows: list[dict[str, object]] = []
+    austere_survival_rows: list[dict[str, object]] = []
+    for variant_name, classification_payload in sorted(classifications.items()):
+        if not isinstance(classification_payload, Mapping):
+            continue
+        classification = _mapping_or_empty(classification_payload.get("classification"))
+        austere_survival = _mapping_or_empty(
+            classification_payload.get("austere_survival")
+        )
+        label = str(classification.get("label") or "")
+        if not label:
+            label = "unknown"
+        elif label not in CLASSIFICATION_LABELS:
+            label = f"nonstandard:{label}"
+        protocol_name = str(
+            classification_payload.get("protocol_name")
+            or LADDER_PROTOCOL_NAMES.get(LADDER_RUNG_MAPPING.get(variant_name, ""), "")
+        )
+        classification_rows.append(
+            {
+                "variant": str(variant_name),
+                "protocol_name": protocol_name,
+                "classification": label,
+                "austere_success_rate": _coerce_optional_float(
+                    classification.get("austere_success_rate")
+                ),
+                "classic_success_rate": _coerce_optional_float(
+                    classification.get("classic_success_rate")
+                ),
+                "ecological_success_rate": _coerce_optional_float(
+                    classification.get("ecological_success_rate")
+                ),
+                "classic_minus_austere": _coerce_optional_float(
+                    classification.get("classic_minus_austere")
+                ),
+                "ecological_minus_austere": _coerce_optional_float(
+                    classification.get("ecological_minus_austere")
+                ),
+                "austere_survival_threshold": _coerce_optional_float(
+                    classification.get("austere_survival_threshold")
+                )
+                or AUSTERE_SURVIVAL_THRESHOLD,
+                "classic_gap_limit": _coerce_optional_float(
+                    classification.get("classic_gap_limit")
+                ),
+                "ecological_gap_limit": _coerce_optional_float(
+                    classification.get("ecological_gap_limit")
+                ),
+                "reason": str(classification.get("reason") or ""),
+            }
+        )
+        austere_survival_rows.append(
+            {
+                "variant": str(variant_name),
+                "protocol_name": protocol_name,
+                "survives": bool(austere_survival.get("passed", False)),
+                "austere_success_rate": _coerce_optional_float(
+                    austere_survival.get("success_rate")
+                ),
+                "threshold": _coerce_optional_float(
+                    austere_survival.get("survival_threshold")
+                )
+                or AUSTERE_SURVIVAL_THRESHOLD,
+            }
+        )
+
+    limitations = list(ladder.get("limitations", []))
+    if not ladder_by_profile_rows:
+        limitations.append("No reward-profile ladder rows were available.")
+    if not shaping_gap_rows:
+        limitations.append("No shaping-gap rows were available for the ladder.")
+    if not classification_rows:
+        limitations.append("No architecture classification rows were available.")
+    if not austere_survival_rows:
+        limitations.append("No austere survival rows were available.")
+
+    return {
+        "available": bool(
+            ladder_by_profile_rows
+            or shaping_gap_rows
+            or classification_rows
+            or austere_survival_rows
+        ),
+        "confidence_level": REWARD_PROFILE_LADDER_CONFIDENCE_LEVEL,
+        "rows": {
+            "ladder_by_profile": ladder_by_profile_rows,
+            "shaping_gap_by_variant": shaping_gap_rows,
+            "architecture_classifications": classification_rows,
+            "austere_survival_by_variant": austere_survival_rows,
+        },
+        "ladder_by_profile": _table(
+            (
+                "variant",
+                "protocol_name",
+                "profile",
+                "scenario_success_rate",
+                "scenario_success_rate_ci_lower",
+                "scenario_success_rate_ci_upper",
+                "episode_success_rate",
+                "episode_success_rate_ci_lower",
+                "episode_success_rate_ci_upper",
+                "mean_reward",
+                "mean_reward_ci_lower",
+                "mean_reward_ci_upper",
+                "n_seeds",
+            ),
+            ladder_by_profile_rows,
+        ),
+        "shaping_gap_by_variant": _table(
+            (
+                "variant",
+                "protocol_name",
+                "classic_vs_austere_delta",
+                "classic_vs_austere_ci_lower",
+                "classic_vs_austere_ci_upper",
+                "classic_vs_austere_effect_size",
+                "ecological_vs_austere_delta",
+                "ecological_vs_austere_ci_lower",
+                "ecological_vs_austere_ci_upper",
+                "ecological_vs_austere_effect_size",
+                "n_seeds",
+            ),
+            shaping_gap_rows,
+        ),
+        "architecture_classifications": _table(
+            (
+                "variant",
+                "protocol_name",
+                "classification",
+                "austere_success_rate",
+                "classic_success_rate",
+                "ecological_success_rate",
+                "classic_minus_austere",
+                "ecological_minus_austere",
+                "austere_survival_threshold",
+                "classic_gap_limit",
+                "ecological_gap_limit",
+                "reason",
+            ),
+            classification_rows,
+        ),
+        "austere_survival_by_variant": _table(
+            (
+                "variant",
+                "protocol_name",
+                "survives",
+                "austere_success_rate",
+                "threshold",
+            ),
+            austere_survival_rows,
+        ),
+        "limitations": limitations,
+    }
+
+
+def build_effect_size_tables(
+    summary: Mapping[str, object],
+    behavior_rows: Sequence[Mapping[str, object]] = (),
+) -> dict[str, object]:
     """
     Builds effect-size rows for learning baselines, ablation comparisons, and claim-test-derived effect sizes.
     
     Parameters:
         summary (Mapping[str, object]): Evaluation/training summary payload containing
             behavior_evaluation, learning_evidence, ablations, and claim_tests.
+        behavior_rows (Sequence[Mapping[str, object]]): Behavior rows used as fallback when
+            summary ablations are unavailable.
     
     Returns:
         dict[str, object]: A dictionary with:
@@ -673,6 +2381,7 @@ def build_effect_size_tables(summary: Mapping[str, object]) -> dict[str, object]
     """
     rows: list[dict[str, object]] = []
     behavior_evaluation = _mapping_or_empty(summary.get("behavior_evaluation"))
+    extracted_ablations = extract_ablations(summary, behavior_rows)
 
     learning = _mapping_or_empty(behavior_evaluation.get("learning_evidence"))
     learning_conditions = _mapping_or_empty(learning.get("conditions"))
@@ -717,18 +2426,18 @@ def build_effect_size_tables(summary: Mapping[str, object]) -> dict[str, object]
         if row is not None:
             rows.append(row)
 
-    ablations = _mapping_or_empty(behavior_evaluation.get("ablations"))
-    variants_raw = _mapping_or_empty(ablations.get("variants"))
     variants = {
-        str(variant_name): _variant_with_minimal_reflex_support(payload)
-        for variant_name, payload in variants_raw.items()
+        str(variant_name): payload
+        for variant_name, payload in _mapping_or_empty(
+            extracted_ablations.get("variants")
+        ).items()
         if isinstance(payload, Mapping)
     }
-    reference_variant = str(ablations.get("reference_variant") or "")
-    if not reference_variant and "modular_full" in variants:
-        reference_variant = "modular_full"
-    deltas_vs_reference = _mapping_or_empty(ablations.get("deltas_vs_reference"))
-    for baseline in ("modular_full", "monolithic_policy"):
+    reference_variant = str(extracted_ablations.get("reference_variant") or "")
+    deltas_vs_reference = _mapping_or_empty(
+        extracted_ablations.get("deltas_vs_reference")
+    )
+    for baseline in ("modular_full", "true_monolithic_policy", "monolithic_policy"):
         baseline_payload = _mapping_or_empty(variants.get(baseline))
         if not baseline_payload:
             continue
@@ -779,6 +2488,144 @@ def build_effect_size_tables(summary: Mapping[str, object]) -> dict[str, object]
             )
             if row is not None:
                 rows.append(row)
+
+    rung_to_variant = dict(LADDER_PRIMARY_VARIANT_BY_RUNG)
+    for baseline_rung, comparison_rung in LADDER_ADJACENT_COMPARISONS:
+        baseline_variant = rung_to_variant.get(baseline_rung, "")
+        comparison_variant = rung_to_variant.get(comparison_rung, "")
+        baseline_payload = _mapping_or_empty(variants.get(baseline_variant))
+        comparison_payload = _mapping_or_empty(variants.get(comparison_variant))
+        if not baseline_payload or not comparison_payload:
+            continue
+        baseline_summary = _mapping_or_empty(baseline_payload.get("summary"))
+        comparison_summary = _mapping_or_empty(comparison_payload.get("summary"))
+        raw_delta = round(
+            _coerce_float(comparison_summary.get("scenario_success_rate"))
+            - _coerce_float(baseline_summary.get("scenario_success_rate")),
+            6,
+        )
+        row = _cohens_d_row(
+            domain="ladder",
+            baseline=baseline_variant,
+            comparison=comparison_variant,
+            metric="scenario_success_rate",
+            baseline_values=_payload_metric_seed_items(
+                baseline_payload,
+                "scenario_success_rate",
+            ),
+            comparison_values=_payload_metric_seed_items(
+                comparison_payload,
+                "scenario_success_rate",
+            ),
+            raw_delta=raw_delta,
+            uncertainty=None,
+            source=(
+                "summary.behavior_evaluation.ablations.ladder."
+                f"{baseline_rung}_vs_{comparison_rung}"
+            ),
+        )
+        if row is not None:
+            rows.append(row)
+
+    ladder_profile_base_path = "summary.behavior_evaluation.ladder_under_profiles"
+    ladder_profile_comparison = _mapping_or_empty(
+        behavior_evaluation.get("ladder_under_profiles")
+    )
+    if not ladder_profile_comparison:
+        ladder_profile_base_path = (
+            "summary.behavior_evaluation.ladder_profile_comparison"
+        )
+        ladder_profile_comparison = _mapping_or_empty(
+            behavior_evaluation.get("ladder_profile_comparison")
+        )
+    ladder_profile_variants = _mapping_or_empty(ladder_profile_comparison.get("variants"))
+    for variant_name, variant_payload in sorted(ladder_profile_variants.items()):
+        if not isinstance(variant_payload, Mapping):
+            continue
+        shaping_gap = _mapping_or_empty(variant_payload.get("shaping_gap"))
+        for profile_name, comparison_payload in sorted(shaping_gap.items()):
+            if not isinstance(comparison_payload, Mapping):
+                continue
+            metric_blocks = _mapping_or_empty(comparison_payload.get("metrics"))
+            for metric_name, metric_payload in sorted(metric_blocks.items()):
+                if not isinstance(metric_payload, Mapping):
+                    continue
+                delta_uncertainty = _mapping_or_empty(
+                    metric_payload.get("delta_uncertainty")
+                )
+                effect_uncertainty = _mapping_or_empty(
+                    metric_payload.get("effect_size_uncertainty")
+                )
+                rows.append(
+                    {
+                        "domain": "ladder_profile",
+                        "baseline": f"{variant_name}@austere",
+                        "comparison": f"{variant_name}@{profile_name}",
+                        "metric": str(metric_name),
+                        "raw_delta": _coerce_optional_float(
+                            metric_payload.get("delta")
+                        ),
+                        "cohens_d": _coerce_optional_float(
+                            metric_payload.get("cohens_d")
+                        ),
+                        "magnitude_label": str(
+                            metric_payload.get("effect_magnitude") or ""
+                        ),
+                        "source": (
+                            f"{ladder_profile_base_path}."
+                            f"variants.{variant_name}.shaping_gap.{profile_name}."
+                            f"metrics.{metric_name}"
+                        ),
+                        "value": _coerce_optional_float(
+                            metric_payload.get("cohens_d")
+                        ),
+                        "ci_lower": _coerce_optional_float(
+                            effect_uncertainty.get("ci_lower")
+                        ),
+                        "ci_upper": _coerce_optional_float(
+                            effect_uncertainty.get("ci_upper")
+                        ),
+                        "std_error": _coerce_optional_float(
+                            effect_uncertainty.get("std_error")
+                        ),
+                        "n_seeds": int(
+                            _coerce_float(effect_uncertainty.get("n_seeds"), 0.0)
+                        ),
+                        "confidence_level": _coerce_optional_float(
+                            effect_uncertainty.get("confidence_level")
+                        ),
+                        "effect_size_ci_lower": _coerce_optional_float(
+                            effect_uncertainty.get("ci_lower")
+                        ),
+                        "effect_size_ci_upper": _coerce_optional_float(
+                            effect_uncertainty.get("ci_upper")
+                        ),
+                        "effect_size_std_error": _coerce_optional_float(
+                            effect_uncertainty.get("std_error")
+                        ),
+                        "effect_size_n_seeds": int(
+                            _coerce_float(effect_uncertainty.get("n_seeds"), 0.0)
+                        ),
+                        "effect_size_confidence_level": _coerce_optional_float(
+                            effect_uncertainty.get("confidence_level")
+                        ),
+                        "delta_ci_lower": _coerce_optional_float(
+                            delta_uncertainty.get("ci_lower")
+                        ),
+                        "delta_ci_upper": _coerce_optional_float(
+                            delta_uncertainty.get("ci_upper")
+                        ),
+                        "delta_std_error": _coerce_optional_float(
+                            delta_uncertainty.get("std_error")
+                        ),
+                        "delta_n_seeds": int(
+                            _coerce_float(delta_uncertainty.get("n_seeds"), 0.0)
+                        ),
+                        "delta_confidence_level": _coerce_optional_float(
+                            delta_uncertainty.get("confidence_level")
+                        ),
+                    }
+                )
 
     claim_tables = _mapping_or_empty(build_claim_test_tables(summary).get("claim_results"))
     claim_rows = claim_tables.get("rows", [])

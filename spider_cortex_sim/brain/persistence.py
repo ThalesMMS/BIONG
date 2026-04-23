@@ -58,7 +58,11 @@ class BrainPersistenceMixin:
         """
         Persist the brain's trainable weights and configuration metadata to the specified directory.
         
-        Saves per-module proposal weights (one .npz per module or a single monolithic policy .npz), the arbitration network .npz, action_center and motor_cortex .npz files, and a JSON metadata file ("metadata.json") containing architecture/version/fingerprint, interface registry, ablation and operational profile summaries, learning rates and related hyperparameters, action dimensionality, and per-module shape/type metadata.
+        Saves the active trainable weights for the configured architecture and a
+        JSON metadata file ("metadata.json") containing architecture/version/
+        fingerprint, interface registry, ablation and operational profile
+        summaries, learning rates and related hyperparameters, action
+        dimensionality, and per-module shape/type metadata.
         
         Parameters:
             directory (str | Path): Destination directory for saved files; created if it does not exist.
@@ -71,6 +75,8 @@ class BrainPersistenceMixin:
         architecture = self._architecture_signature()
         interface_registry = self._interface_registry()
         architecture_fingerprint = str(architecture["fingerprint"])
+        parameter_counts_by_network = self.count_parameters()
+        total_trainable_parameters = int(sum(parameter_counts_by_network.values()))
 
         metadata: Dict[str, object] = {
             "architecture_version": self.ARCHITECTURE_VERSION,
@@ -87,6 +93,8 @@ class BrainPersistenceMixin:
             "motor_lr": self.motor_lr,
             "module_dropout": self.module_dropout,
             "action_dim": self.action_dim,
+            "parameter_counts": dict(parameter_counts_by_network),
+            "total_parameters": total_trainable_parameters,
             "modules": {},
         }
 
@@ -100,6 +108,7 @@ class BrainPersistenceMixin:
                     "input_dim": sd["input_dim"],
                     "hidden_dim": sd["hidden_dim"],
                     "output_dim": sd["output_dim"],
+                    "parameter_count": int(parameter_counts_by_network.get(name, 0)),
                 }
         elif self.monolithic_policy is not None:
             mono_sd = self.monolithic_policy.state_dict()
@@ -110,41 +119,65 @@ class BrainPersistenceMixin:
                 "input_dim": mono_sd["input_dim"],
                 "hidden_dim": mono_sd["hidden_dim"],
                 "output_dim": mono_sd["output_dim"],
+                "parameter_count": int(
+                    parameter_counts_by_network.get(self.MONOLITHIC_POLICY_NAME, 0)
+                ),
+            }
+        elif self.true_monolithic_policy is not None:
+            mono_sd = self.true_monolithic_policy.state_dict()
+            mono_arrays = {k: v for k, v in mono_sd.items() if isinstance(v, np.ndarray)}
+            np.savez(directory / f"{self.TRUE_MONOLITHIC_POLICY_NAME}.npz", **mono_arrays)
+            metadata["modules"][self.TRUE_MONOLITHIC_POLICY_NAME] = {
+                "type": "direct_policy",
+                "input_dim": mono_sd["input_dim"],
+                "hidden_dim": mono_sd["hidden_dim"],
+                "output_dim": mono_sd["output_dim"],
+                "parameter_count": int(
+                    parameter_counts_by_network.get(self.TRUE_MONOLITHIC_POLICY_NAME, 0)
+                ),
             }
 
-        arbitration_sd = self.arbitration_network.state_dict()
-        arbitration_arrays = {
-            k: (v if isinstance(v, np.ndarray) else np.asarray(v))
-            for k, v in arbitration_sd.items()
-        }
-        np.savez(directory / f"{self.ARBITRATION_NETWORK_NAME}.npz", **arbitration_arrays)
-        metadata["modules"][self.ARBITRATION_NETWORK_NAME] = {
-            "type": "arbitration",
-            "input_dim": arbitration_sd["input_dim"],
-            "hidden_dim": arbitration_sd["hidden_dim"],
-            "valence_dim": arbitration_sd["valence_dim"],
-            "gate_dim": arbitration_sd["gate_dim"],
-        }
+        if self.arbitration_network is not None:
+            arbitration_sd = self.arbitration_network.state_dict()
+            arbitration_arrays = {
+                k: (v if isinstance(v, np.ndarray) else np.asarray(v))
+                for k, v in arbitration_sd.items()
+            }
+            np.savez(directory / f"{self.ARBITRATION_NETWORK_NAME}.npz", **arbitration_arrays)
+            metadata["modules"][self.ARBITRATION_NETWORK_NAME] = {
+                "type": "arbitration",
+                "input_dim": arbitration_sd["input_dim"],
+                "hidden_dim": arbitration_sd["hidden_dim"],
+                "valence_dim": arbitration_sd["valence_dim"],
+                "gate_dim": arbitration_sd["gate_dim"],
+                "parameter_count": int(
+                    parameter_counts_by_network.get(self.ARBITRATION_NETWORK_NAME, 0)
+                ),
+            }
 
-        action_sd = self.action_center.state_dict()
-        action_arrays = {k: v for k, v in action_sd.items() if isinstance(v, np.ndarray)}
-        np.savez(directory / "action_center.npz", **action_arrays)
-        metadata["modules"]["action_center"] = {
-            "type": "action",
-            "input_dim": action_sd["input_dim"],
-            "hidden_dim": action_sd["hidden_dim"],
-            "output_dim": action_sd["output_dim"],
-        }
+        if self.action_center is not None:
+            action_sd = self.action_center.state_dict()
+            action_arrays = {k: v for k, v in action_sd.items() if isinstance(v, np.ndarray)}
+            np.savez(directory / "action_center.npz", **action_arrays)
+            metadata["modules"]["action_center"] = {
+                "type": "action",
+                "input_dim": action_sd["input_dim"],
+                "hidden_dim": action_sd["hidden_dim"],
+                "output_dim": action_sd["output_dim"],
+                "parameter_count": int(parameter_counts_by_network.get("action_center", 0)),
+            }
 
-        motor_sd = self.motor_cortex.state_dict()
-        motor_arrays = {k: v for k, v in motor_sd.items() if isinstance(v, np.ndarray)}
-        np.savez(directory / "motor_cortex.npz", **motor_arrays)
-        metadata["modules"]["motor_cortex"] = {
-            "type": "motor",
-            "input_dim": motor_sd["input_dim"],
-            "hidden_dim": motor_sd["hidden_dim"],
-            "output_dim": motor_sd["output_dim"],
-        }
+        if self.motor_cortex is not None:
+            motor_sd = self.motor_cortex.state_dict()
+            motor_arrays = {k: v for k, v in motor_sd.items() if isinstance(v, np.ndarray)}
+            np.savez(directory / "motor_cortex.npz", **motor_arrays)
+            metadata["modules"]["motor_cortex"] = {
+                "type": "motor",
+                "input_dim": motor_sd["input_dim"],
+                "hidden_dim": motor_sd["hidden_dim"],
+                "output_dim": motor_sd["output_dim"],
+                "parameter_count": int(parameter_counts_by_network.get("motor_cortex", 0)),
+            }
 
         (directory / self._METADATA_FILE).write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -228,8 +261,11 @@ class BrainPersistenceMixin:
             else {str(name) for name in modules}
         )
         needs_arbitration_weights = (
+            self.arbitration_network is not None
+            and (
             requested_module_set is None
             or self.ARBITRATION_NETWORK_NAME in requested_module_set
+            )
         )
         arbitration_npz_path = directory / f"{self.ARBITRATION_NETWORK_NAME}.npz"
         if needs_arbitration_weights:
@@ -264,12 +300,16 @@ class BrainPersistenceMixin:
                 arrays = dict(npz)
 
             if mod_meta["type"] == "action":
+                if self.action_center is None:
+                    raise ValueError("Checkpoint contains action_center weights for a topology without action_center.")
                 arrays["name"] = name
                 arrays["input_dim"] = mod_meta["input_dim"]
                 arrays["hidden_dim"] = mod_meta["hidden_dim"]
                 arrays["output_dim"] = mod_meta["output_dim"]
                 self.action_center.load_state_dict(arrays)
             elif mod_meta["type"] == "arbitration":
+                if self.arbitration_network is None:
+                    raise ValueError("Checkpoint contains arbitration weights for a topology without arbitration.")
                 arrays["name"] = name
                 arrays["input_dim"] = mod_meta["input_dim"]
                 arrays["hidden_dim"] = mod_meta["hidden_dim"]
@@ -277,6 +317,8 @@ class BrainPersistenceMixin:
                 arrays["gate_dim"] = mod_meta["gate_dim"]
                 self.arbitration_network.load_state_dict(arrays)
             elif mod_meta["type"] == "motor":
+                if self.motor_cortex is None:
+                    raise ValueError("Checkpoint contains motor_cortex weights for a topology without motor_cortex.")
                 arrays["name"] = name
                 arrays["input_dim"] = mod_meta["input_dim"]
                 arrays["hidden_dim"] = mod_meta["hidden_dim"]
@@ -298,5 +340,10 @@ class BrainPersistenceMixin:
             if monolithic_name not in bank_state:
                 raise KeyError("Incompatible save: monolithic weights are missing.")
             self.monolithic_policy.load_state_dict(bank_state[monolithic_name])
+        elif bank_state and self.true_monolithic_policy is not None:
+            monolithic_name = self.TRUE_MONOLITHIC_POLICY_NAME
+            if monolithic_name not in bank_state:
+                raise KeyError("Incompatible save: true monolithic weights are missing.")
+            self.true_monolithic_policy.load_state_dict(bank_state[monolithic_name])
 
         return loaded

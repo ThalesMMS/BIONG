@@ -169,6 +169,7 @@ def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
     )
     module_credit_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names(history, "mean_module_credit_weights") if history else [])
     module_gradient_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names(history, "module_gradient_norm_means") if history else [])
+    counterfactual_credit_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names(history, "mean_counterfactual_credit_weights") if history else [])
     module_credit_weight_means = _mean_map(
         history, module_credit_names,
         lambda s, n: s.mean_module_credit_weights.get(n, 0.0),
@@ -176,6 +177,11 @@ def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
     module_gradient_norm_means = _mean_map(
         history, module_gradient_names,
         lambda s, n: s.module_gradient_norm_means.get(n, 0.0),
+    )
+    mean_counterfactual_credit_weights = _mean_map(
+        history,
+        counterfactual_credit_names,
+        lambda s, n: s.mean_counterfactual_credit_weights.get(n, 0.0),
     )
     terrain_slip_names = sorted(
         {
@@ -286,6 +292,7 @@ def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
         "mean_representation_specialization_score": ms(history, lambda s: s.representation_specialization_score),
         "mean_module_credit_weights": module_credit_weight_means,
         "module_gradient_norm_means": module_gradient_norm_means,
+        "mean_counterfactual_credit_weights": mean_counterfactual_credit_weights,
         "mean_motor_slip_rate": ms(history, lambda s: s.motor_slip_rate),
         "mean_orientation_alignment": ms(history, lambda s: s.mean_orientation_alignment),
         "mean_terrain_difficulty": ms(history, lambda s: s.mean_terrain_difficulty),

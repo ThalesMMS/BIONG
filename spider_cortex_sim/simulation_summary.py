@@ -191,6 +191,9 @@ class SimulationSummaryMixin:
             "module_gradient_norm_means": {
                 name: 0.0 for name in PROPOSAL_SOURCE_NAMES
             },
+            "mean_counterfactual_credit_weights": {
+                name: 0.0 for name in PROPOSAL_SOURCE_NAMES
+            },
             "mean_motor_slip_rate": 0.0,
             "mean_orientation_alignment": 0.0,
             "mean_terrain_difficulty": 0.0,
@@ -219,6 +222,7 @@ class SimulationSummaryMixin:
         - "evaluation": structured evaluation block containing the primary evaluation and nested `self_sufficient` and optional `scaffolded` evaluations along with computed competence metadata.
         - "motor_stage": motor-stage summaries for training, training_last_window, and evaluation.
         - "parameter_norms": model parameter norm statistics.
+        - "parameter_counts": model trainable-parameter counts with total, per-network breakdown, and per-network proportions.
         - Optional top-level entries when available: "checkpointing", "evaluation_without_reflex_support", and "curriculum".
         
         Returns:
@@ -279,6 +283,9 @@ class SimulationSummaryMixin:
                 }
             },
         )
+        parameter_counts_by_network = self.brain.count_parameters()
+        total_trainable_parameters = int(sum(parameter_counts_by_network.values()))
+        approximate_compute_cost = self.brain.estimate_compute_cost()
         summary = {
             "is_experiment_of_record": bool(
                 training_regime_summary["is_experiment_of_record"]
@@ -289,6 +296,15 @@ class SimulationSummaryMixin:
                 "architecture_version": self.brain.ARCHITECTURE_VERSION,
                 "architecture_fingerprint": self.brain._architecture_fingerprint(),
                 "brain": self.brain.config.to_summary(),
+                "capacity_profile": {
+                    **self.capacity_profile.to_summary(),
+                    # Intentionally reflect the realized runtime config, which can
+                    # diverge from the preset defaults after resolution/overrides.
+                    "module_hidden_dims": dict(self.brain.config.module_hidden_dims),
+                    "integration_hidden_dim": int(
+                        self.brain.config.integration_hidden_dim or 0
+                    ),
+                },
                 "world": {
                     "width": self.world.width,
                     "height": self.world.height,
@@ -310,6 +326,10 @@ class SimulationSummaryMixin:
                     "arbitration_regularization_weight": self.brain.arbitration_regularization_weight,
                     "arbitration_valence_regularization_weight": self.brain.arbitration_valence_regularization_weight,
                     "motor_lr": self.brain.motor_lr,
+                    "distillation_lr": training_regime_summary.get("distillation_lr"),
+                    "distillation_temperature": training_regime_summary.get(
+                        "distillation_temperature"
+                    ),
                     "module_dropout": self.brain.module_dropout,
                 },
                 "operational_profile": self.operational_profile.to_summary(),
@@ -332,7 +352,24 @@ class SimulationSummaryMixin:
                 "evaluation": self._motor_stage_summary(evaluation_history),
             },
             "parameter_norms": self.brain.parameter_norms(),
+            "parameter_counts": {
+                "per_network": parameter_counts_by_network,
+                "total": total_trainable_parameters,
+                "proportions": {
+                    name: (
+                        0.0
+                        if total_trainable_parameters <= 0
+                        else float(count / total_trainable_parameters)
+                    )
+                    for name, count in parameter_counts_by_network.items()
+                },
+            },
+            "approximate_compute_cost": approximate_compute_cost,
         }
+        frozen_modules = self.brain.frozen_module_names()
+        if frozen_modules:
+            summary["frozen_modules"] = frozen_modules
+            summary["config"]["frozen_modules"] = frozen_modules
         reward_audit_comparison = reward_audit.get("comparison")
         austere_gate_passed = austere_survival_gate_passed(
             reward_audit_comparison
@@ -353,6 +390,8 @@ class SimulationSummaryMixin:
             )
         if self._latest_curriculum_summary is not None:
             summary["curriculum"] = deepcopy(self._latest_curriculum_summary)
+        if self._latest_distillation_summary is not None:
+            summary["distillation"] = deepcopy(self._latest_distillation_summary)
         return summary
 
     def build_summary(

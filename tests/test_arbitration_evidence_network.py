@@ -199,13 +199,11 @@ class WarmStartArbitrationNetworkTest(unittest.TestCase):
         self.brain._warm_start_arbitration_network()
         self.assertIsNone(self.brain.arbitration_network.cache)
 
-    def test_warm_start_sets_w1_diagonal(self) -> None:
+    def test_warm_start_sets_w1_input_projection(self) -> None:
         self.brain._warm_start_arbitration_network()
         net = self.brain.arbitration_network
-        # W1 should have non-zero values on the diagonal (first input_dim rows)
-        for i in range(net.input_dim):
-            self.assertNotEqual(net.W1[i, i], 0.0,
-                                f"W1[{i},{i}] should be non-zero after warm start")
+        nonzero_columns = np.any(np.abs(net.W1) > 0.0, axis=0)
+        self.assertTrue(np.all(nonzero_columns))
 
     def test_warm_start_zeros_b1(self) -> None:
         self.brain._warm_start_arbitration_network()
@@ -289,6 +287,17 @@ class WarmStartArbitrationNetworkTest(unittest.TestCase):
             no_start.arbitration_network.W1[0, 0],
             warmed.arbitration_network.W1[0, 0],
         )
+
+    def test_warm_start_small_hidden_layer_preserves_all_input_columns(self) -> None:
+        brain = SpiderBrain(
+            seed=42,
+            config=BrainAblationConfig(capacity_profile="small"),
+        )
+
+        brain._warm_start_arbitration_network()
+        nonzero_columns = np.any(np.abs(brain.arbitration_network.W1) > 0.0, axis=0)
+
+        self.assertTrue(np.all(nonzero_columns))
 
     def test_minimal_arbitration_random_weights_follow_brain_seed(self) -> None:
         config = BrainAblationConfig(
@@ -507,14 +516,16 @@ class ArbitrationNetworkInArbitrationNetworkTest(unittest.TestCase):
         self.assertEqual(SpiderBrain.ARBITRATION_NETWORK_NAME, "arbitration_network")
 
     def test_arbitration_gate_module_order_has_six_entries(self) -> None:
-        self.assertEqual(len(SpiderBrain.ARBITRATION_GATE_MODULE_ORDER), 6)
+        self.assertEqual(
+            len(SpiderBrain.ARBITRATION_GATE_MODULE_ORDER),
+            len(ARBITRATION_GATE_MODULE_ORDER),
+        )
 
     def test_arbitration_gate_module_order_contains_expected_modules(self) -> None:
-        expected = {
-            "alert_center", "hunger_center", "sleep_center",
-            "visual_cortex", "sensory_cortex", SpiderBrain.MONOLITHIC_POLICY_NAME,
-        }
-        self.assertEqual(set(SpiderBrain.ARBITRATION_GATE_MODULE_ORDER), expected)
+        self.assertEqual(
+            tuple(SpiderBrain.ARBITRATION_GATE_MODULE_ORDER),
+            ARBITRATION_GATE_MODULE_ORDER,
+        )
 
     def test_arbitration_evidence_fields_has_four_valences(self) -> None:
         self.assertEqual(

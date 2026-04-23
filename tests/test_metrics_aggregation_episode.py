@@ -345,6 +345,7 @@ class AggregateEpisodeStatsLearningMetricsTest(unittest.TestCase):
         self,
         mean_module_credit_weights: Mapping[str, float] | None = None,
         module_gradient_norm_means: Mapping[str, float] | None = None,
+        mean_counterfactual_credit_weights: Mapping[str, float] | None = None,
     ) -> EpisodeStats:
         """
         Construct a minimal EpisodeStats populated with sensible defaults, allowing override of learning-related per-module credit weights and gradient-norm means.
@@ -354,14 +355,17 @@ class AggregateEpisodeStatsLearningMetricsTest(unittest.TestCase):
             module_gradient_norm_means (Mapping[str, float] | None): Optional mapping of proposal-source names to mean gradient norms; any keys provided will override the corresponding defaults (defaults include all PROPOSAL_SOURCE_NAMES set to 0.0).
         
         Returns:
-            EpisodeStats: An EpisodeStats instance with default values for all fields except the provided learning metrics which are applied to `mean_module_credit_weights` and `module_gradient_norm_means`.
+            EpisodeStats: An EpisodeStats instance with default values for all fields except the provided learning metrics which are applied to the corresponding per-module maps.
         """
         credit = {name: 0.0 for name in PROPOSAL_SOURCE_NAMES}
         gradients = {name: 0.0 for name in PROPOSAL_SOURCE_NAMES}
+        counterfactual = {name: 0.0 for name in PROPOSAL_SOURCE_NAMES}
         if mean_module_credit_weights:
             credit.update(mean_module_credit_weights)
         if module_gradient_norm_means:
             gradients.update(module_gradient_norm_means)
+        if mean_counterfactual_credit_weights:
+            counterfactual.update(mean_counterfactual_credit_weights)
         return EpisodeStats(
             episode=0,
             seed=1,
@@ -406,6 +410,7 @@ class AggregateEpisodeStatsLearningMetricsTest(unittest.TestCase):
             module_contribution_share={name: 0.0 for name in PROPOSAL_SOURCE_NAMES},
             mean_module_credit_weights=credit,
             module_gradient_norm_means=gradients,
+            mean_counterfactual_credit_weights=counterfactual,
             dominant_module="",
             dominant_module_share=0.0,
             effective_module_count=0.0,
@@ -472,6 +477,21 @@ class AggregateEpisodeStatsLearningMetricsTest(unittest.TestCase):
         result = aggregate_episode_stats(history)
         # Mean of (1.0, 0.0) = 0.5
         self.assertAlmostEqual(result["mean_module_credit_weights"]["alert_center"], 0.5)
+
+    def test_aggregate_mean_counterfactual_credit_weights(self) -> None:
+        history = [
+            self._make_minimal_episode_stats(
+                mean_counterfactual_credit_weights={"alert_center": 0.2}
+            ),
+            self._make_minimal_episode_stats(
+                mean_counterfactual_credit_weights={"alert_center": 0.8}
+            ),
+        ]
+        result = aggregate_episode_stats(history)
+        self.assertAlmostEqual(
+            result["mean_counterfactual_credit_weights"]["alert_center"],
+            0.5,
+        )
 
 class AggregateBehaviorScoresMetadataTest(unittest.TestCase):
     """Additional tests for aggregate_behavior_scores covering new optional params."""

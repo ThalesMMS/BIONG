@@ -416,7 +416,7 @@ def _two_shelter_tradeoff(world: SpiderWorld) -> None:
     """
     Configure the world for the "two shelter tradeoff" scenario.
 
-    Places the spider at the leftmost deep shelter, sets the tick to day_length - 2 and spider physiology (hunger=0.68, fatigue=0.38, sleep_debt=0.42), selects a single food spawn nearest the rightmost deep shelter, places the lizard at the spawn cell closest to the map center in "PATROL" mode, and refreshes the world's memory.
+    Places the spider at the leftmost deep shelter, starts earlier in the day to allow a return path before night, selects a food spawn near the rightmost deep shelter, places the lizard near the map center while avoiding the exact central choke column, and refreshes the world's memory.
     """
     deep_cells = sorted(world.shelter_deep_cells)
     food_spawns = world.map_template.food_spawn_cells
@@ -429,14 +429,18 @@ def _two_shelter_tradeoff(world: SpiderWorld) -> None:
         raise ValueError("two_shelter_tradeoff requires at least one lizard spawn cell")
     left_deep = deep_cells[0]
     right_deep = deep_cells[-1]
-    world.tick = world.day_length - 2
+    world.tick = world.day_length - 4
     _teleport_spider(world, left_deep)
     world.state.hunger = 0.68
     world.state.fatigue = 0.38
     world.state.sleep_debt = 0.42
     world.food_positions = [min(food_spawns, key=lambda cell: world.manhattan(cell, right_deep))]
+    center_x = world.width // 2
+    off_choke_spawns = [
+        cell for cell in lizard_spawns if int(cell[0]) != center_x
+    ]
     center_spawn = min(
-        lizard_spawns,
+        off_choke_spawns or list(lizard_spawns),
         key=lambda cell: abs(cell[0] - world.width // 2) + abs(cell[1] - world.height // 2),
     )
     world.lizard = LizardState(x=center_spawn[0], y=center_spawn[1], mode="PATROL")

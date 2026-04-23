@@ -55,6 +55,7 @@ from .checkpointing import (
     jsonify_observation,
     mean_reward_from_behavior_payload,
     persist_checkpoint_pair,
+    resolve_checkpoint_selection_config,
     resolve_checkpoint_load_dir,
 )
 from .curriculum import (
@@ -72,6 +73,8 @@ from .curriculum import (
     resolve_curriculum_profile,
     validate_curriculum_profile,
 )
+from .distillation import DistillationConfig
+from .distillation.teacher import load_teacher_checkpoint
 from .export import (
     compact_aggregate,
     compact_behavior_payload,
@@ -165,6 +168,316 @@ class SimulationTrainingMixin:
             ablation_seeds=ablation_seeds,
             checkpoint_interval=checkpoint_interval,
         )
+
+    @contextmanager
+    def _temporary_brain(self, brain: SpiderBrain) -> Iterator[None]:
+        original_brain = self.brain
+        self.brain = brain
+        try:
+            yield
+        finally:
+            self.brain = original_brain
+
+    def _evaluate_active_brain_summary(
+        self,
+        *,
+        evaluation_episodes: int,
+        evaluation_reflex_scale: float | None,
+        episode_start: int = 0,
+    ) -> Dict[str, object]:
+        _, evaluation_history, _ = self._train_histories(
+            episodes=0,
+            evaluation_episodes=evaluation_episodes,
+            render_last_evaluation=False,
+            capture_evaluation_trace=False,
+            debug_trace=False,
+            episode_start=episode_start,
+            evaluation_reflex_scale=evaluation_reflex_scale,
+            preserve_training_metadata=True,
+            training_regime_spec=None,
+        )
+        effective_scale = (
+            self._effective_reflex_scale(evaluation_reflex_scale)
+            if evaluation_reflex_scale is not None
+            else self._effective_reflex_scale(self.brain.current_reflex_scale)
+        )
+        competence_type = competence_label_from_eval_reflex_scale(effective_scale)
+        return self._label_evaluation_summary(
+            self._aggregate_group(evaluation_history),
+            eval_reflex_scale=effective_scale,
+            competence_type=competence_type,
+        )
+
+    @staticmethod
+    def _distillation_expressivity_assessment(
+        *,
+        teacher_summary: Dict[str, object],
+        distilled_summary: Dict[str, object],
+        finetuned_summary: Dict[str, object] | None,
+        baseline_summary: Dict[str, object] | None = None,
+    ) -> Dict[str, object]:
+        if baseline_summary is not None:
+            from .comparison_learning import build_distillation_comparison_report
+
+            report = build_distillation_comparison_report(
+                teacher=teacher_summary,
+                modular_rl_from_scratch=baseline_summary,
+                modular_distilled=distilled_summary,
+                modular_distilled_plus_rl_finetuning=finetuned_summary,
+            )
+            return {
+                "answer": str(report.get("answer", "inconclusive")),
+                "rationale": str(report.get("rationale", "")),
+                "teacher_scenario_success_rate": float(
+                    teacher_summary.get("scenario_success_rate", 0.0)
+                ),
+                "distilled_scenario_success_rate": float(
+                    distilled_summary.get("scenario_success_rate", 0.0)
+                ),
+                "finetuned_scenario_success_rate": float(
+                    0.0
+                    if finetuned_summary is None
+                    else finetuned_summary.get("scenario_success_rate", 0.0)
+                ),
+            }
+        teacher_success = float(teacher_summary.get("scenario_success_rate", 0.0))
+        distilled_success = float(
+            distilled_summary.get("scenario_success_rate", 0.0)
+        )
+        finetuned_success = float(
+            0.0 if finetuned_summary is None else finetuned_summary.get("scenario_success_rate", 0.0)
+        )
+        if teacher_success <= 0.0:
+            answer = "inconclusive"
+            rationale = (
+                "Teacher performance did not establish an effective reference policy."
+            )
+        elif distilled_success > 0.0:
+            answer = "supported"
+            rationale = (
+                "The student achieved non-zero post-distillation success against the same evaluation suite."
+            )
+        elif finetuned_summary is not None and finetuned_success > 0.0:
+            answer = "supported_after_rl_finetuning"
+            rationale = (
+                "The student only recovered measurable success after RL fine-tuning."
+            )
+        else:
+            answer = "not_supported_yet"
+            rationale = (
+                "The student failed to reproduce measurable success after distillation or fine-tuning."
+            )
+        return {
+            "answer": answer,
+            "rationale": rationale,
+            "teacher_scenario_success_rate": teacher_success,
+            "distilled_scenario_success_rate": distilled_success,
+            "finetuned_scenario_success_rate": finetuned_success,
+        }
+
+    def _train_with_distillation(
+        self,
+        *,
+        collection_episodes: int,
+        evaluation_episodes: int,
+        render_last_evaluation: bool,
+        capture_evaluation_trace: bool,
+        debug_trace: bool,
+        checkpoint_selection: str,
+        checkpoint_interval: int | None,
+        checkpoint_dir: str | Path | None,
+        checkpoint_scenario_names: Sequence[str] | None,
+        selection_scenario_episodes: int,
+        checkpoint_selection_config: CheckpointSelectionConfig,
+        curriculum_profile: str,
+        training_regime_spec: TrainingRegimeSpec,
+        teacher_checkpoint: str | Path,
+        distillation_config: DistillationConfig | None = None,
+    ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
+        teacher_brain, teacher_metadata = load_teacher_checkpoint(
+            teacher_checkpoint
+        )
+        teacher_architecture = str(
+            teacher_metadata.get("ablation_config", {}).get("architecture", "")
+        )
+        if (
+            teacher_architecture in {"monolithic", "true_monolithic"}
+            and not self.brain.config.is_modular
+        ):
+            raise ValueError(
+                "A monolithic teacher requires a modular student architecture for distillation."
+            )
+        if distillation_config is None:
+            resolved_distillation_config = DistillationConfig(
+                teacher_checkpoint=teacher_checkpoint,
+                distillation_epochs=int(training_regime_spec.distillation_epochs),
+                temperature=float(training_regime_spec.distillation_temperature),
+                module_lr=float(training_regime_spec.distillation_lr),
+                motor_lr=float(training_regime_spec.distillation_lr),
+                arbitration_lr=float(training_regime_spec.distillation_lr),
+            )
+        else:
+            resolved_distillation_config = DistillationConfig(
+                teacher_checkpoint=teacher_checkpoint,
+                dataset_episodes=distillation_config.dataset_episodes,
+                distillation_epochs=int(training_regime_spec.distillation_epochs),
+                temperature=float(training_regime_spec.distillation_temperature),
+                module_lr=float(training_regime_spec.distillation_lr),
+                motor_lr=float(training_regime_spec.distillation_lr),
+                arbitration_lr=float(training_regime_spec.distillation_lr),
+                shuffle=distillation_config.shuffle,
+                match_local_proposals=distillation_config.match_local_proposals,
+                loss=distillation_config.loss,
+            )
+        dataset_episodes = (
+            int(collection_episodes)
+            if resolved_distillation_config.dataset_episodes is None
+            else int(resolved_distillation_config.dataset_episodes)
+        )
+        dataset = self.collect_teacher_rollout(
+            teacher_brain,
+            episodes=dataset_episodes,
+            teacher_metadata=teacher_metadata,
+        )
+        distillation_run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=resolved_distillation_config,
+        )
+
+        teacher_eval_scale = 0.0 if teacher_brain.config.is_modular else None
+        student_eval_scale = 0.0 if self.brain.config.is_modular else None
+        with self._temporary_brain(teacher_brain):
+            teacher_evaluation = self._evaluate_active_brain_summary(
+                evaluation_episodes=evaluation_episodes,
+                evaluation_reflex_scale=teacher_eval_scale,
+                episode_start=max(0, int(collection_episodes)),
+            )
+        distilled_evaluation = self._evaluate_active_brain_summary(
+            evaluation_episodes=evaluation_episodes,
+            evaluation_reflex_scale=student_eval_scale,
+            episode_start=max(0, int(collection_episodes)),
+        )
+
+        self._latest_checkpointing_summary = None
+        self.checkpoint_source = "final"
+        if checkpoint_selection == "best":
+            training_history, evaluation_history, evaluation_trace = (
+                self._train_with_best_checkpoint_selection(
+                    episodes=0,
+                    evaluation_episodes=evaluation_episodes,
+                    render_last_evaluation=render_last_evaluation,
+                    capture_evaluation_trace=capture_evaluation_trace,
+                    debug_trace=debug_trace,
+                    checkpoint_interval=(
+                        int(checkpoint_interval)
+                        if checkpoint_interval is not None
+                        else int(
+                            self.budget_summary.get("resolved", {}).get(
+                                "checkpoint_interval",
+                                1,
+                            )
+                        )
+                    ),
+                    checkpoint_dir=checkpoint_dir,
+                    checkpoint_scenario_names=checkpoint_scenario_names,
+                    selection_scenario_episodes=selection_scenario_episodes,
+                    checkpoint_selection_config=checkpoint_selection_config,
+                    reflex_anneal_final_scale=float(
+                        training_regime_spec.anneal_target_scale
+                    ),
+                    reflex_annealing_schedule=training_regime_spec.annealing_schedule,
+                    reflex_anneal_warmup_fraction=float(
+                        training_regime_spec.anneal_warmup_fraction
+                    ),
+                    evaluation_reflex_scale=student_eval_scale,
+                    curriculum_profile=curriculum_profile,
+                    training_regime_spec=training_regime_spec,
+                )
+            )
+        else:
+            training_history, evaluation_history, evaluation_trace = self._train_histories(
+                episodes=0,
+                evaluation_episodes=evaluation_episodes,
+                render_last_evaluation=render_last_evaluation,
+                capture_evaluation_trace=capture_evaluation_trace,
+                debug_trace=debug_trace,
+                reflex_anneal_final_scale=float(training_regime_spec.anneal_target_scale),
+                reflex_annealing_schedule=training_regime_spec.annealing_schedule,
+                reflex_anneal_warmup_fraction=float(
+                    training_regime_spec.anneal_warmup_fraction
+                ),
+                evaluation_reflex_scale=student_eval_scale,
+                curriculum_profile=curriculum_profile,
+                training_regime_spec=training_regime_spec,
+            )
+
+        self._set_training_regime_metadata(
+            curriculum_profile=curriculum_profile,
+            episodes=int(collection_episodes),
+            curriculum_summary=self._latest_curriculum_summary,
+            training_regime_spec=training_regime_spec,
+        )
+        self._latest_training_regime_summary.setdefault("resolved_budget", {})[
+            "distillation_collection_episodes"
+        ] = int(dataset_episodes)
+        self._latest_training_regime_summary["resolved_budget"][
+            "total_training_episodes"
+        ] = int(dataset_episodes) + int(training_regime_spec.finetuning_episodes)
+
+        summary = self._build_summary(training_history, evaluation_history)
+        final_student_summary = (
+            dict(summary.get("evaluation", {}).get("primary", {}))
+            if isinstance(summary.get("evaluation"), dict)
+            else {}
+        )
+        post_distillation_comparison = {
+            "teacher": teacher_evaluation,
+            "modular_rl_from_scratch": None,
+            "modular_distilled": distilled_evaluation,
+            "modular_distilled_plus_rl_finetuning": (
+                final_student_summary if final_student_summary else None
+            ),
+        }
+        post_distillation_comparison["assessment"] = (
+            self._distillation_expressivity_assessment(
+                teacher_summary=post_distillation_comparison["teacher"],
+                distilled_summary=post_distillation_comparison[
+                    "modular_distilled"
+                ],
+                finetuned_summary=post_distillation_comparison[
+                    "modular_distilled_plus_rl_finetuning"
+                ],
+                baseline_summary=post_distillation_comparison[
+                    "modular_rl_from_scratch"
+                ],
+            )
+        )
+        dataset_summary = dataset.to_summary()
+        self._latest_distillation_summary = {
+            "teacher_checkpoint": str(teacher_checkpoint),
+            "teacher_architecture": teacher_architecture,
+            "dataset_episodes": int(dataset_summary.get("episodes", 0)),
+            "dataset_sample_count": int(dataset_summary.get("samples", 0)),
+            "distillation_epochs": int(training_regime_spec.distillation_epochs),
+            "distillation_temperature": float(
+                training_regime_spec.distillation_temperature
+            ),
+            "distillation_lr": float(training_regime_spec.distillation_lr),
+            "final_loss": float(
+                distillation_run_summary.get("final_epoch", {}).get(
+                    "mean_total_loss",
+                    0.0,
+                )
+            ),
+            "loss_curve": [
+                float(epoch_summary.get("mean_total_loss", 0.0))
+                for epoch_summary in distillation_run_summary.get("history", [])
+                if isinstance(epoch_summary, dict)
+            ],
+            "post_distillation_comparison": post_distillation_comparison,
+        }
+        summary["distillation"] = deepcopy(self._latest_distillation_summary)
+        return summary, evaluation_trace
 
     def _train_histories(
         self,
@@ -299,12 +612,11 @@ class SimulationTrainingMixin:
         render_last_evaluation: bool,
         capture_evaluation_trace: bool,
         debug_trace: bool,
-        checkpoint_metric: str,
         checkpoint_interval: int,
         checkpoint_dir: str | Path | None,
         checkpoint_scenario_names: Sequence[str] | None,
         selection_scenario_episodes: int,
-        checkpoint_selection_config: CheckpointSelectionConfig | None = None,
+        checkpoint_selection_config: CheckpointSelectionConfig,
         reflex_anneal_final_scale: float | None = None,
         reflex_annealing_schedule: AnnealingSchedule | str = AnnealingSchedule.LINEAR,
         reflex_anneal_warmup_fraction: float = 0.0,
@@ -321,12 +633,11 @@ class SimulationTrainingMixin:
             render_last_evaluation (bool): If true, render the last evaluation episodes.
             capture_evaluation_trace (bool): If true, capture trace data for the final evaluation episodes.
             debug_trace (bool): If true, include extended debug fields in captured traces.
-            checkpoint_metric (str): Primary metric label used when evaluating checkpoint candidates.
             checkpoint_interval (int): Interval (in completed episodes) at which to capture checkpoint candidates.
             checkpoint_dir (str | Path | None): Optional directory in which to persist selected best/last checkpoints.
             checkpoint_scenario_names (Sequence[str] | None): Sequence of scenario names used to evaluate checkpoint candidates; defaults to all scenarios.
             selection_scenario_episodes (int): Episodes per scenario to use when evaluating each checkpoint candidate.
-            checkpoint_selection_config (CheckpointSelectionConfig | None): Optional configuration that controls ranking metric and penalty weights; when omitted a default is created from `checkpoint_metric`.
+            checkpoint_selection_config (CheckpointSelectionConfig): Configuration that controls checkpoint ranking and summary metadata.
             reflex_anneal_final_scale (float | None): Final reflex scale applied during training annealing (overridden by training_regime_spec finetuning settings when present).
             reflex_annealing_schedule (AnnealingSchedule | str): Annealing schedule for reflex scale during training.
             reflex_anneal_warmup_fraction (float): Warmup fraction during reflex annealing (hold progress at zero for this fraction).
@@ -343,11 +654,7 @@ class SimulationTrainingMixin:
         scenario_names = list(checkpoint_scenario_names or SCENARIO_NAMES)
         interval = max(1, int(checkpoint_interval))
         selection_runs = max(1, int(selection_scenario_episodes))
-        selection_config = (
-            checkpoint_selection_config
-            if checkpoint_selection_config is not None
-            else CheckpointSelectionConfig(metric=checkpoint_metric)
-        )
+        selection_config = checkpoint_selection_config
         training_history: List[EpisodeStats] = []
         self.checkpoint_source = "best"
         final_training_reflex_scale = (
@@ -378,7 +685,7 @@ class SimulationTrainingMixin:
                         root_dir=checkpoint_root,
                         episode=0,
                         scenario_names=scenario_names,
-                        metric=checkpoint_metric,
+                        metric=selection_config.metric,
                         selection_scenario_episodes=selection_runs,
                         eval_reflex_scale=0.0,
                     )
@@ -402,7 +709,7 @@ class SimulationTrainingMixin:
                             root_dir=checkpoint_root,
                             episode=completed_episode,
                             scenario_names=scenario_names,
-                            metric=checkpoint_metric,
+                            metric=selection_config.metric,
                             selection_scenario_episodes=selection_runs,
                             eval_reflex_scale=0.0,
                         )
@@ -425,7 +732,7 @@ class SimulationTrainingMixin:
                         root_dir=checkpoint_root,
                         episode=total_training_episodes,
                         scenario_names=scenario_names,
-                        metric=checkpoint_metric,
+                        metric=selection_config.metric,
                         selection_scenario_episodes=selection_runs,
                         eval_reflex_scale=0.0,
                     )
@@ -500,7 +807,7 @@ class SimulationTrainingMixin:
             self._latest_checkpointing_summary = {
                 "enabled": True,
                 "selection": "best",
-                "metric": str(checkpoint_metric),
+                "metric": selection_config.metric,
                 "penalty_mode": selection_config.penalty_mode.value,
                 "penalty_config": selection_config.to_summary(),
                 "checkpoint_interval": interval,
@@ -544,19 +851,16 @@ class SimulationTrainingMixin:
         capture_evaluation_trace: bool = True,
         debug_trace: bool = False,
         checkpoint_selection: str = "none",
-        checkpoint_metric: str = "scenario_success_rate",
         checkpoint_interval: int | None = None,
         checkpoint_dir: str | Path | None = None,
         checkpoint_scenario_names: Sequence[str] | None = None,
         selection_scenario_episodes: int = 1,
-        checkpoint_override_penalty: float = 0.0,
-        checkpoint_dominance_penalty: float = 0.0,
-        checkpoint_penalty_mode: CheckpointPenaltyMode | str = (
-            CheckpointPenaltyMode.TIEBREAKER
-        ),
+        checkpoint_selection_config: CheckpointSelectionConfig | None = None,
         reflex_anneal_final_scale: float | None = None,
         curriculum_profile: str = "none",
         training_regime: str | TrainingRegimeSpec | None = None,
+        teacher_checkpoint: str | Path | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
         """
         Train the agent for a specified number of episodes, optionally perform checkpoint-based selection, and run a post-training evaluation.
@@ -570,30 +874,32 @@ class SimulationTrainingMixin:
             capture_evaluation_trace: Capture and return a per-tick trace for the final evaluation episode when True.
             debug_trace: Include expanded diagnostic fields in captured traces when True.
             checkpoint_selection: "none" to skip checkpoint candidate selection, "best" to capture and choose the best checkpoint.
-            checkpoint_metric: Primary metric label used to rank checkpoint candidates when checkpoint_selection == "best".
             checkpoint_interval: Episode interval for capturing checkpoint candidates; when None the resolved budget default is used.
             checkpoint_dir: Destination directory to persist selected "best" and "last" checkpoints; persistence is skipped when None.
             checkpoint_scenario_names: Scenario names used to evaluate checkpoint candidates; defaults are used when None.
             selection_scenario_episodes: Episodes per scenario used when evaluating checkpoint candidates.
-            checkpoint_override_penalty: Penalty weight (direct mode) applied for mean final reflex override rate when scoring candidates.
-            checkpoint_dominance_penalty: Penalty weight (direct mode) applied for mean reflex dominance when scoring candidates.
-            checkpoint_penalty_mode: Mode controlling candidate ranking: CheckpointPenaltyMode.TIEBREAKER preserves legacy tuple ordering, CheckpointPenaltyMode.DIRECT applies a penalized composite score.
+            checkpoint_selection_config: Normalized checkpoint selection settings including metric and penalty behavior.
             reflex_anneal_final_scale: If provided, target reflex scale for annealing during training; when None no custom anneal is applied. Mutually exclusive with providing a TrainingRegimeSpec via training_regime.
             curriculum_profile: Curriculum profile name to use during training (e.g., "none", "ecological_v1", "ecological_v2").
             training_regime: Optional named training regime or explicit TrainingRegimeSpec that defines annealing schedule and optional late finetuning.
+            teacher_checkpoint: Teacher checkpoint directory required by the distillation training regime.
+            distillation_config: Optional distillation dataset/loss overrides; the training regime remains the source of distillation epochs, temperature, and learning rate.
         
         Returns:
             summary: Consolidated training and evaluation summary suitable for serialization.
             evaluation_trace: Captured trace for the final evaluation run when capture_evaluation_trace is True; otherwise an empty list.
         
         Raises:
-            ValueError: If checkpoint_selection is not one of "none" or "best", if checkpoint_metric is invalid when checkpoint_selection == "best", if curriculum_profile is not supported, or if both training_regime and reflex_anneal_final_scale are provided.
+            ValueError: If checkpoint_selection is not one of "none" or "best", if curriculum_profile is not supported, or if both training_regime and reflex_anneal_final_scale are provided.
         """
         if checkpoint_selection not in {"none", "best"}:
             raise ValueError(
                 "Invalid checkpoint_selection. Use 'none' or 'best'."
             )
-        checkpoint_selection_config: CheckpointSelectionConfig | None = None
+        checkpoint_selection_config = resolve_checkpoint_selection_config(
+            checkpoint_selection_config
+        )
+        self._latest_distillation_summary = None
         if training_regime is not None and reflex_anneal_final_scale is not None:
             raise ValueError(
                 "training_regime and reflex_anneal_final_scale are mutually exclusive."
@@ -603,17 +909,19 @@ class SimulationTrainingMixin:
             training_regime_spec = training_regime
         elif training_regime is not None:
             training_regime_spec = resolve_training_regime(str(training_regime))
+        if (
+            training_regime_spec is not None
+            and bool(training_regime_spec.distillation_enabled)
+            and teacher_checkpoint is None
+            and distillation_config is None
+        ):
+            raise ValueError(
+                "The distillation training regime requires teacher_checkpoint."
+            )
+        if teacher_checkpoint is None and distillation_config is not None:
+            teacher_checkpoint = distillation_config.teacher_checkpoint
         curriculum_profile = validate_curriculum_profile(curriculum_profile)
         if checkpoint_selection == "best":
-            checkpoint_selection_config = CheckpointSelectionConfig(
-                metric=checkpoint_metric,
-                override_penalty_weight=checkpoint_override_penalty,
-                dominance_penalty_weight=checkpoint_dominance_penalty,
-                penalty_mode=checkpoint_penalty_mode,
-            )
-            # Intentionally call checkpoint_candidate_sort_key() with an empty
-            # candidate to validate checkpoint_metric early; invalid metrics
-            # raise ValueError here before any training or checkpoint work runs.
             checkpoint_candidate_sort_key(
                 {},
                 selection_config=checkpoint_selection_config,
@@ -685,6 +993,27 @@ class SimulationTrainingMixin:
         }
         self._latest_evaluation_without_reflex_support = None
         self.checkpoint_source = "final"
+        if (
+            training_regime_spec is not None
+            and bool(training_regime_spec.distillation_enabled)
+        ):
+            return self._train_with_distillation(
+                collection_episodes=episodes,
+                evaluation_episodes=evaluation_episodes,
+                render_last_evaluation=render_last_evaluation,
+                capture_evaluation_trace=capture_evaluation_trace,
+                debug_trace=debug_trace,
+                checkpoint_selection=checkpoint_selection,
+                checkpoint_interval=checkpoint_interval,
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_scenario_names=checkpoint_scenario_names,
+                selection_scenario_episodes=selection_scenario_episodes,
+                checkpoint_selection_config=checkpoint_selection_config,
+                curriculum_profile=curriculum_profile,
+                training_regime_spec=training_regime_spec,
+                teacher_checkpoint=str(teacher_checkpoint),
+                distillation_config=distillation_config,
+            )
         if checkpoint_selection == "best":
             effective_checkpoint_interval = (
                 int(checkpoint_interval)
@@ -700,7 +1029,6 @@ class SimulationTrainingMixin:
                     render_last_evaluation=render_last_evaluation,
                     capture_evaluation_trace=capture_evaluation_trace,
                     debug_trace=debug_trace,
-                    checkpoint_metric=checkpoint_metric,
                     checkpoint_interval=effective_checkpoint_interval,
                     checkpoint_dir=checkpoint_dir,
                     checkpoint_scenario_names=checkpoint_scenario_names,

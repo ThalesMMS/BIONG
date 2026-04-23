@@ -40,7 +40,14 @@ from ..interfaces import (
     interface_registry,
 )
 from ..modules import MODULE_HIDDEN_DIMS, CorticalModuleBank, ModuleResult, ReflexDecision
-from ..nn import ArbitrationNetwork, MotorNetwork, ProposalNetwork, one_hot, softmax
+from ..nn import (
+    ArbitrationNetwork,
+    MotorNetwork,
+    ProposalNetwork,
+    RecurrentProposalNetwork,
+    one_hot,
+    softmax,
+)
 from ..noise import _compute_execution_difficulty_core
 from ..operational_profiles import OperationalProfile, runtime_operational_profile
 from ..reflexes import (
@@ -54,6 +61,108 @@ from .types import BrainStep
 
 
 class BrainRuntimeMixin:
+    @staticmethod
+    def _network_forward_macs(network: object) -> int:
+        if isinstance(network, RecurrentProposalNetwork):
+            return int(
+                network.input_dim * network.hidden_dim
+                + network.hidden_dim * network.hidden_dim
+                + network.hidden_dim * network.output_dim
+            )
+        if isinstance(network, ArbitrationNetwork):
+            return int(
+                network.input_dim * network.hidden_dim
+                + network.hidden_dim * network.valence_dim
+                + network.hidden_dim * network.gate_dim
+                + network.hidden_dim
+            )
+        if isinstance(network, MotorNetwork):
+            return int(
+                network.input_dim * network.hidden_dim
+                + network.hidden_dim * network.output_dim
+                + network.hidden_dim
+            )
+        if isinstance(network, ProposalNetwork):
+            return int(
+                network.input_dim * network.hidden_dim
+                + network.hidden_dim * network.output_dim
+            )
+        return 0
+
+    def estimate_compute_cost(self) -> Dict[str, object]:
+        per_network: Dict[str, int] = {}
+        if self.module_bank is not None:
+            per_network.update(
+                {
+                    name: self._network_forward_macs(network)
+                    for name, network in self.module_bank.modules.items()
+                }
+            )
+        if self.monolithic_policy is not None:
+            per_network[self.MONOLITHIC_POLICY_NAME] = self._network_forward_macs(
+                self.monolithic_policy
+            )
+        if self.true_monolithic_policy is not None:
+            per_network[self.TRUE_MONOLITHIC_POLICY_NAME] = self._network_forward_macs(
+                self.true_monolithic_policy
+            )
+        if self.arbitration_network is not None:
+            per_network[self.ARBITRATION_NETWORK_NAME] = self._network_forward_macs(
+                self.arbitration_network
+            )
+        if self.action_center is not None:
+            per_network["action_center"] = self._network_forward_macs(
+                self.action_center
+            )
+        if self.motor_cortex is not None:
+            per_network["motor_cortex"] = self._network_forward_macs(
+                self.motor_cortex
+            )
+        return {
+            "unit": "approx_forward_macs",
+            "per_network": per_network,
+            "total": int(sum(per_network.values())),
+        }
+
+    def _true_monolithic_arbitration_decision(
+        self,
+        *,
+        module_name: str,
+        action_idx: int,
+    ) -> ArbitrationDecision:
+        """Build a trivial arbitration payload for the direct-control baseline."""
+        return ArbitrationDecision(
+            strategy="direct_control",
+            winning_valence="exploration",
+            valence_scores={
+                "threat": 0.0,
+                "hunger": 0.0,
+                "sleep": 0.0,
+                "exploration": 1.0,
+            },
+            module_gates={module_name: 1.0},
+            suppressed_modules=[],
+            evidence={},
+            intent_before_gating_idx=int(action_idx),
+            intent_after_gating_idx=int(action_idx),
+            valence_logits={
+                "threat": 0.0,
+                "hunger": 0.0,
+                "sleep": 0.0,
+                "exploration": 1.0,
+            },
+            base_gates={module_name: 1.0},
+            gate_adjustments={module_name: 1.0},
+            arbitration_value=0.0,
+            learned_adjustment=False,
+            module_contribution_share={module_name: 1.0},
+            dominant_module=module_name,
+            dominant_module_share=1.0,
+            effective_module_count=1.0,
+            module_agreement_rate=1.0,
+            module_disagreement_rate=0.0,
+        )
+
     def set_runtime_reflex_scale(self, scale: float) -> None:
         """
         Set the runtime multiplier applied to reflex strengths.
@@ -142,79 +251,141 @@ class BrainRuntimeMixin:
         else:
             training_mode = bool(training)
         store_cache = training_mode and policy_mode == "normal"
-        module_results = self._proposal_results(
-            observation,
-            store_cache=store_cache,
-            training=training_mode,
-        )
-        arbitration_without_reflex = self._compute_arbitration(
-            module_results,
-            observation,
-            training=False,
-            store_cache=False,
-        )
-        gated_logits_without_reflex = [
-            arbitration_gate_weight_for(arbitration_without_reflex, result.name) * result.logits
-            for result in module_results
-        ]
-        proposal_sum_without_reflex = np.sum(
-            np.stack(gated_logits_without_reflex, axis=0),
-            axis=0,
-        )
-        if policy_mode == "reflex_only":
-            action_center_logits_without_reflex = proposal_sum_without_reflex.copy()
-            action_intent_without_reflex_idx = int(
-                np.argmax(action_center_logits_without_reflex)
+        proposal_sum = np.zeros(self.action_dim, dtype=float)
+        action_center_input = np.zeros(0, dtype=float)
+        motor_input = np.zeros(0, dtype=float)
+        action_center_correction_logits = np.zeros(self.action_dim, dtype=float)
+        motor_correction_logits = np.zeros(self.action_dim, dtype=float)
+        value = 0.0
+        arbitration = None
+        if self.config.is_true_monolithic:
+            if self.true_monolithic_policy is None:
+                raise RuntimeError(
+                    "True monolithic network unavailable for the configured architecture."
+                )
+            monolithic_observation = self._build_monolithic_observation(observation)
+            policy_logits, value = self.true_monolithic_policy.forward(
+                monolithic_observation,
+                store_cache=store_cache,
             )
-            total_logits_without_reflex = proposal_sum_without_reflex.copy()
+            direct_result = ModuleResult(
+                interface=None,
+                name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                observation_key=self.TRUE_MONOLITHIC_POLICY_NAME,
+                observation=monolithic_observation.copy(),
+                logits=policy_logits.copy(),
+                probs=softmax(policy_logits),
+                active=True,
+                reflex=None,
+                neural_logits=policy_logits.copy(),
+                reflex_delta_logits=np.zeros_like(policy_logits),
+                post_reflex_logits=policy_logits.copy(),
+            )
+            module_results = [direct_result]
+            direct_result.valence_role = "integrated_policy"
+            direct_result.gate_weight = 1.0
+            direct_result.gated_logits = direct_result.logits.copy()
+            direct_result.contribution_share = 1.0
+            direct_result.intent_before_gating = ACTIONS[int(np.argmax(direct_result.logits))]
+            direct_result.intent_after_gating = direct_result.intent_before_gating
+            total_logits_without_reflex = direct_result.logits.copy()
+            total_logits = direct_result.logits.copy()
+            action_center_logits = total_logits.copy()
+            action_center_policy = softmax(action_center_logits)
+            proposal_sum = total_logits.copy()
+            policy = softmax(total_logits)
+            action_intent_idx = int(np.argmax(action_center_policy))
+            action_intent_without_reflex_idx = action_intent_idx
+            action_without_reflex_idx = action_intent_idx
+            motor_action_idx = action_intent_idx
+            arbitration = self._true_monolithic_arbitration_decision(
+                module_name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                action_idx=action_intent_idx,
+            )
+            if sample:
+                action_idx = int(self.rng.choice(self.action_dim, p=policy))
+            else:
+                action_idx = motor_action_idx
+            motor_override = False
+            final_reflex_override = False
         else:
-            action_context_mapping = self._bound_action_context(observation)
-            action_context = ACTION_CONTEXT_INTERFACE.vector_from_mapping(action_context_mapping)
-            action_input_without_reflex = np.concatenate(
-                [np.concatenate(gated_logits_without_reflex, axis=0), action_context],
+            module_results = self._proposal_results(
+                observation,
+                store_cache=store_cache,
+                training=training_mode,
+            )
+            arbitration_without_reflex = self._compute_arbitration(
+                module_results,
+                observation,
+                training=False,
+                store_cache=False,
+            )
+            gated_logits_without_reflex = [
+                arbitration_gate_weight_for(arbitration_without_reflex, result.name) * result.logits
+                for result in module_results
+            ]
+            proposal_sum_without_reflex = np.sum(
+                np.stack(gated_logits_without_reflex, axis=0),
                 axis=0,
             )
-            action_center_correction_without_reflex, _ = self.action_center.forward(
-                action_input_without_reflex,
-                store_cache=False,
-            )
-            action_center_logits_without_reflex = (
-                proposal_sum_without_reflex + action_center_correction_without_reflex
-            )
-            action_intent_without_reflex_idx = int(
-                np.argmax(action_center_logits_without_reflex)
-            )
-            motor_input_without_reflex = self._build_motor_input(
-                one_hot(action_intent_without_reflex_idx, self.action_dim),
-                observation,
-            )
-            motor_correction_without_reflex = self.motor_cortex.forward(
-                motor_input_without_reflex,
-                store_cache=False,
-            )
-            total_logits_without_reflex = (
-                action_center_logits_without_reflex + motor_correction_without_reflex
-            )
+            if policy_mode == "reflex_only":
+                action_center_logits_without_reflex = proposal_sum_without_reflex.copy()
+                action_intent_without_reflex_idx = int(
+                    np.argmax(action_center_logits_without_reflex)
+                )
+                total_logits_without_reflex = proposal_sum_without_reflex.copy()
+            else:
+                action_context_mapping = self._bound_action_context(observation)
+                action_context = ACTION_CONTEXT_INTERFACE.vector_from_mapping(action_context_mapping)
+                action_input_without_reflex = np.concatenate(
+                    [np.concatenate(gated_logits_without_reflex, axis=0), action_context],
+                    axis=0,
+                )
+                if self.action_center is None:
+                    raise RuntimeError("Action center unavailable for the configured architecture.")
+                action_center_correction_without_reflex, _ = self.action_center.forward(
+                    action_input_without_reflex,
+                    store_cache=False,
+                )
+                action_center_logits_without_reflex = (
+                    proposal_sum_without_reflex + action_center_correction_without_reflex
+                )
+                action_intent_without_reflex_idx = int(
+                    np.argmax(action_center_logits_without_reflex)
+                )
+                motor_input_without_reflex = self._build_motor_input(
+                    one_hot(action_intent_without_reflex_idx, self.action_dim),
+                    observation,
+                )
+                if self.motor_cortex is None:
+                    raise RuntimeError("Motor cortex unavailable for the configured architecture.")
+                motor_correction_without_reflex = self.motor_cortex.forward(
+                    motor_input_without_reflex,
+                    store_cache=False,
+                )
+                total_logits_without_reflex = (
+                    action_center_logits_without_reflex + motor_correction_without_reflex
+                )
 
-        apply_reflex_path(
-            module_results,
-            ablation_config=self.config,
-            operational_profile=self.operational_profile,
-            interface_registry=self._interface_registry(),
-            current_reflex_scale=self.current_reflex_scale,
-            module_valence_roles=self.MODULE_VALENCE_ROLES,
-        )
-        arbitration = self._compute_arbitration(
-            module_results,
-            observation,
-            training=training_mode,
-            store_cache=store_cache,
-        )
-        apply_priority_gating(
-            module_results,
-            arbitration,
-            module_valence_roles=self.MODULE_VALENCE_ROLES,
-        )
+            apply_reflex_path(
+                module_results,
+                ablation_config=self.config,
+                operational_profile=self.operational_profile,
+                interface_registry=self._interface_registry(),
+                current_reflex_scale=self.current_reflex_scale,
+                module_valence_roles=self.MODULE_VALENCE_ROLES,
+            )
+            arbitration = self._compute_arbitration(
+                module_results,
+                observation,
+                training=training_mode,
+                store_cache=store_cache,
+            )
+            apply_priority_gating(
+                module_results,
+                arbitration,
+                module_valence_roles=self.MODULE_VALENCE_ROLES,
+            )
 
         if bus is not None:
             for result in module_results:
@@ -242,98 +413,101 @@ class BrainRuntimeMixin:
                     },
                 )
 
-        proposal_sum = np.sum(
-            np.stack(
-                [
-                    result.gated_logits if result.gated_logits is not None else result.logits
-                    for result in module_results
-                ],
+        if not self.config.is_true_monolithic:
+            proposal_sum = np.sum(
+                np.stack(
+                    [
+                        result.gated_logits if result.gated_logits is not None else result.logits
+                        for result in module_results
+                    ],
+                    axis=0,
+                ),
                 axis=0,
-            ),
-            axis=0,
-        )
-        action_center_input = self._build_action_input(module_results, observation)
-        value = 0.0
-        action_center_correction_logits = np.zeros(self.action_dim, dtype=float)
-        if policy_mode == "reflex_only":
-            action_center_logits = proposal_sum.copy()
-            action_center_policy = softmax(action_center_logits)
-            action_intent_idx = int(np.argmax(action_center_policy))
-            motor_input = self._build_motor_input(
-                one_hot(action_intent_idx, self.action_dim),
-                observation,
             )
-            motor_correction_logits = np.zeros(self.action_dim, dtype=float)
-            total_logits = action_center_logits.copy()
-            policy = softmax(total_logits)
-            action_without_reflex_idx = int(np.argmax(total_logits_without_reflex))
-            motor_action_idx = int(np.argmax(total_logits))
-            if sample:
-                action_idx = int(self.rng.choice(self.action_dim, p=policy))
+            action_center_input = self._build_action_input(module_results, observation)
+            if policy_mode == "reflex_only":
+                action_center_logits = proposal_sum.copy()
+                action_center_policy = softmax(action_center_logits)
+                action_intent_idx = int(np.argmax(action_center_policy))
+                motor_input = self._build_motor_input(
+                    one_hot(action_intent_idx, self.action_dim),
+                    observation,
+                )
+                total_logits = action_center_logits.copy()
+                policy = softmax(total_logits)
+                action_without_reflex_idx = int(np.argmax(total_logits_without_reflex))
+                motor_action_idx = int(np.argmax(total_logits))
+                if sample:
+                    action_idx = int(self.rng.choice(self.action_dim, p=policy))
+                else:
+                    action_idx = motor_action_idx
+                motor_override = False
+                final_reflex_override = action_without_reflex_idx != motor_action_idx
             else:
-                action_idx = motor_action_idx
-            motor_override = False
-            final_reflex_override = action_without_reflex_idx != motor_action_idx
-        else:
-            action_center_correction_logits, value = self.action_center.forward(
-                action_center_input,
-                store_cache=store_cache,
-            )
-            action_center_logits = proposal_sum + action_center_correction_logits
-            action_center_policy = softmax(action_center_logits)
-            action_intent_idx = int(np.argmax(action_center_policy))
-            motor_input = self._build_motor_input(
-                one_hot(action_intent_idx, self.action_dim),
-                observation,
-            )
-            motor_correction_logits = self.motor_cortex.forward(
-                motor_input,
-                store_cache=store_cache,
-            )
-            total_logits = action_center_logits + motor_correction_logits
-            motor_action_idx_before_food_bias = int(np.argmax(total_logits))
-            if (
-                self.config.enable_food_direction_bias
-                and not training_mode
-                and not sample
-                and arbitration.winning_valence == "hunger"
-            ):
-                hunger_obs = self._bound_observation("hunger_center", observation)
-                food_dx = 0.0
-                food_dy = 0.0
-                if hunger_obs["food_visible"] > 0.0 and hunger_obs["food_certainty"] > 0.0:
-                    food_dx = hunger_obs["food_dx"]
-                    food_dy = hunger_obs["food_dy"]
-                elif hunger_obs["food_trace_strength"] > 0.0:
-                    food_dx = hunger_obs["food_trace_dx"]
-                    food_dy = hunger_obs["food_trace_dy"]
-                elif hunger_obs["food_memory_age"] < 1.0:
-                    food_dx = hunger_obs["food_memory_dx"]
-                    food_dy = hunger_obs["food_memory_dy"]
-                elif hunger_obs["food_smell_strength"] > 0.0:
-                    food_dx = hunger_obs["food_smell_dx"]
-                    food_dy = hunger_obs["food_smell_dy"]
-                food_bias_action = direction_action(food_dx, food_dy)
-                if food_bias_action != "STAY":
-                    total_logits = total_logits.copy()
-                    total_logits[ACTION_TO_INDEX[food_bias_action]] += 3.0
-                    arbitration = replace(
-                        arbitration,
-                        food_bias_applied=True,
-                        food_bias_action=food_bias_action,
+                if self.action_center is None or self.motor_cortex is None:
+                    raise RuntimeError(
+                        "Action/motor pipeline unavailable for the configured architecture."
                     )
-            policy = softmax(total_logits)
-            action_without_reflex_idx = int(np.argmax(total_logits_without_reflex))
-            motor_action_idx = int(np.argmax(total_logits))
-            if sample:
-                action_idx = int(self.rng.choice(self.action_dim, p=policy))
-            else:
-                action_idx = motor_action_idx
-            motor_override = action_intent_idx != motor_action_idx
-            final_reflex_override = (
-                action_intent_without_reflex_idx != action_intent_idx
-                or action_without_reflex_idx != motor_action_idx_before_food_bias
-            )
+                action_center_correction_logits, value = self.action_center.forward(
+                    action_center_input,
+                    store_cache=store_cache,
+                )
+                action_center_logits = proposal_sum + action_center_correction_logits
+                action_center_policy = softmax(action_center_logits)
+                action_intent_idx = int(np.argmax(action_center_policy))
+                motor_input = self._build_motor_input(
+                    one_hot(action_intent_idx, self.action_dim),
+                    observation,
+                )
+                motor_correction_logits = self.motor_cortex.forward(
+                    motor_input,
+                    store_cache=store_cache,
+                )
+                total_logits = action_center_logits + motor_correction_logits
+                motor_action_idx_before_food_bias = int(np.argmax(total_logits))
+                if (
+                    self.config.enable_food_direction_bias
+                    and not training_mode
+                    and not sample
+                    and arbitration is not None
+                    and arbitration.winning_valence == "hunger"
+                ):
+                    hunger_obs = self._bound_observation("hunger_center", observation)
+                    food_dx = 0.0
+                    food_dy = 0.0
+                    if hunger_obs["food_visible"] > 0.0 and hunger_obs["food_certainty"] > 0.0:
+                        food_dx = hunger_obs["food_dx"]
+                        food_dy = hunger_obs["food_dy"]
+                    elif hunger_obs["food_trace_strength"] > 0.0:
+                        food_dx = hunger_obs["food_trace_dx"]
+                        food_dy = hunger_obs["food_trace_dy"]
+                    elif hunger_obs["food_memory_age"] < 1.0:
+                        food_dx = hunger_obs["food_memory_dx"]
+                        food_dy = hunger_obs["food_memory_dy"]
+                    elif hunger_obs["food_smell_strength"] > 0.0:
+                        food_dx = hunger_obs["food_smell_dx"]
+                        food_dy = hunger_obs["food_smell_dy"]
+                    food_bias_action = direction_action(food_dx, food_dy)
+                    if food_bias_action != "STAY":
+                        total_logits = total_logits.copy()
+                        total_logits[ACTION_TO_INDEX[food_bias_action]] += 3.0
+                        arbitration = replace(
+                            arbitration,
+                            food_bias_applied=True,
+                            food_bias_action=food_bias_action,
+                        )
+                policy = softmax(total_logits)
+                action_without_reflex_idx = int(np.argmax(total_logits_without_reflex))
+                motor_action_idx = int(np.argmax(total_logits))
+                if sample:
+                    action_idx = int(self.rng.choice(self.action_dim, p=policy))
+                else:
+                    action_idx = motor_action_idx
+                motor_override = action_intent_idx != motor_action_idx
+                final_reflex_override = (
+                    action_intent_without_reflex_idx != action_intent_idx
+                    or action_without_reflex_idx != motor_action_idx_before_food_bias
+                )
 
         execution_diagnostics = self._motor_execution_diagnostics(
             observation,
@@ -345,45 +519,59 @@ class BrainRuntimeMixin:
         execution_difficulty = float(execution_diagnostics["execution_difficulty"])
 
         if bus is not None:
-            arbitration_payload = arbitration.to_payload()
-            bus.publish(
-                sender="action_center",
-                topic="action.selection",
-                payload={
-                    "policy_mode": policy_mode,
-                    "proposal_sum_logits": proposal_sum.round(6).tolist(),
-                    "action_center_correction_logits": action_center_correction_logits.round(6).tolist(),
-                    "action_center_logits": action_center_logits.round(6).tolist(),
-                    "action_center_policy": action_center_policy.round(6).tolist(),
-                    "selected_intent": ACTIONS[action_intent_idx],
-                    "selected_intent_without_reflex": ACTIONS[action_intent_without_reflex_idx],
-                    "value_estimate": round(float(value), 6),
-                    **arbitration_payload,
-                },
-            )
-            bus.publish(
-                sender="motor_cortex",
-                topic="action.execution",
-                payload={
-                    "policy_mode": policy_mode,
-                    "motor_correction_logits": motor_correction_logits.round(6).tolist(),
-                    "total_logits_without_reflex": total_logits_without_reflex.round(6).tolist(),
-                    "total_logits": total_logits.round(6).tolist(),
-                    "policy": policy.round(6).tolist(),
-                    "selected_intent": ACTIONS[action_intent_idx],
-                    "selected_action": ACTIONS[motor_action_idx],
-                    "executed_action": ACTIONS[action_idx],
-                    "selected_action_without_reflex": ACTIONS[action_without_reflex_idx],
-                    "motor_override": bool(motor_override),
-                    "final_reflex_override": bool(final_reflex_override),
-                    "orientation_alignment": round(float(orientation_alignment), 6),
-                    "terrain_difficulty": round(float(terrain_difficulty), 6),
-                    "momentum": round(float(momentum), 6),
-                    "execution_difficulty": round(float(execution_difficulty), 6),
-                    "execution_slip_occurred": False,
-                    "slip_reason": "none",
-                },
-            )
+            if self.config.is_true_monolithic:
+                bus.publish(
+                    sender=self.TRUE_MONOLITHIC_POLICY_NAME,
+                    topic="action.selection",
+                    payload={
+                        "policy_mode": policy_mode,
+                        "direct_policy_logits": total_logits.round(6).tolist(),
+                        "policy": policy.round(6).tolist(),
+                        "selected_action": ACTIONS[motor_action_idx],
+                        "executed_action": ACTIONS[action_idx],
+                        "value_estimate": round(float(value), 6),
+                    },
+                )
+            else:
+                arbitration_payload = arbitration.to_payload() if arbitration is not None else {}
+                bus.publish(
+                    sender="action_center",
+                    topic="action.selection",
+                    payload={
+                        "policy_mode": policy_mode,
+                        "proposal_sum_logits": proposal_sum.round(6).tolist(),
+                        "action_center_correction_logits": action_center_correction_logits.round(6).tolist(),
+                        "action_center_logits": action_center_logits.round(6).tolist(),
+                        "action_center_policy": action_center_policy.round(6).tolist(),
+                        "selected_intent": ACTIONS[action_intent_idx],
+                        "selected_intent_without_reflex": ACTIONS[action_intent_without_reflex_idx],
+                        "value_estimate": round(float(value), 6),
+                        **arbitration_payload,
+                    },
+                )
+                bus.publish(
+                    sender="motor_cortex",
+                    topic="action.execution",
+                    payload={
+                        "policy_mode": policy_mode,
+                        "motor_correction_logits": motor_correction_logits.round(6).tolist(),
+                        "total_logits_without_reflex": total_logits_without_reflex.round(6).tolist(),
+                        "total_logits": total_logits.round(6).tolist(),
+                        "policy": policy.round(6).tolist(),
+                        "selected_intent": ACTIONS[action_intent_idx],
+                        "selected_action": ACTIONS[motor_action_idx],
+                        "executed_action": ACTIONS[action_idx],
+                        "selected_action_without_reflex": ACTIONS[action_without_reflex_idx],
+                        "motor_override": bool(motor_override),
+                        "final_reflex_override": bool(final_reflex_override),
+                        "orientation_alignment": round(float(orientation_alignment), 6),
+                        "terrain_difficulty": round(float(terrain_difficulty), 6),
+                        "momentum": round(float(momentum), 6),
+                        "execution_difficulty": round(float(execution_difficulty), 6),
+                        "execution_slip_occurred": False,
+                        "slip_reason": "none",
+                    },
+                )
 
         step_observation: Dict[str, np.ndarray] = {}
         if (
@@ -448,6 +636,17 @@ class BrainRuntimeMixin:
         Returns:
             float: Scalar value estimate for the provided observation.
         """
+        if self.config.is_true_monolithic:
+            if self.true_monolithic_policy is None:
+                raise RuntimeError(
+                    "True monolithic network unavailable for the configured architecture."
+                )
+            monolithic_observation = self._build_monolithic_observation(observation)
+            _, value = self.true_monolithic_policy.forward(
+                monolithic_observation,
+                store_cache=False,
+            )
+            return float(value)
         hidden_state_snapshot: Dict[str, np.ndarray] | None = None
         if self.module_bank is not None and self.module_bank.has_recurrent_modules:
             hidden_state_snapshot = self.module_bank.snapshot_hidden_states()
@@ -477,6 +676,8 @@ class BrainRuntimeMixin:
                 module_valence_roles=self.MODULE_VALENCE_ROLES,
             )
             action_input = self._build_action_input(module_results, observation)
+            if self.action_center is None:
+                raise RuntimeError("Action center unavailable for the configured architecture.")
             _, value = self.action_center.forward(action_input, store_cache=False)
             return float(value)
         finally:
@@ -488,7 +689,9 @@ class BrainRuntimeMixin:
         Return the ordered proposal sources that feed the action-center input.
         """
         if self.module_bank is not None:
-            return [spec.name for spec in self.module_bank.specs]
+            return [spec.name for spec in self.module_bank.enabled_specs]
+        if self.true_monolithic_policy is not None:
+            return [self.TRUE_MONOLITHIC_POLICY_NAME]
         return [self.MONOLITHIC_POLICY_NAME]
 
     def _architecture_signature(self) -> dict[str, object]:
@@ -498,13 +701,30 @@ class BrainRuntimeMixin:
         Returns:
             signature (dict): A mapping describing architecture identifiers and configuration used for compatibility/fingerprinting (includes proposal backend name and order, whether learned arbitration is enabled, and arbitration network input/hidden dims and regularization weight).
         """
+        arbitration_input_dim = (
+            self.arbitration_network.input_dim
+            if self.arbitration_network is not None
+            else 0
+        )
+        arbitration_hidden_dim = (
+            self.arbitration_network.hidden_dim
+            if self.arbitration_network is not None
+            else 0
+        )
         return architecture_signature(
             proposal_backend=self.config.architecture,
             proposal_order=self._proposal_stage_names(),
-            learned_arbitration=self.config.use_learned_arbitration,
-            arbitration_input_dim=self.arbitration_network.input_dim,
-            arbitration_hidden_dim=self.arbitration_network.hidden_dim,
+            learned_arbitration=(
+                self.config.use_learned_arbitration and self.arbitration_network is not None
+            ),
+            arbitration_input_dim=arbitration_input_dim,
+            arbitration_hidden_dim=arbitration_hidden_dim,
             arbitration_regularization_weight=self.arbitration_regularization_weight,
+            capacity_profile_name=self.config.capacity_profile_name,
+            module_hidden_dims=self.config.module_hidden_dims,
+            integration_hidden_dim=self.config.integration_hidden_dim,
+            monolithic_hidden_dim=self.config.monolithic_hidden_dim,
+            capacity_profile=self.config.capacity_profile.to_summary(),
         )
 
     def _interface_registry(self) -> dict[str, object]:
@@ -530,29 +750,66 @@ class BrainRuntimeMixin:
         Compute the L2 norm of parameters for each trainable network component.
         
         Returns:
-            Mapping from component name to its L2 parameter norm. Includes per-module entries when a modular bank is present, `"monolithic_policy"` when a monolithic policy exists, and always includes `"arbitration_network"`, `"action_center"`, and `"motor_cortex"`.
+            Mapping from component name to its L2 parameter norm for each active
+            trainable network in the configured topology.
         """
         norms: Dict[str, float] = {}
         if self.module_bank is not None:
             norms.update(self.module_bank.parameter_norms())
         if self.monolithic_policy is not None:
             norms[self.MONOLITHIC_POLICY_NAME] = self.monolithic_policy.parameter_norm()
-        norms[self.ARBITRATION_NETWORK_NAME] = self.arbitration_network.parameter_norm()
-        norms["action_center"] = self.action_center.parameter_norm()
-        norms["motor_cortex"] = self.motor_cortex.parameter_norm()
+        if self.true_monolithic_policy is not None:
+            norms[self.TRUE_MONOLITHIC_POLICY_NAME] = (
+                self.true_monolithic_policy.parameter_norm()
+            )
+        if self.arbitration_network is not None:
+            norms[self.ARBITRATION_NETWORK_NAME] = self.arbitration_network.parameter_norm()
+        if self.action_center is not None:
+            norms["action_center"] = self.action_center.parameter_norm()
+        if self.motor_cortex is not None:
+            norms["motor_cortex"] = self.motor_cortex.parameter_norm()
         return norms
+
+    def count_parameters(self) -> Dict[str, int]:
+        """
+        Count trainable parameters for each trainable network component.
+
+        Returns:
+            Mapping from component name to trainable parameter count for each
+            active trainable network in the configured topology.
+        """
+        counts: Dict[str, int] = {}
+        if self.module_bank is not None:
+            counts.update(self.module_bank.parameter_counts())
+        if self.monolithic_policy is not None:
+            counts[self.MONOLITHIC_POLICY_NAME] = self.monolithic_policy.count_parameters()
+        if self.true_monolithic_policy is not None:
+            counts[self.TRUE_MONOLITHIC_POLICY_NAME] = (
+                self.true_monolithic_policy.count_parameters()
+            )
+        if self.arbitration_network is not None:
+            counts[self.ARBITRATION_NETWORK_NAME] = self.arbitration_network.count_parameters()
+        if self.action_center is not None:
+            counts["action_center"] = self.action_center.count_parameters()
+        if self.motor_cortex is not None:
+            counts["motor_cortex"] = self.motor_cortex.count_parameters()
+        return counts
 
     def _module_names(self) -> List[str]:
         """
         List module names present in the brain for inspection.
         
-        When the brain is modular, returns the module spec names in their configured order followed by "action_center" and "motor_cortex". When monolithic, returns ["monolithic_policy", "action_center", "motor_cortex"].
+        When the brain is modular, returns the module spec names in their
+        configured order followed by the active downstream controllers.
+        Monolithic variants return only the networks present in that topology.
         
         Returns:
             names (List[str]): Ordered list of module names and the two controller component names.
         """
         if self.module_bank is not None:
             return [
-                spec.name for spec in self.module_bank.specs
+                spec.name for spec in self.module_bank.enabled_specs
             ] + [self.ARBITRATION_NETWORK_NAME, "action_center", "motor_cortex"]
+        if self.true_monolithic_policy is not None:
+            return [self.TRUE_MONOLITHIC_POLICY_NAME]
         return [self.MONOLITHIC_POLICY_NAME, self.ARBITRATION_NETWORK_NAME, "action_center", "motor_cortex"]

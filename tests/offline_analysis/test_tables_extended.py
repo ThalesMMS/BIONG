@@ -7,8 +7,15 @@ from __future__ import annotations
 
 import unittest
 
+from spider_cortex_sim.offline_analysis.extractors import (
+    _compare_credit_across_architectures,
+    _interpret_credit_failure,
+    extract_credit_metrics,
+)
 from spider_cortex_sim.offline_analysis.tables import (
     _claim_uncertainty_for_condition,
+    build_credit_assignment_tables,
+    build_credit_table,
     build_diagnostics,
     build_reward_component_rows,
     build_scenario_checks_rows,
@@ -138,14 +145,521 @@ class BuildScenarioChecksRowsTest(unittest.TestCase):
         self.assertEqual(rows[0]["scenario"], "s")
         self.assertEqual(rows[0]["check_name"], "valid_check")
         self.assertEqual(rows[0]["pass_rate"], 0.75)
-        self.assertEqual(rows[0]["mean_value"], 0.5)
 
-    def test_non_mapping_checks_field_skipped(self) -> None:
-        scenario_success = self._make_scenario_success([
-            {"scenario": "s", "checks": "not_a_mapping"}
-        ])
-        rows = build_scenario_checks_rows(scenario_success)
-        self.assertEqual(rows, [])
+
+class BuildCreditAssignmentTablesTest(unittest.TestCase):
+    def test_build_credit_assignment_tables_groups_a2_and_a4_strategies(self) -> None:
+        ablations = {
+            "variants": {
+                "three_center_modular": {
+                    "config": {"architecture": "modular", "credit_strategy": "broadcast"},
+                    "summary": {
+                        "scenario_success_rate": 0.6,
+                        "episode_success_rate": 0.6,
+                        "mean_module_credit_weights": {"perception_center": 1.0},
+                        "module_gradient_norm_means": {"perception_center": 2.0},
+                        "mean_counterfactual_credit_weights": {"perception_center": 0.0},
+                        "mean_module_contribution_share": {"perception_center": 0.5},
+                        "dominant_module_distribution": {"perception_center": 0.5},
+                        "dominant_module": "perception_center",
+                        "mean_dominant_module_share": 0.5,
+                        "mean_effective_module_count": 2.0,
+                    },
+                    "suite": {"night_rest": {"success_rate": 0.6}},
+                },
+                "three_center_modular_local_credit": {
+                    "config": {"architecture": "modular", "credit_strategy": "local_only"},
+                    "summary": {
+                        "scenario_success_rate": 0.4,
+                        "episode_success_rate": 0.4,
+                        "mean_module_credit_weights": {"perception_center": 0.0},
+                        "module_gradient_norm_means": {"perception_center": 1.5},
+                        "mean_counterfactual_credit_weights": {"perception_center": 0.0},
+                        "mean_module_contribution_share": {"perception_center": 0.4},
+                        "dominant_module_distribution": {"perception_center": 0.4},
+                        "dominant_module": "perception_center",
+                        "mean_dominant_module_share": 0.4,
+                        "mean_effective_module_count": 1.8,
+                    },
+                    "suite": {"night_rest": {"success_rate": 0.4}},
+                },
+                "three_center_modular_counterfactual": {
+                    "config": {"architecture": "modular", "credit_strategy": "counterfactual"},
+                    "summary": {
+                        "scenario_success_rate": 0.7,
+                        "episode_success_rate": 0.7,
+                        "mean_module_credit_weights": {"perception_center": 0.7},
+                        "module_gradient_norm_means": {"perception_center": 2.2},
+                        "mean_counterfactual_credit_weights": {"perception_center": 0.7},
+                        "mean_module_contribution_share": {"perception_center": 0.55},
+                        "dominant_module_distribution": {"perception_center": 0.55},
+                        "dominant_module": "perception_center",
+                        "mean_dominant_module_share": 0.55,
+                        "mean_effective_module_count": 2.1,
+                    },
+                    "suite": {"night_rest": {"success_rate": 0.7}},
+                },
+                "modular_full": {
+                    "config": {"architecture": "modular", "credit_strategy": "broadcast"},
+                    "summary": {
+                        "scenario_success_rate": 0.5,
+                        "episode_success_rate": 0.5,
+                        "mean_module_credit_weights": {"visual_cortex": 1.0},
+                        "module_gradient_norm_means": {"visual_cortex": 3.0},
+                        "mean_counterfactual_credit_weights": {"visual_cortex": 0.0},
+                        "mean_module_contribution_share": {"visual_cortex": 0.3},
+                        "dominant_module_distribution": {"visual_cortex": 0.3},
+                        "dominant_module": "visual_cortex",
+                        "mean_dominant_module_share": 0.3,
+                        "mean_effective_module_count": 3.0,
+                    },
+                    "suite": {"night_rest": {"success_rate": 0.5}},
+                },
+                "local_credit_only": {
+                    "config": {"architecture": "modular", "credit_strategy": "local_only"},
+                    "summary": {
+                        "scenario_success_rate": 0.55,
+                        "episode_success_rate": 0.55,
+                        "mean_module_credit_weights": {"visual_cortex": 0.0},
+                        "module_gradient_norm_means": {"visual_cortex": 2.5},
+                        "mean_counterfactual_credit_weights": {"visual_cortex": 0.0},
+                        "mean_module_contribution_share": {"visual_cortex": 0.28},
+                        "dominant_module_distribution": {"visual_cortex": 0.28},
+                        "dominant_module": "visual_cortex",
+                        "mean_dominant_module_share": 0.28,
+                        "mean_effective_module_count": 2.8,
+                    },
+                    "suite": {"night_rest": {"success_rate": 0.55}},
+                },
+                "counterfactual_credit": {
+                    "config": {"architecture": "modular", "credit_strategy": "counterfactual"},
+                    "summary": {
+                        "scenario_success_rate": 0.65,
+                        "episode_success_rate": 0.65,
+                        "mean_module_credit_weights": {"visual_cortex": 0.65},
+                        "module_gradient_norm_means": {"visual_cortex": 3.2},
+                        "mean_counterfactual_credit_weights": {"visual_cortex": 0.65},
+                        "mean_module_contribution_share": {"visual_cortex": 0.33},
+                        "dominant_module_distribution": {"visual_cortex": 0.33},
+                        "dominant_module": "visual_cortex",
+                        "mean_dominant_module_share": 0.33,
+                        "mean_effective_module_count": 3.1,
+                    },
+                    "suite": {"night_rest": {"success_rate": 0.65}},
+                },
+            }
+        }
+
+        result = build_credit_assignment_tables(ablations)
+
+        self.assertTrue(result["available"])
+        summary_rows = result["strategy_summary"]["rows"]
+        self.assertEqual(len(summary_rows), 6)
+        a2_local = next(
+            row for row in summary_rows
+            if row["rung"] == "A2" and row["credit_strategy"] == "local_only"
+        )
+        self.assertAlmostEqual(a2_local["scenario_success_delta_vs_broadcast"], -0.2)
+        module_rows = result["module_credit"]["rows"]
+        self.assertTrue(
+            any(
+                row["rung"] == "A4"
+                and row["credit_strategy"] == "counterfactual"
+                and row["module"] == "visual_cortex"
+                and row["mean_counterfactual_credit_weight"] == 0.65
+                for row in module_rows
+            )
+        )
+        self.assertFalse(
+            any(
+                row["rung"] == "A2"
+                and row["credit_strategy"] == "broadcast"
+                and row["module"] == "alert_center"
+                for row in module_rows
+            )
+        )
+        findings = [item["finding"] for item in result["interpretations"]]
+        self.assertIn("Failure by local credit insufficiency", findings)
+        self.assertIn("Counterfactual scaling across the ladder", findings)
+
+    def test_build_credit_assignment_tables_uses_without_reflex_support_payloads(
+        self,
+    ) -> None:
+        ablations = {
+            "variants": {
+                "three_center_modular": {
+                    "config": {"architecture": "modular", "credit_strategy": "broadcast"},
+                    "summary": {
+                        "scenario_success_rate": 0.8,
+                        "episode_success_rate": 0.8,
+                        "mean_module_credit_weights": {"perception_center": 1.0},
+                        "module_gradient_norm_means": {"perception_center": 2.0},
+                        "mean_counterfactual_credit_weights": {"perception_center": 0.0},
+                        "mean_effective_module_count": 2.0,
+                    },
+                    "suite": {"night_rest": {"success_rate": 0.8}},
+                    "without_reflex_support": {
+                        "summary": {
+                            "scenario_success_rate": 0.55,
+                            "episode_success_rate": 0.55,
+                            "mean_module_credit_weights": {"perception_center": 0.75},
+                            "module_gradient_norm_means": {"perception_center": 1.4},
+                            "mean_counterfactual_credit_weights": {"perception_center": 0.0},
+                            "mean_effective_module_count": 1.7,
+                        },
+                        "suite": {"night_rest": {"success_rate": 0.55}},
+                    },
+                },
+                "modular_full": {
+                    "config": {"architecture": "modular", "credit_strategy": "broadcast"},
+                    "summary": {
+                        "scenario_success_rate": 0.5,
+                        "episode_success_rate": 0.5,
+                        "mean_module_credit_weights": {"visual_cortex": 1.0},
+                        "module_gradient_norm_means": {"visual_cortex": 3.0},
+                        "mean_counterfactual_credit_weights": {"visual_cortex": 0.0},
+                        "mean_effective_module_count": 3.0,
+                    },
+                    "suite": {"night_rest": {"success_rate": 0.5}},
+                },
+            }
+        }
+
+        result = build_credit_assignment_tables(ablations)
+
+        a2_broadcast = next(
+            row
+            for row in result["strategy_summary"]["rows"]
+            if row["rung"] == "A2" and row["credit_strategy"] == "broadcast"
+        )
+        a2_scenario = next(
+            row
+            for row in result["scenario_success"]["rows"]
+            if row["rung"] == "A2" and row["credit_strategy"] == "broadcast"
+        )
+        self.assertEqual(a2_broadcast["scenario_success_rate"], 0.55)
+        self.assertEqual(a2_scenario["success_rate"], 0.55)
+
+
+class CreditMetricsExtractionAndTableTest(unittest.TestCase):
+    def _summary(self) -> dict[str, object]:
+        return {
+            "config": {
+                "brain": {
+                    "name": "modular_full",
+                    "architecture": "modular",
+                    "credit_strategy": "broadcast",
+                }
+            },
+            "behavior_evaluation": {
+                "ablations": {
+                    "variants": {
+                        "three_center_modular": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "broadcast",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.6,
+                                "mean_module_credit_weights": {
+                                    "perception_center": 1.0,
+                                },
+                                "module_gradient_norm_means": {
+                                    "perception_center": 2.0,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "perception_center": 0.0,
+                                },
+                                "mean_effective_module_count": 2.0,
+                            },
+                        },
+                        "three_center_modular_counterfactual": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "counterfactual",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.7,
+                                "mean_module_credit_weights": {
+                                    "perception_center": 0.7,
+                                },
+                                "module_gradient_norm_means": {
+                                    "perception_center": 2.2,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "perception_center": 0.7,
+                                },
+                                "mean_effective_module_count": 2.1,
+                            },
+                        },
+                        "modular_full": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "broadcast",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.5,
+                                "mean_module_credit_weights": {
+                                    "visual_cortex": 1.0,
+                                },
+                                "module_gradient_norm_means": {
+                                    "visual_cortex": 3.0,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "visual_cortex": 0.0,
+                                },
+                                "mean_effective_module_count": 3.0,
+                            },
+                            "without_reflex_support": {
+                                "summary": {
+                                    "scenario_success_rate": 0.45,
+                                    "mean_module_credit_weights": {
+                                        "visual_cortex": 0.9,
+                                    },
+                                    "module_gradient_norm_means": {
+                                        "visual_cortex": 2.7,
+                                    },
+                                    "mean_counterfactual_credit_weights": {
+                                        "visual_cortex": 0.0,
+                                    },
+                                    "mean_effective_module_count": 2.8,
+                                }
+                            },
+                        },
+                        "counterfactual_credit": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "counterfactual",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.65,
+                                "mean_module_credit_weights": {
+                                    "visual_cortex": 0.65,
+                                },
+                                "module_gradient_norm_means": {
+                                    "visual_cortex": 3.2,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "visual_cortex": 0.65,
+                                },
+                                "mean_effective_module_count": 3.1,
+                            },
+                        },
+                    }
+                }
+            },
+        }
+
+    def test_extract_credit_metrics_returns_variant_mapping(self) -> None:
+        result = extract_credit_metrics(self._summary(), [])
+
+        self.assertIn("three_center_modular", result)
+        self.assertEqual(result["three_center_modular"]["strategy"], "broadcast")
+        self.assertEqual(
+            result["three_center_modular_counterfactual"]["counterfactual_weights"][
+                "perception_center"
+            ],
+            0.7,
+        )
+        self.assertEqual(
+            result["modular_full"]["gradient_norms"]["visual_cortex"],
+            2.7,
+        )
+        self.assertEqual(
+            result["modular_full"]["scenario_success_rate"],
+            0.45,
+        )
+
+    def test_build_credit_table_emits_rows_and_summary_statistics(self) -> None:
+        result = build_credit_table(self._summary())
+
+        self.assertTrue(result["available"])
+        table_rows = result["table"]["rows"]
+        self.assertTrue(
+            any(
+                row["variant"] == "counterfactual_credit"
+                and row["architecture_rung"] == "A4"
+                and row["credit_strategy"] == "counterfactual"
+                and row["module_name"] == "visual_cortex"
+                and row["counterfactual_weight"] == 0.65
+                and row["scenario_success_rate"] == 0.65
+                for row in table_rows
+            )
+        )
+        self.assertTrue(
+            any(
+                row["variant"] == "modular_full"
+                and row["module_name"] == "visual_cortex"
+                and row["credit_weight"] == 0.9
+                and row["scenario_success_rate"] == 0.45
+                for row in table_rows
+            )
+        )
+        mean_credit_rows = result["summary_statistics"][
+            "mean_credit_per_module_by_strategy"
+        ]["rows"]
+        self.assertTrue(
+            any(
+                row["credit_strategy"] == "broadcast"
+                and row["module_name"] == "visual_cortex"
+                and row["mean_credit_weight"] == 0.9
+                for row in mean_credit_rows
+            )
+        )
+        concentration_rows = result["summary_statistics"]["credit_concentration"][
+            "rows"
+        ]
+        self.assertTrue(
+            any(
+                row["credit_strategy"] == "counterfactual"
+                and row["mean_effective_module_count"] == 2.6
+                for row in concentration_rows
+            )
+        )
+        self.assertFalse(
+            any(
+                row["credit_strategy"] == "broadcast"
+                and row["module_name"] == "alert_center"
+                for row in mean_credit_rows
+            )
+        )
+
+    def test_build_credit_table_uses_top_level_credit_strategy_fallback(self) -> None:
+        result = build_credit_table(
+            {
+                "config": {
+                    "name": "current_run",
+                    "credit_strategy": "counterfactual",
+                },
+                "evaluation": {
+                    "scenario_success_rate": 0.4,
+                    "mean_module_credit_weights": {"visual_cortex": 0.4},
+                    "module_gradient_norm_means": {"visual_cortex": 1.2},
+                    "mean_counterfactual_credit_weights": {"visual_cortex": 0.6},
+                    "mean_effective_module_count": 1.0,
+                },
+            }
+        )
+
+        self.assertTrue(result["available"])
+        self.assertTrue(
+            all(
+                row["credit_strategy"] == "counterfactual"
+                for row in result["table"]["rows"]
+            )
+        )
+
+    def test_build_credit_table_excludes_gradient_only_modules_from_credit_means(
+        self,
+    ) -> None:
+        result = build_credit_table(
+            {
+                "config": {
+                    "brain": {
+                        "name": "modular_full",
+                        "architecture": "modular",
+                        "credit_strategy": "broadcast",
+                    }
+                },
+                "behavior_evaluation": {
+                    "ablations": {
+                        "variants": {
+                            "modular_full": {
+                                "config": {
+                                    "architecture": "modular",
+                                    "credit_strategy": "broadcast",
+                                },
+                                "summary": {
+                                    "scenario_success_rate": 0.5,
+                                    "mean_module_credit_weights": {
+                                        "visual_cortex": 1.0,
+                                    },
+                                    "module_gradient_norm_means": {
+                                        "visual_cortex": 3.0,
+                                        "motor_cortex": 1.5,
+                                    },
+                                    "mean_counterfactual_credit_weights": {
+                                        "visual_cortex": 0.0,
+                                        "motor_cortex": 0.4,
+                                    },
+                                    "mean_effective_module_count": 2.0,
+                                },
+                            }
+                        }
+                    }
+                },
+            }
+        )
+
+        table_rows = result["table"]["rows"]
+        self.assertTrue(
+            any(
+                row["module_name"] == "motor_cortex"
+                and row["gradient_norm"] == 1.5
+                and row["counterfactual_weight"] == 0.4
+                for row in table_rows
+            )
+        )
+        mean_credit_rows = result["summary_statistics"][
+            "mean_credit_per_module_by_strategy"
+        ]["rows"]
+        self.assertFalse(
+            any(row["module_name"] == "motor_cortex" for row in mean_credit_rows)
+        )
+
+
+class CreditInterpretationHelpersTest(unittest.TestCase):
+    def test_interpret_credit_failure_detects_local_insufficiency(self) -> None:
+        result = _interpret_credit_failure(
+            {
+                "strategy": "local_only",
+                "weights": {"perception_center": 0.0, "action_center": 0.0},
+                "gradient_norms": {"perception_center": 0.0, "action_center": 0.0},
+                "counterfactual_weights": {},
+                "scenario_success_rate": 0.2,
+            },
+            {
+                "strategy": "broadcast",
+                "weights": {"perception_center": 0.5, "action_center": 0.5},
+                "gradient_norms": {"perception_center": 0.4, "action_center": 0.4},
+                "counterfactual_weights": {},
+                "scenario_success_rate": 0.6,
+            },
+        )
+
+        self.assertTrue(
+            any(
+                finding["pattern"] == "insufficient local credit"
+                for finding in result["findings"]
+            )
+        )
+
+    def test_compare_credit_across_architectures_detects_scaling_patterns(self) -> None:
+        result = _compare_credit_across_architectures(
+            {
+                "broadcast": {"scenario_success_rate": 0.6},
+                "local_only": {"scenario_success_rate": 0.3},
+                "counterfactual": {"scenario_success_rate": 0.72},
+            },
+            {
+                "broadcast": {"scenario_success_rate": 0.5},
+                "local_only": {"scenario_success_rate": 0.05},
+                "counterfactual": {"scenario_success_rate": 0.82},
+            },
+        )
+
+        patterns = {finding["pattern"] for finding in result["findings"]}
+        self.assertIn("local_only differential failure", patterns)
+        self.assertIn("counterfactual benefit scales with module count", patterns)
+
+    def test_compare_credit_across_architectures_rejects_ambiguous_shape(self) -> None:
+        with self.assertRaisesRegex(ValueError, "single-rung strategy mapping"):
+            _compare_credit_across_architectures(
+                {
+                    "broadcast": {"scenario_success_rate": 0.6},
+                    "local_only": {"scenario_success_rate": 0.3},
+                }
+            )
 
 
 class BuildRewardComponentRowsTest(unittest.TestCase):

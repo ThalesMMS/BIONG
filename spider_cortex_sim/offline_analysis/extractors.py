@@ -20,6 +20,11 @@ from .extraction.shaping import (
     _ablation_deltas_vs_reference,
 )
 from .extraction.benchmark import (
+    CAPACITY_MATCH_RATIO_THRESHOLD,
+    compare_capacity_totals,
+    extract_architecture_capacity,
+    extract_capacity_sweeps,
+    extract_model_capacity,
     build_primary_benchmark,
     build_reflex_dependence_indicators,
     _format_failure_indicator,
@@ -40,6 +45,16 @@ from .extraction.noise import (
 from .extraction.comparison import (
     extract_comparisons,
 )
+from .extraction.credit import (
+    _compare_credit_across_architectures,
+    _interpret_credit_failure,
+    extract_credit_metrics,
+)
+from .extraction.ladder import (
+    compute_modularity_conclusion,
+    detect_missing_experiments,
+    extract_unified_ladder_report,
+)
 from .extraction.representation import (
     _normalize_module_response_by_predator_type,
     _normalize_float_map,
@@ -55,5 +70,8 @@ from .extraction.representation import (
 )
 from .extraction.ablation import (
     extract_ablations,
+    extract_ladder_comparison,
+    extract_ladder_profile_comparison,
+    extract_reward_profile_ladder,
     extract_reflex_frequency,
 )

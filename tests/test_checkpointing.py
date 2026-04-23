@@ -6,6 +6,7 @@ from pathlib import Path
 from spider_cortex_sim.checkpointing import (
     CheckpointPenaltyMode,
     CheckpointSelectionConfig,
+    build_checkpointing_summary,
     checkpoint_candidate_composite_score,
     checkpoint_candidate_sort_key,
     checkpoint_preload_fingerprint,
@@ -600,6 +601,18 @@ class CheckpointSelectionConfigValidationTest(unittest.TestCase):
             penalty_mode="tiebreaker",
         )
         self.assertEqual(config.penalty_mode, CheckpointPenaltyMode.TIEBREAKER)
+
+    def test_build_summary_rejects_mixed_config_and_legacy_kwargs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not allow mixing"):
+            build_checkpointing_summary(
+                selection="best",
+                checkpoint_interval=5,
+                selection_scenario_episodes=2,
+                selection_config=CheckpointSelectionConfig(
+                    metric="scenario_success_rate",
+                ),
+                override_penalty_weight=1.0,
+            )
 
 class ResolveCheckpointLoadDirTest(unittest.TestCase):
     """Tests for resolve_checkpoint_load_dir()."""

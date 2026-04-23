@@ -160,6 +160,59 @@ def _classify_open_field_foraging_failure(metrics: Mapping[str, object]) -> str:
         return "progressed_then_died"
     return "scoring_mismatch"
 
+
+def _classify_night_rest_failure(metrics: Mapping[str, object]) -> str:
+    """
+    Assign a night-rest failure label from trace-backed rest diagnostics.
+    """
+    if metrics.get("checks_passed", False):
+        return "success"
+
+    if bool(metrics.get("predator_contacts", 0)) or (_int_or_none(metrics.get("predator_visible_ticks")) or 0) > 0:
+        return "predator_interrupted"
+
+    if bool(metrics.get("left_shelter", False)):
+        return "leaves_shelter"
+
+    deep_sleep_reached = bool(metrics.get("deep_sleep_reached", False))
+    sleep_debt_reduction = _float_or_none(metrics.get("sleep_debt_reduction")) or 0.0
+    sleep_events = _int_or_none(metrics.get("sleep_events")) or 0
+    sleep_priority_rate = _float_or_none(metrics.get("sleep_priority_rate")) or 0.0
+
+    if deep_sleep_reached and sleep_debt_reduction < 0.45:
+        return "deep_without_recovery"
+    if deep_sleep_reached or sleep_events > 0 or sleep_priority_rate >= 0.5:
+        return "settles_but_not_deep"
+    return "never_settles"
+
+
+def _classify_two_shelter_tradeoff_failure(metrics: Mapping[str, object]) -> str:
+    """
+    Assign a two-shelter tradeoff failure label from movement, shelter, and threat diagnostics.
+    """
+    if metrics.get("checks_passed", False):
+        return "success"
+
+    if not bool(metrics.get("left_shelter", False)):
+        return "frozen_in_left_shelter"
+
+    predator_contacts = _int_or_none(metrics.get("predator_contacts")) or 0
+    if predator_contacts > 0:
+        return "central_chokepoint_contact"
+
+    if not bool(metrics.get("alive", False)) and _food_approached(metrics):
+        return "progress_then_dies"
+
+    night_shelter_occupancy_rate = (
+        _float_or_none(metrics.get("night_shelter_occupancy_rate")) or 0.0
+    )
+    if _food_approached(metrics) and night_shelter_occupancy_rate < 0.9:
+        return "no_return_to_shelter"
+    if night_shelter_occupancy_rate < 0.9:
+        return "night_shelter_missed"
+    return "scoring_mismatch"
+
+
 def _classify_corridor_gauntlet_failure(
     stats: EpisodeStats,
     trace_metrics: Mapping[str, object],

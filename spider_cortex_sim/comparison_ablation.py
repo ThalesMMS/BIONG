@@ -15,9 +15,10 @@ from .ablations import (
     resolve_ablation_configs,
 )
 from .budget_profiles import BudgetProfile, resolve_budget
+from .capacity_profiles import CapacityProfile
 from .checkpointing import (
-    CheckpointPenaltyMode,
     CheckpointSelectionConfig,
+    resolve_checkpoint_selection_config,
 )
 from .export import compact_behavior_payload
 from .metrics import flatten_behavior_rows
@@ -48,6 +49,7 @@ def compare_ablation_suite(
     module_lr: float = 0.010,
     motor_lr: float = 0.012,
     module_dropout: float = 0.05,
+    capacity_profile: str | CapacityProfile | None = None,
     reward_profile: str = "classic",
     map_template: str = "central_burrow",
     operational_profile: str | OperationalProfile | None = None,
@@ -58,12 +60,7 @@ def compare_ablation_suite(
     variant_names: Sequence[str] | None = None,
     episodes_per_scenario: int | None = None,
     checkpoint_selection: str = "none",
-    checkpoint_metric: str = "scenario_success_rate",
-    checkpoint_override_penalty: float = 0.0,
-    checkpoint_dominance_penalty: float = 0.0,
-    checkpoint_penalty_mode: CheckpointPenaltyMode | str = (
-        CheckpointPenaltyMode.TIEBREAKER
-    ),
+    checkpoint_selection_config: CheckpointSelectionConfig | None = None,
     checkpoint_interval: int | None = None,
     checkpoint_dir: str | Path | None = None,
 ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
@@ -99,12 +96,19 @@ def compare_ablation_suite(
         behavior_seeds=seeds,
         ablation_seeds=seeds,
     )
+    checkpoint_selection_config = resolve_checkpoint_selection_config(
+        checkpoint_selection_config
+    )
     scenario_names = list(names or SCENARIO_NAMES)
     requested_configs = resolve_ablation_configs(
         variant_names,
         module_dropout=module_dropout,
+        capacity_profile=capacity_profile,
     )
-    reference_config = default_brain_config(module_dropout=module_dropout)
+    reference_config = default_brain_config(
+        module_dropout=module_dropout,
+        capacity_profile=capacity_profile,
+    )
     configs: List[BrainAblationConfig] = [reference_config]
     for config in requested_configs:
         if config.name != reference_config.name:
@@ -116,6 +120,7 @@ def compare_ablation_suite(
     variants: Dict[str, Dict[str, object]] = {}
 
     for config in configs:
+        summary = config.to_summary()
         combined_stats = {name: [] for name in scenario_names}
         combined_scores = {name: [] for name in scenario_names}
         combined_stats_without_reflex = {name: [] for name in scenario_names}
@@ -170,10 +175,7 @@ def compare_ablation_suite(
                     capture_evaluation_trace=False,
                     debug_trace=False,
                     checkpoint_selection=checkpoint_selection,
-                    checkpoint_metric=checkpoint_metric,
-                    checkpoint_override_penalty=checkpoint_override_penalty,
-                    checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                    checkpoint_penalty_mode=checkpoint_penalty_mode,
+                    checkpoint_selection_config=checkpoint_selection_config,
                     checkpoint_interval=budget.checkpoint_interval,
                     checkpoint_dir=run_checkpoint_dir,
                     checkpoint_scenario_names=scenario_names,
@@ -209,6 +211,9 @@ def compare_ablation_suite(
                 previous_reflex_scale
             )
             seed_with_reflex_payload["summary"]["competence_type"] = "scaffolded"
+            seed_with_reflex_payload["summary"]["architecture_description"] = (
+                summary["architecture_description"]
+            )
             seed_payloads_with_reflex.append((int(seed), seed_with_reflex_payload))
             seed_without_reflex_payload = compact_behavior_payload(
                 sim._build_behavior_payload(
@@ -220,6 +225,9 @@ def compare_ablation_suite(
             seed_without_reflex_payload["summary"]["eval_reflex_scale"] = 0.0
             seed_without_reflex_payload["summary"]["competence_type"] = (
                 "self_sufficient"
+            )
+            seed_without_reflex_payload["summary"]["architecture_description"] = (
+                summary["architecture_description"]
             )
             seed_payloads_without_reflex.append(
                 (int(seed), seed_without_reflex_payload)
@@ -276,9 +284,12 @@ def compare_ablation_suite(
             previous_reflex_scale
         )
         with_reflex_payload["summary"]["competence_type"] = "scaffolded"
+        with_reflex_payload["summary"]["architecture_description"] = (
+            summary["architecture_description"]
+        )
         with_reflex_payload["eval_reflex_scale"] = float(previous_reflex_scale)
         with_reflex_payload["competence_type"] = "scaffolded"
-        with_reflex_payload["config"] = config.to_summary()
+        with_reflex_payload["config"] = summary
         attach_behavior_seed_statistics(
             with_reflex_payload,
             seed_payloads_with_reflex,
@@ -300,19 +311,43 @@ def compare_ablation_suite(
         )
         without_reflex_payload["summary"]["eval_reflex_scale"] = 0.0
         without_reflex_payload["summary"]["competence_type"] = "self_sufficient"
+        without_reflex_payload["summary"]["architecture_description"] = (
+            summary["architecture_description"]
+        )
         without_reflex_payload["eval_reflex_scale"] = 0.0
         without_reflex_payload["competence_type"] = "self_sufficient"
-        without_reflex_payload["config"] = config.to_summary()
+        without_reflex_payload["config"] = summary
         attach_behavior_seed_statistics(
             without_reflex_payload,
             seed_payloads_without_reflex,
             condition=config.name,
             scenario_names=scenario_names,
         )
+        parameter_counts_by_network = sim.brain.count_parameters()
+        total_trainable_parameters = int(sum(parameter_counts_by_network.values()))
+        approximate_compute_cost = sim.brain.estimate_compute_cost()
+        parameter_counts = {
+            "per_network": parameter_counts_by_network,
+            "total": total_trainable_parameters,
+            "proportions": {
+                name: (
+                    0.0
+                    if total_trainable_parameters <= 0
+                    else float(count / total_trainable_parameters)
+                )
+                for name, count in parameter_counts_by_network.items()
+            },
+        }
+        with_reflex_payload["parameter_counts"] = dict(parameter_counts)
+        without_reflex_payload["parameter_counts"] = dict(parameter_counts)
+        with_reflex_payload["approximate_compute_cost"] = dict(approximate_compute_cost)
+        without_reflex_payload["approximate_compute_cost"] = dict(approximate_compute_cost)
         compact_payload = dict(without_reflex_payload)
         compact_payload["primary_evaluation"] = "without_reflex_support"
         compact_payload["with_reflex_support"] = with_reflex_payload
         compact_payload["without_reflex_support"] = without_reflex_payload
+        compact_payload["parameter_counts"] = dict(parameter_counts)
+        compact_payload["approximate_compute_cost"] = dict(approximate_compute_cost)
         variants[config.name] = compact_payload
 
     reference_variant = reference_config.name
@@ -325,19 +360,15 @@ def compare_ablation_suite(
         "budget_profile": budget.profile,
         "benchmark_strength": budget.benchmark_strength,
         "checkpoint_selection": checkpoint_selection,
-        "checkpoint_metric": checkpoint_metric,
-        "checkpoint_penalty_config": CheckpointSelectionConfig(
-            metric=checkpoint_metric,
-            override_penalty_weight=checkpoint_override_penalty,
-            dominance_penalty_weight=checkpoint_dominance_penalty,
-            penalty_mode=checkpoint_penalty_mode,
-        ).to_summary(),
+        "checkpoint_metric": checkpoint_selection_config.metric,
+        "checkpoint_penalty_config": checkpoint_selection_config.to_summary(),
         "primary_evaluation": "without_reflex_support",
         "reference_variant": reference_variant,
         "reference_eval_reflex_scale": 0.0,
         "seeds": list(seed_values),
         "scenario_names": scenario_names,
         "episodes_per_scenario": run_count,
+        "capacity_profile": reference_config.capacity_profile.to_summary(),
         "variants": variants,
         "deltas_vs_reference": deltas_vs_reference,
         "predator_type_specialization": build_predator_type_specialization_summary(

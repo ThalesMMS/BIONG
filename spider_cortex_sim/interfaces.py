@@ -269,6 +269,121 @@ class AlertObservation(ObservationView):
 
 
 @dataclass(frozen=True)
+class PerceptionObservation(ObservationView):
+    observation_key: ClassVar[str] = "perception"
+
+    food_visible: float
+    food_certainty: float
+    food_dx: float
+    food_dy: float
+    shelter_visible: float
+    shelter_certainty: float
+    shelter_dx: float
+    shelter_dy: float
+    predator_visible: float
+    predator_certainty: float
+    predator_dx: float
+    predator_dy: float
+    heading_dx: float
+    heading_dy: float
+    foveal_scan_age: float
+    food_smell_strength: float
+    food_smell_dx: float
+    food_smell_dy: float
+    predator_smell_strength: float
+    predator_smell_dx: float
+    predator_smell_dy: float
+    light: float
+    day: float
+    night: float
+    food_trace_strength: float
+    food_trace_heading_dx: float
+    food_trace_heading_dy: float
+    shelter_trace_strength: float
+    shelter_trace_heading_dx: float
+    shelter_trace_heading_dy: float
+    predator_trace_strength: float
+    predator_trace_heading_dx: float
+    predator_trace_heading_dy: float
+    food_memory_dx: float
+    food_memory_dy: float
+    food_memory_age: float
+    shelter_memory_dx: float
+    shelter_memory_dy: float
+    shelter_memory_age: float
+    predator_memory_dx: float
+    predator_memory_dy: float
+    predator_memory_age: float
+
+
+@dataclass(frozen=True)
+class HomeostasisObservation(ObservationView):
+    observation_key: ClassVar[str] = "homeostasis"
+
+    hunger: float
+    fatigue: float
+    health: float
+    on_food: float
+    on_shelter: float
+    day: float
+    night: float
+    sleep_phase_level: float
+    rest_streak_norm: float
+    sleep_debt: float
+    shelter_role_level: float
+    food_visible: float
+    food_certainty: float
+    food_smell_strength: float
+    food_smell_dx: float
+    food_smell_dy: float
+    food_trace_dx: float
+    food_trace_dy: float
+    food_trace_strength: float
+    food_memory_dx: float
+    food_memory_dy: float
+    food_memory_age: float
+    shelter_trace_dx: float
+    shelter_trace_dy: float
+    shelter_trace_strength: float
+    shelter_memory_dx: float
+    shelter_memory_dy: float
+    shelter_memory_age: float
+
+
+@dataclass(frozen=True)
+class ThreatObservation(ObservationView):
+    observation_key: ClassVar[str] = "threat"
+
+    predator_visible: float
+    predator_certainty: float
+    predator_dx: float
+    predator_dy: float
+    predator_smell_strength: float
+    predator_smell_dx: float
+    predator_smell_dy: float
+    predator_motion_salience: float
+    visual_predator_threat: float
+    olfactory_predator_threat: float
+    dominant_predator_none: float
+    dominant_predator_visual: float
+    dominant_predator_olfactory: float
+    recent_pain: float
+    recent_contact: float
+    health: float
+    on_shelter: float
+    night: float
+    predator_trace_dx: float
+    predator_trace_dy: float
+    predator_trace_strength: float
+    predator_memory_dx: float
+    predator_memory_dy: float
+    predator_memory_age: float
+    escape_memory_dx: float
+    escape_memory_dy: float
+    escape_memory_age: float
+
+
+@dataclass(frozen=True)
 class ActionContextObservation(ObservationView):
     observation_key: ClassVar[str] = "action_context"
 
@@ -578,6 +693,130 @@ MODULE_INTERFACES: tuple[ModuleInterface, ...] = (
             SignalSpec("escape_memory_age", "Normalized age of the escape memory derived from movement history without walkability assumptions.", 0.0, 1.0),
         ),
     ),
+    ModuleInterface(
+        name="perception_center",
+        observation_key="perception",
+        role="proposal",
+        version=1,
+        description="Coarse perception proposer that fuses visual, olfactory, trace, and perceptual-memory cues.",
+        inputs=(
+            SignalSpec("food_visible", "1 when food is visible.", 0.0, 1.0),
+            SignalSpec("food_certainty", "Visual confidence in the perceived food.", 0.0, 1.0),
+            SignalSpec("food_dx", "Horizontal direction of the detected food."),
+            SignalSpec("food_dy", "Vertical direction of the detected food."),
+            SignalSpec("shelter_visible", "1 when shelter is visible.", 0.0, 1.0),
+            SignalSpec("shelter_certainty", "Visual confidence in the perceived shelter.", 0.0, 1.0),
+            SignalSpec("shelter_dx", "Horizontal direction of the detected shelter."),
+            SignalSpec("shelter_dy", "Vertical direction of the detected shelter."),
+            SignalSpec("predator_visible", "1 when a predator is visible.", 0.0, 1.0),
+            SignalSpec("predator_certainty", "Visual confidence in the perceived predator.", 0.0, 1.0),
+            SignalSpec("predator_dx", "Horizontal direction of the detected predator."),
+            SignalSpec("predator_dy", "Vertical direction of the detected predator."),
+            SignalSpec("heading_dx", "Current horizontal body or gaze orientation."),
+            SignalSpec("heading_dy", "Current vertical body or gaze orientation."),
+            SignalSpec("foveal_scan_age", "Normalized ticks since the current foveal heading was actively scanned.", 0.0, 1.0),
+            SignalSpec("food_smell_strength", "Intensity of the food scent.", 0.0, 1.0),
+            SignalSpec("food_smell_dx", "Horizontal gradient of the food scent."),
+            SignalSpec("food_smell_dy", "Vertical gradient of the food scent."),
+            SignalSpec("predator_smell_strength", "Intensity of the predator scent.", 0.0, 1.0),
+            SignalSpec("predator_smell_dx", "Horizontal gradient of the predator scent."),
+            SignalSpec("predator_smell_dy", "Vertical gradient of the predator scent."),
+            SignalSpec("light", "Simple light level.", 0.0, 1.0),
+            SignalSpec("day", "1 during daytime.", 0.0, 1.0),
+            SignalSpec("night", "1 during nighttime.", 0.0, 1.0),
+            SignalSpec("food_trace_strength", "Decayed strength of the short food trace.", 0.0, 1.0),
+            SignalSpec("food_trace_heading_dx", "Horizontal heading active when the short food trace was refreshed."),
+            SignalSpec("food_trace_heading_dy", "Vertical heading active when the short food trace was refreshed."),
+            SignalSpec("shelter_trace_strength", "Decayed strength of the short shelter trace.", 0.0, 1.0),
+            SignalSpec("shelter_trace_heading_dx", "Horizontal heading active when the short shelter trace was refreshed."),
+            SignalSpec("shelter_trace_heading_dy", "Vertical heading active when the short shelter trace was refreshed."),
+            SignalSpec("predator_trace_strength", "Decayed strength of the short predator trace.", 0.0, 1.0),
+            SignalSpec("predator_trace_heading_dx", "Horizontal heading active when the short predator trace was refreshed."),
+            SignalSpec("predator_trace_heading_dy", "Vertical heading active when the short predator trace was refreshed."),
+            SignalSpec("food_memory_dx", "Horizontal direction of the last seen food."),
+            SignalSpec("food_memory_dy", "Vertical direction of the last seen food."),
+            SignalSpec("food_memory_age", "Normalized age of the food memory.", 0.0, 1.0),
+            SignalSpec("shelter_memory_dx", "Horizontal direction of the remembered shelter."),
+            SignalSpec("shelter_memory_dy", "Vertical direction of the remembered shelter."),
+            SignalSpec("shelter_memory_age", "Normalized age of the shelter memory.", 0.0, 1.0),
+            SignalSpec("predator_memory_dx", "Horizontal direction of the remembered predator."),
+            SignalSpec("predator_memory_dy", "Vertical direction of the remembered predator."),
+            SignalSpec("predator_memory_age", "Normalized age of the predator memory.", 0.0, 1.0),
+        ),
+    ),
+    ModuleInterface(
+        name="homeostasis_center",
+        observation_key="homeostasis",
+        role="proposal",
+        version=1,
+        description="Coarse homeostatic proposer that blends hunger, fatigue, sheltering, and recovery drives.",
+        inputs=(
+            SignalSpec("hunger", "Internal hunger state.", 0.0, 1.0),
+            SignalSpec("fatigue", "Internal fatigue state.", 0.0, 1.0),
+            SignalSpec("health", "Body health.", 0.0, 1.0),
+            SignalSpec("on_food", "1 when the spider is standing on food.", 0.0, 1.0),
+            SignalSpec("on_shelter", "1 when the spider is on the shelter.", 0.0, 1.0),
+            SignalSpec("day", "1 during daytime.", 0.0, 1.0),
+            SignalSpec("night", "1 during nighttime.", 0.0, 1.0),
+            SignalSpec("sleep_phase_level", "Current sleep phase level.", 0.0, 1.0),
+            SignalSpec("rest_streak_norm", "Recent rest continuity.", 0.0, 1.0),
+            SignalSpec("sleep_debt", "Accumulated sleep debt.", 0.0, 1.0),
+            SignalSpec("shelter_role_level", "Current depth inside the shelter.", 0.0, 1.0),
+            SignalSpec("food_visible", "1 when food is visible.", 0.0, 1.0),
+            SignalSpec("food_certainty", "Visual confidence in the perceived food.", 0.0, 1.0),
+            SignalSpec("food_smell_strength", "Intensity of the food scent.", 0.0, 1.0),
+            SignalSpec("food_smell_dx", "Horizontal gradient of the food scent."),
+            SignalSpec("food_smell_dy", "Vertical gradient of the food scent."),
+            SignalSpec("food_trace_dx", "Horizontal direction of the short food trace."),
+            SignalSpec("food_trace_dy", "Vertical direction of the short food trace."),
+            SignalSpec("food_trace_strength", "Decayed strength of the short food trace.", 0.0, 1.0),
+            SignalSpec("food_memory_dx", "Horizontal direction of the last seen food."),
+            SignalSpec("food_memory_dy", "Vertical direction of the last seen food."),
+            SignalSpec("food_memory_age", "Normalized age of the food memory.", 0.0, 1.0),
+            SignalSpec("shelter_trace_dx", "Horizontal direction of the short shelter trace."),
+            SignalSpec("shelter_trace_dy", "Vertical direction of the short shelter trace."),
+            SignalSpec("shelter_trace_strength", "Decayed strength of the short shelter trace.", 0.0, 1.0),
+            SignalSpec("shelter_memory_dx", "Horizontal direction of the remembered shelter."),
+            SignalSpec("shelter_memory_dy", "Vertical direction of the remembered shelter."),
+            SignalSpec("shelter_memory_age", "Normalized age of the shelter memory.", 0.0, 1.0),
+        ),
+    ),
+    ModuleInterface(
+        name="threat_center",
+        observation_key="threat",
+        role="proposal",
+        version=1,
+        description="Coarse threat proposer that blends threat sensing, pain/contact, and escape memory.",
+        inputs=(
+            SignalSpec("predator_visible", "1 when a predator is visible.", 0.0, 1.0),
+            SignalSpec("predator_certainty", "Visual confidence in the perceived predator.", 0.0, 1.0),
+            SignalSpec("predator_dx", "Horizontal direction of the detected predator."),
+            SignalSpec("predator_dy", "Vertical direction of the detected predator."),
+            SignalSpec("predator_smell_strength", "Intensity of the predator scent.", 0.0, 1.0),
+            SignalSpec("predator_smell_dx", "Horizontal gradient of the predator scent."),
+            SignalSpec("predator_smell_dy", "Vertical gradient of the predator scent."),
+            SignalSpec("predator_motion_salience", "Explicit motion salience of the predator.", 0.0, 1.0),
+            SignalSpec("visual_predator_threat", "Aggregated threat from visually oriented predators.", 0.0, 1.0),
+            SignalSpec("olfactory_predator_threat", "Aggregated threat from olfactory predators.", 0.0, 1.0),
+            SignalSpec("dominant_predator_none", "1 when no predator type is currently dominant.", 0.0, 1.0),
+            SignalSpec("dominant_predator_visual", "1 when visual predators are the dominant threat type.", 0.0, 1.0),
+            SignalSpec("dominant_predator_olfactory", "1 when olfactory predators are the dominant threat type.", 0.0, 1.0),
+            SignalSpec("recent_pain", "Recent pain.", 0.0, 1.0),
+            SignalSpec("recent_contact", "Recent physical contact.", 0.0, 1.0),
+            SignalSpec("health", "Body health.", 0.0, 1.0),
+            SignalSpec("on_shelter", "1 when the spider is on the shelter.", 0.0, 1.0),
+            SignalSpec("night", "1 during nighttime.", 0.0, 1.0),
+            SignalSpec("predator_trace_dx", "Horizontal direction of the short predator trace."),
+            SignalSpec("predator_trace_dy", "Vertical direction of the short predator trace."),
+            SignalSpec("predator_trace_strength", "Decayed strength of the short predator trace.", 0.0, 1.0),
+            SignalSpec("predator_memory_dx", "Horizontal direction of the remembered predator."),
+            SignalSpec("predator_memory_dy", "Vertical direction of the remembered predator."),
+            SignalSpec("predator_memory_age", "Normalized age of the predator memory.", 0.0, 1.0),
+            SignalSpec("escape_memory_dx", "Horizontal direction of the remembered escape target."),
+            SignalSpec("escape_memory_dy", "Vertical direction of the remembered escape target."),
+            SignalSpec("escape_memory_age", "Normalized age of the escape memory.", 0.0, 1.0),
+        ),
+    ),
 )
 
 
@@ -632,12 +871,359 @@ MOTOR_CONTEXT_INTERFACE = ModuleInterface(
 )
 
 
-ALL_INTERFACES: tuple[ModuleInterface, ...] = MODULE_INTERFACES + (
+def _subset_interface(
+    parent: ModuleInterface,
+    *,
+    name: str,
+    signal_names: Sequence[str],
+    description: str,
+) -> ModuleInterface:
+    """
+    Build a diagnostic interface by selecting an ordered subset of a parent interface.
+    """
+    duplicate_names = sorted(
+        {
+            signal_name
+            for signal_name in signal_names
+            if signal_names.count(signal_name) > 1
+        }
+    )
+    if duplicate_names:
+        raise ValueError(
+            f"Variant interface '{name}' declares duplicate signals: {duplicate_names}."
+        )
+
+    parent_by_name = {signal.name: signal for signal in parent.inputs}
+    missing = [signal_name for signal_name in signal_names if signal_name not in parent_by_name]
+    if missing:
+        raise ValueError(
+            f"Variant interface '{name}' references signals not present in parent "
+            f"'{parent.name}': {missing}."
+        )
+
+    requested = set(signal_names)
+    inputs = tuple(signal for signal in parent.inputs if signal.name in requested)
+    if len(inputs) != len(signal_names):
+        raise ValueError(
+            f"Variant interface '{name}' expected {len(signal_names)} unique signals, "
+            f"selected {len(inputs)} from parent '{parent.name}'."
+        )
+
+    return ModuleInterface(
+        name=name,
+        observation_key=parent.observation_key,
+        role=parent.role,
+        version=parent.version,
+        description=description,
+        inputs=inputs,
+        outputs=parent.outputs,
+        save_compatibility=parent.save_compatibility,
+        compatibility_notes=parent.compatibility_notes,
+    )
+
+
+ALL_INTERFACES: tuple[ModuleInterface, ...] = (
+    *MODULE_INTERFACES,
     ACTION_CONTEXT_INTERFACE,
     MOTOR_CONTEXT_INTERFACE,
 )
 
 MODULE_INTERFACE_BY_NAME = {spec.name: spec for spec in MODULE_INTERFACES}
+VARIANT_MODULES: tuple[str, ...] = (
+    "visual_cortex",
+    "sensory_cortex",
+    "hunger_center",
+    "sleep_center",
+    "alert_center",
+)
+
+HUNGER_CENTER_V1_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["hunger_center"],
+    name="hunger_v1",
+    signal_names=(
+        "hunger",
+        "on_food",
+        "food_visible",
+        "food_dx",
+        "food_dy",
+    ),
+    description="Diagnostic sufficiency variant for hunger_center with hunger and direct visual food direction only.",
+)
+
+HUNGER_CENTER_V2_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["hunger_center"],
+    name="hunger_v2",
+    signal_names=(
+        *HUNGER_CENTER_V1_INTERFACE.signal_names,
+        "food_smell_strength",
+        "food_smell_dx",
+        "food_smell_dy",
+    ),
+    description="Diagnostic sufficiency variant for hunger_center with direct food cues plus smell gradient.",
+)
+
+HUNGER_CENTER_V3_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["hunger_center"],
+    name="hunger_v3",
+    signal_names=(
+        *HUNGER_CENTER_V2_INTERFACE.signal_names,
+        "food_trace_dx",
+        "food_trace_dy",
+        "food_trace_strength",
+        "food_trace_heading_dx",
+        "food_trace_heading_dy",
+    ),
+    description="Diagnostic sufficiency variant for hunger_center with direct, olfactory, and short food trace cues.",
+)
+
+SLEEP_CENTER_V1_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["sleep_center"],
+    name="sleep_v1",
+    signal_names=(
+        "fatigue",
+        "night",
+        "on_shelter",
+    ),
+    description="Diagnostic sufficiency variant for sleep_center with fatigue, night state, and current shelter occupancy only.",
+)
+
+SLEEP_CENTER_V2_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["sleep_center"],
+    name="sleep_v2",
+    signal_names=(
+        *SLEEP_CENTER_V1_INTERFACE.signal_names,
+        "shelter_role_level",
+    ),
+    description="Diagnostic sufficiency variant for sleep_center adding shelter depth or role level.",
+)
+
+SLEEP_CENTER_V3_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["sleep_center"],
+    name="sleep_v3",
+    signal_names=(
+        *SLEEP_CENTER_V2_INTERFACE.signal_names,
+        "shelter_trace_dx",
+        "shelter_trace_dy",
+        "shelter_trace_strength",
+        "shelter_trace_heading_dx",
+        "shelter_trace_heading_dy",
+    ),
+    description="Diagnostic sufficiency variant for sleep_center adding short shelter trace cues.",
+)
+
+ALERT_CENTER_V1_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["alert_center"],
+    name="alert_v1",
+    signal_names=(
+        "predator_visible",
+        "predator_dx",
+        "predator_dy",
+    ),
+    description="Diagnostic sufficiency variant for alert_center with direct predator visibility and direction only.",
+)
+
+ALERT_CENTER_V2_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["alert_center"],
+    name="alert_v2",
+    signal_names=(
+        *ALERT_CENTER_V1_INTERFACE.signal_names,
+        "predator_certainty",
+        "predator_occluded",
+    ),
+    description="Diagnostic sufficiency variant for alert_center adding visual certainty and occlusion cues.",
+)
+
+ALERT_CENTER_V3_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["alert_center"],
+    name="alert_v3",
+    signal_names=(
+        *ALERT_CENTER_V2_INTERFACE.signal_names,
+        "predator_smell_strength",
+        "recent_pain",
+        "recent_contact",
+        "on_shelter",
+    ),
+    description="Diagnostic sufficiency variant for alert_center adding smell, pain, contact, and shelter occupancy cues.",
+)
+
+VISUAL_CORTEX_V1_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["visual_cortex"],
+    name="visual_v1",
+    signal_names=(
+        "food_visible",
+        "food_dx",
+        "food_dy",
+        "heading_dx",
+        "heading_dy",
+    ),
+    description="Diagnostic sufficiency variant for visual_cortex with visible food direction and current heading only.",
+)
+
+VISUAL_CORTEX_V2_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["visual_cortex"],
+    name="visual_v2",
+    signal_names=(
+        *VISUAL_CORTEX_V1_INTERFACE.signal_names,
+        "shelter_visible",
+        "shelter_dx",
+        "shelter_dy",
+        "predator_visible",
+        "predator_dx",
+        "predator_dy",
+    ),
+    description="Diagnostic sufficiency variant for visual_cortex adding direct shelter and predator direction cues.",
+)
+
+VISUAL_CORTEX_V3_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["visual_cortex"],
+    name="visual_v3",
+    signal_names=(
+        *VISUAL_CORTEX_V2_INTERFACE.signal_names,
+        "foveal_scan_age",
+        "food_trace_strength",
+        "food_trace_heading_dx",
+        "food_trace_heading_dy",
+        "shelter_trace_strength",
+        "shelter_trace_heading_dx",
+        "shelter_trace_heading_dy",
+        "predator_trace_strength",
+        "predator_trace_heading_dx",
+        "predator_trace_heading_dy",
+        "predator_motion_salience",
+        "visual_predator_threat",
+        "olfactory_predator_threat",
+        "day",
+        "night",
+    ),
+    description="Diagnostic sufficiency variant for visual_cortex adding scan age, percept traces, threat salience, and day-night context.",
+)
+
+SENSORY_CORTEX_V1_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["sensory_cortex"],
+    name="sensory_v1",
+    signal_names=(
+        "recent_pain",
+        "recent_contact",
+        "predator_smell_strength",
+        "predator_smell_dx",
+        "predator_smell_dy",
+    ),
+    description="Diagnostic sufficiency variant for sensory_cortex with acute pain/contact and predator smell cues only.",
+)
+
+SENSORY_CORTEX_V2_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["sensory_cortex"],
+    name="sensory_v2",
+    signal_names=(
+        *SENSORY_CORTEX_V1_INTERFACE.signal_names,
+        "food_smell_strength",
+        "food_smell_dx",
+        "food_smell_dy",
+    ),
+    description="Diagnostic sufficiency variant for sensory_cortex adding food-smell cues.",
+)
+
+SENSORY_CORTEX_V3_INTERFACE = _subset_interface(
+    MODULE_INTERFACE_BY_NAME["sensory_cortex"],
+    name="sensory_v3",
+    signal_names=(
+        *SENSORY_CORTEX_V2_INTERFACE.signal_names,
+        "health",
+        "hunger",
+        "fatigue",
+    ),
+    description="Diagnostic sufficiency variant for sensory_cortex adding core homeostatic state without ambient light.",
+)
+
+INTERFACE_VARIANTS: Dict[Tuple[str, int], ModuleInterface] = {
+    ("visual_cortex", 1): VISUAL_CORTEX_V1_INTERFACE,
+    ("visual_cortex", 2): VISUAL_CORTEX_V2_INTERFACE,
+    ("visual_cortex", 3): VISUAL_CORTEX_V3_INTERFACE,
+    ("sensory_cortex", 1): SENSORY_CORTEX_V1_INTERFACE,
+    ("sensory_cortex", 2): SENSORY_CORTEX_V2_INTERFACE,
+    ("sensory_cortex", 3): SENSORY_CORTEX_V3_INTERFACE,
+    ("hunger_center", 1): HUNGER_CENTER_V1_INTERFACE,
+    ("hunger_center", 2): HUNGER_CENTER_V2_INTERFACE,
+    ("hunger_center", 3): HUNGER_CENTER_V3_INTERFACE,
+    ("sleep_center", 1): SLEEP_CENTER_V1_INTERFACE,
+    ("sleep_center", 2): SLEEP_CENTER_V2_INTERFACE,
+    ("sleep_center", 3): SLEEP_CENTER_V3_INTERFACE,
+    ("alert_center", 1): ALERT_CENTER_V1_INTERFACE,
+    ("alert_center", 2): ALERT_CENTER_V2_INTERFACE,
+    ("alert_center", 3): ALERT_CENTER_V3_INTERFACE,
+}
+
+
+def get_interface_variant(module_name: str, level: int) -> ModuleInterface:
+    """
+    Return the requested sufficiency interface variant for a proposal module.
+
+    Level 4 always resolves to the canonical interface registered for `module_name`.
+    """
+    if module_name not in VARIANT_MODULES:
+        raise ValueError(f"Unknown interface variant module '{module_name}'.")
+    if level == 4:
+        return MODULE_INTERFACE_BY_NAME[module_name]
+    try:
+        return INTERFACE_VARIANTS[(module_name, level)]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown interface variant level {level} for module '{module_name}'."
+        ) from exc
+
+
+def get_variant_levels(module_name: str) -> tuple[int, ...]:
+    """
+    Return the available sufficiency levels for `module_name`, including the canonical level 4.
+    """
+    if module_name not in VARIANT_MODULES:
+        raise ValueError(f"Unknown interface variant module '{module_name}'.")
+    return tuple(
+        level
+        for level in (1, 2, 3, 4)
+        if level == 4 or (module_name, level) in INTERFACE_VARIANTS
+    )
+
+
+def is_variant_interface(interface: ModuleInterface) -> bool:
+    """
+    Return True when `interface` is one of the diagnostic sufficiency variants.
+    """
+    return any(variant is interface for variant in INTERFACE_VARIANTS.values())
+
+
+def validate_variant_interfaces() -> None:
+    """
+    Validate that all diagnostic sufficiency variants remain consistent with their parents.
+    """
+    errors: list[str] = []
+    for (module_name, level), interface in INTERFACE_VARIANTS.items():
+        parent = MODULE_INTERFACE_BY_NAME[module_name]
+        missing = [name for name in interface.signal_names if name not in parent.signal_names]
+        if missing:
+            errors.append(
+                f"{interface.name} (module={module_name}, level={level}) has signals absent from "
+                f"{parent.name}: {missing}."
+            )
+        if interface.observation_key != parent.observation_key:
+            errors.append(
+                f"{interface.name} (module={module_name}, level={level}) observation_key "
+                f"'{interface.observation_key}' does not match parent '{parent.observation_key}'."
+            )
+        expected_order = tuple(
+            signal.name for signal in parent.inputs if signal.name in interface.signal_names
+        )
+        if interface.signal_names != expected_order:
+            errors.append(
+                f"{interface.name} (module={module_name}, level={level}) signal order does not "
+                f"match parent '{parent.name}'. Expected {expected_order}, got {interface.signal_names}."
+            )
+    if errors:
+        raise ValueError("Invalid interface variants:\n- " + "\n- ".join(errors))
+
+
+validate_variant_interfaces()
+
 OBSERVATION_INTERFACE_BY_KEY: Dict[str, ModuleInterface] = {
     spec.observation_key: spec for spec in ALL_INTERFACES
 }
@@ -678,7 +1264,7 @@ INTERFACE_REGISTRY_SCHEMA_VERSION = 1
 ARBITRATION_EVIDENCE_INPUT_DIM = 24
 ARBITRATION_HIDDEN_DIM = 32
 ARBITRATION_VALENCE_DIM = 4
-ARBITRATION_GATE_DIM = 6
+ARBITRATION_GATE_DIM = 9
 
 
 def _stable_json(payload: object) -> str:
@@ -745,14 +1331,22 @@ def architecture_signature(
     arbitration_input_dim: int = ARBITRATION_EVIDENCE_INPUT_DIM,
     arbitration_hidden_dim: int = ARBITRATION_HIDDEN_DIM,
     arbitration_regularization_weight: float = 0.1,
+    capacity_profile_name: str = "current",
+    module_hidden_dims: Mapping[str, int] | None = None,
+    integration_hidden_dim: int | None = None,
+    monolithic_hidden_dim: int | None = None,
+    capacity_profile: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """
     Generate a JSON-serializable signature describing the agent's observation/action architecture.
     
     Parameters:
-        proposal_backend (str): Proposal-stage topology; must be "modular" or "monolithic".
+        proposal_backend (str): Proposal-stage topology; must be "modular",
+            "monolithic", or "true_monolithic".
         proposal_order (Sequence[str] | None): Ordered proposal sources for the action-center input. If omitted,
-            "modular" uses all MODULE_INTERFACES names in declaration order and "monolithic" uses ["monolithic_policy"].
+            "modular" uses all MODULE_INTERFACES names in declaration order,
+            "monolithic" uses ["monolithic_policy"], and "true_monolithic"
+            uses ["true_monolithic_policy"].
         learned_arbitration (bool): Whether arbitration uses the learned network or the fixed-formula baseline.
         arbitration_input_dim (int): Size of the concatenated arbitration evidence vector.
         arbitration_hidden_dim (int): Size of the learned arbitration shared hidden layer.
@@ -768,19 +1362,21 @@ def architecture_signature(
             - "contexts": summaries for action and motor context interfaces.
             - "interface_versions": mapping of interface name to its numeric version.
             - "proposal_order": resolved ordered list of proposal sources.
-            - "arbitration_network": learned-arbitration topology and parameter-layout fingerprint.
-            - "action_center": action-center specification including context interface, raw input names,
-              an "arbitration" object (strategy, valences, and module_roles), inter-stage proposal inputs,
-              proposal slot metadata, outputs, and "value_head": True.
-            - "motor_cortex": motor-cortex specification including context interface, raw input names,
-              inter-stage intent input metadata, outputs, and "value_head": False.
+            - "arbitration_network": learned-arbitration topology and parameter-layout fingerprint
+              when the pipeline includes arbitration.
+            - "action_center" / "motor_cortex": downstream pipeline specifications when present.
+            - "direct_policy": direct control specification for the true-monolithic baseline.
             - "fingerprint": SHA-256 fingerprint of the returned payload.
     """
-    if proposal_backend not in {"modular", "monolithic"}:
-        raise ValueError("proposal_backend must be 'modular' or 'monolithic'.")
+    if proposal_backend not in {"modular", "monolithic", "true_monolithic"}:
+        raise ValueError(
+            "proposal_backend must be 'modular', 'monolithic', or 'true_monolithic'."
+        )
     if proposal_order is None:
         if proposal_backend == "modular":
             proposal_order = [spec.name for spec in MODULE_INTERFACES]
+        elif proposal_backend == "true_monolithic":
+            proposal_order = ["true_monolithic_policy"]
         else:
             proposal_order = ["monolithic_policy"]
     proposal_order = [str(name) for name in proposal_order]
@@ -790,12 +1386,20 @@ def architecture_signature(
         "sleep_center": "sleep",
         "visual_cortex": "support",
         "sensory_cortex": "support",
+        "perception_center": "support",
+        "homeostasis_center": "hunger",
+        "threat_center": "threat",
         "monolithic_policy": "integrated_policy",
+        "true_monolithic_policy": "integrated_policy",
     }
-    if proposal_backend == "monolithic":
+    if proposal_backend in {"monolithic", "true_monolithic"}:
         filtered_module_roles = (
-            {"monolithic_policy": arbitration_module_roles["monolithic_policy"]}
-            if "monolithic_policy" in proposal_order
+            {
+                name: arbitration_module_roles[name]
+                for name in proposal_order
+                if name in arbitration_module_roles
+            }
+            if proposal_order
             else {}
         )
     else:
@@ -845,15 +1449,44 @@ def architecture_signature(
             for spec in ALL_INTERFACES
         },
         "proposal_order": proposal_order,
-        "arbitration_network": {
+        "capacity_profile_name": str(capacity_profile_name),
+    }
+    if module_hidden_dims is not None or integration_hidden_dim is not None or monolithic_hidden_dim is not None:
+        capacity_payload: dict[str, object] = {}
+        if capacity_profile is not None:
+            capacity_payload["profile"] = {
+                str(key): value
+                for key, value in dict(capacity_profile).items()
+            }
+        if module_hidden_dims is not None:
+            capacity_payload["module_hidden_dims"] = {
+                str(name): int(hidden_dim)
+                for name, hidden_dim in dict(module_hidden_dims).items()
+            }
+        if integration_hidden_dim is not None:
+            capacity_payload["integration_hidden_dim"] = int(integration_hidden_dim)
+        if monolithic_hidden_dim is not None:
+            capacity_payload["monolithic_hidden_dim"] = int(monolithic_hidden_dim)
+        payload["capacity"] = capacity_payload
+    if proposal_backend == "true_monolithic":
+        payload["direct_policy"] = {
+            "observation_sources": [spec.name for spec in MODULE_INTERFACES],
+            "observation_keys": [spec.observation_key for spec in MODULE_INTERFACES],
+            "outputs": list(LOCOMOTION_ACTIONS),
+            "value_head": True,
+        }
+        if monolithic_hidden_dim is not None:
+            payload["direct_policy"]["hidden_dim"] = int(monolithic_hidden_dim)
+    else:
+        payload["arbitration_network"] = {
             "learned": bool(learned_arbitration),
             "input_dim": arbitration_input_dim,
             "hidden_dim": arbitration_hidden_dim,
             "regularization_weight": float(arbitration_regularization_weight),
             "parameter_shapes": arbitration_parameter_shapes,
             "parameter_fingerprint": arbitration_parameter_fingerprint,
-        },
-        "action_center": {
+        }
+        payload["action_center"] = {
             "context_interface": ACTION_CONTEXT_INTERFACE.name,
             "observation_key": ACTION_CONTEXT_INTERFACE.observation_key,
             "version": ACTION_CONTEXT_INTERFACE.version,
@@ -882,8 +1515,10 @@ def architecture_signature(
                 for name in proposal_order
             ],
             "value_head": True,
-        },
-        "motor_cortex": {
+        }
+        if integration_hidden_dim is not None:
+            payload["action_center"]["hidden_dim"] = int(integration_hidden_dim)
+        payload["motor_cortex"] = {
             "context_interface": MOTOR_CONTEXT_INTERFACE.name,
             "observation_key": MOTOR_CONTEXT_INTERFACE.observation_key,
             "version": MOTOR_CONTEXT_INTERFACE.version,
@@ -899,10 +1534,8 @@ def architecture_signature(
             ],
             "outputs": list(LOCOMOTION_ACTIONS),
             "value_head": False,
-        },
-    }
+        }
+        if integration_hidden_dim is not None:
+            payload["motor_cortex"]["hidden_dim"] = int(integration_hidden_dim)
     payload["fingerprint"] = _fingerprint_payload(payload)
     return payload
-
-
-from .interface_docs import render_interfaces_markdown

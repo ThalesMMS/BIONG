@@ -179,6 +179,10 @@ class ProposalNetwork:
         """
         return _parameter_norm_of(self.W1, self.b1, self.W2, self.b2)
 
+    def count_parameters(self) -> int:
+        """Return the number of trainable parameters in the network."""
+        return int(self.W1.size + self.b1.size + self.W2.size + self.b2.size)
+
 
 class RecurrentProposalNetwork:
     """Simple Elman RNN proposer that keeps agent-owned hidden state."""
@@ -368,6 +372,16 @@ class RecurrentProposalNetwork:
     def parameter_norm(self) -> float:
         """Return the L2 norm of all recurrent proposer parameters."""
         return _parameter_norm_of(self.W_xh, self.W_hh, self.b_h, self.W_out, self.b_out)
+
+    def count_parameters(self) -> int:
+        """Return the number of trainable parameters in the recurrent proposer."""
+        return int(
+            self.W_xh.size
+            + self.W_hh.size
+            + self.b_h.size
+            + self.W_out.size
+            + self.b_out.size
+        )
 
 
 @dataclass
@@ -568,6 +582,37 @@ class MotorNetwork:
             self.W1, self.b1, self.W2_policy, self.b2_policy, self.W2_value, self.b2_value
         )
 
+    def count_parameters(self) -> int:
+        """Return the number of trainable parameters in the motor network."""
+        return int(
+            self.W1.size
+            + self.b1.size
+            + self.W2_policy.size
+            + self.b2_policy.size
+            + self.W2_value.size
+            + self.b2_value.size
+        )
+
+
+class TrueMonolithicNetwork(MotorNetwork):
+    """Direct policy+value network for the true monolithic baseline."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        rng: np.random.Generator,
+        name: str = "true_monolithic_policy",
+    ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            output_dim=output_dim,
+            rng=rng,
+            name=name,
+        )
+
 
 @dataclass
 class ArbitrationCache:
@@ -615,7 +660,7 @@ class ArbitrationNetwork:
     )
     INPUT_DIM = len(EVIDENCE_SIGNAL_NAMES)
     VALENCE_DIM = 4
-    GATE_DIM = 6
+    GATE_DIM = 9
     GATE_ADJUSTMENT_MIN = 0.5
     GATE_ADJUSTMENT_MAX = 1.5
 
@@ -887,4 +932,17 @@ class ArbitrationNetwork:
             self.W2_valence, self.b2_valence,
             self.W2_gate, self.b2_gate,
             self.W2_value, self.b2_value,
+        )
+
+    def count_parameters(self) -> int:
+        """Return the number of trainable parameters in the arbitration network."""
+        return int(
+            self.W1.size
+            + self.b1.size
+            + self.W2_valence.size
+            + self.b2_valence.size
+            + self.W2_gate.size
+            + self.b2_gate.size
+            + self.W2_value.size
+            + self.b2_value.size
         )

@@ -15,6 +15,7 @@ from ..budget_profiles import (
     CHECKPOINT_SELECTION_NAMES,
     canonical_budget_profile_names,
 )
+from ..capacity_profiles import canonical_capacity_profile_names
 from ..checkpointing import CHECKPOINT_PENALTY_MODE_NAMES
 from ..claim_tests import claim_test_names
 from ..curriculum import CURRICULUM_PROFILE_NAMES
@@ -120,6 +121,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="Explicit experimental noise or stochasticity profile.",
     )
+    parser.add_argument(
+        "--capacity-profile",
+        choices=list(canonical_capacity_profile_names()),
+        default=None,
+        help="Capacity preset for module and integration hidden dimensions.",
+    )
     parser.add_argument("--module-lr", type=float, default=0.010, help="Learning rate for the specialized modules.")
     parser.add_argument("--motor-lr", type=float, default=0.012, help="Learning rate for the motor or critic cortex.")
     parser.add_argument("--module-dropout", type=float, default=0.05, help="Per-module dropout probability during training.")
@@ -142,6 +149,52 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(canonical_training_regime_names()),
         default=None,
         help="Named training regime for reflex annealing and late fine-tuning.",
+    )
+    parser.add_argument(
+        "--distillation-teacher-checkpoint",
+        type=Path,
+        default=None,
+        help="Teacher checkpoint directory required by the distillation training regime.",
+    )
+    parser.add_argument(
+        "--distillation-epochs",
+        type=int,
+        default=1,
+        help="Number of offline supervised passes over the teacher rollout dataset.",
+    )
+    parser.add_argument(
+        "--distillation-temperature",
+        type=float,
+        default=1.0,
+        help="Soft-target temperature for distillation losses.",
+    )
+    parser.add_argument(
+        "--distillation-module-lr",
+        type=float,
+        default=None,
+        help="Optional module learning-rate override during distillation.",
+    )
+    parser.add_argument(
+        "--distillation-motor-lr",
+        type=float,
+        default=None,
+        help="Optional motor/action-center learning-rate override during distillation.",
+    )
+    parser.add_argument(
+        "--distillation-arbitration-lr",
+        type=float,
+        default=None,
+        help="Optional arbitration learning-rate override during distillation.",
+    )
+    parser.add_argument(
+        "--distillation-shuffle",
+        action="store_true",
+        help="Shuffle distillation samples between epochs.",
+    )
+    parser.add_argument(
+        "--distillation-match-local-proposals",
+        action="store_true",
+        help="Also align per-module proposal policies when the teacher exposes compatible modules.",
     )
     parser.add_argument(
         "--experiment-of-record",
@@ -298,6 +351,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--ablation-suite",
         action="store_true",
         help="Compare the behavioral suite across architecture and ablation variants.",
+    )
+    parser.add_argument(
+        "--ladder-reward-profiles",
+        "--ladder-compare-profiles",
+        dest="ladder_reward_profiles",
+        action="store_true",
+        help=(
+            "Run A0-A4 under the classic, ecological, and austere reward "
+            "profiles using the no-reflex benchmark surface."
+        ),
+    )
+    parser.add_argument(
+        "--capacity-sweep",
+        action="store_true",
+        help="Sweep capacity presets across the A0/A1/A2/A3/A4 architecture ladder.",
     )
     parser.add_argument(
         "--ablation-variant",

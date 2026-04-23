@@ -22,12 +22,12 @@ from .ablations import (
 from .benchmark_types import SeedLevelResult, UncertaintyEstimate
 from .budget_profiles import BudgetProfile, resolve_budget
 from .checkpointing import (
-    CheckpointPenaltyMode,
     CheckpointSelectionConfig,
     checkpoint_candidate_sort_key,
     checkpoint_preload_fingerprint,
     checkpoint_run_fingerprint,
     mean_reward_from_behavior_payload,
+    resolve_checkpoint_selection_config,
     resolve_checkpoint_load_dir,
 )
 from .curriculum import (
@@ -35,6 +35,7 @@ from .curriculum import (
     empty_curriculum_summary,
     validate_curriculum_profile,
 )
+from .distillation import DistillationConfig
 from .export import compact_aggregate, compact_behavior_payload
 from .learning_evidence import resolve_learning_evidence_conditions
 from .memory import memory_leakage_audit
@@ -65,15 +66,18 @@ from .reward import (
 from .scenarios import SCENARIO_NAMES, get_scenario
 from .simulation import EXPERIMENT_OF_RECORD_REGIME, SpiderSimulation
 from .statistics import bootstrap_confidence_interval, cohens_d
-from .training_regimes import resolve_training_regime
+from .training_regimes import TrainingRegimeSpec, resolve_training_regime
 
-from .comparison_learning import build_learning_evidence_deltas
+from .comparison_learning import (
+    build_distillation_comparison_report,
+    build_learning_evidence_deltas,
+)
 from .comparison_noise import with_noise_profile_metadata
 from .comparison_utils import noise_profile_metadata
 
 def _compare_named_training_regimes(
     *,
-    regime_names: Sequence[str],
+    regime_names: Sequence[str | TrainingRegimeSpec],
     width: int = 12,
     height: int = 12,
     food_count: int = 4,
@@ -95,14 +99,10 @@ def _compare_named_training_regimes(
     names: Sequence[str] | None = None,
     episodes_per_scenario: int | None = None,
     checkpoint_selection: str = "none",
-    checkpoint_metric: str = "scenario_success_rate",
-    checkpoint_override_penalty: float = 0.0,
-    checkpoint_dominance_penalty: float = 0.0,
-    checkpoint_penalty_mode: CheckpointPenaltyMode | str = (
-        CheckpointPenaltyMode.TIEBREAKER
-    ),
+    checkpoint_selection_config: CheckpointSelectionConfig,
     checkpoint_interval: int | None = None,
     checkpoint_dir: str | Path | None = None,
+    distillation_config: DistillationConfig | None = None,
 ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
     """
     Compare specified training regimes by training and evaluating each under both self-sufficient (no reflex support) and scaffolded (reflex-supported) conditions.
@@ -118,10 +118,7 @@ def _compare_named_training_regimes(
         names (Sequence[str] | None): Scenario names to evaluate; defaults to all known scenarios.
         episodes_per_scenario (int | None): Number of evaluation episodes per scenario (overrides budget per-scenario setting).
         checkpoint_selection (str): One of `"none"` or `"best"`, controls whether checkpoints are captured/selected during training.
-        checkpoint_metric (str): Primary metric label used when ranking checkpoint candidates.
-        checkpoint_override_penalty (float): Weight applied to override-rate penalty when using direct composite scoring.
-        checkpoint_dominance_penalty (float): Weight applied to reflex dominance penalty when using direct composite scoring.
-        checkpoint_penalty_mode (CheckpointPenaltyMode | str): Penalty interpretation mode; `TIEBREAKER` preserves legacy tuple ordering, `DIRECT` uses a penalized composite score.
+        checkpoint_selection_config (CheckpointSelectionConfig): Normalized checkpoint metric and penalty settings used when checkpoint selection is active.
         checkpoint_interval, checkpoint_dir: Checkpoint capture cadence and optional persistence directory.
 
     Returns:
@@ -129,19 +126,34 @@ def _compare_named_training_regimes(
           - payload: a comparison summary containing per-regime payloads (`regimes`), competence gaps, deltas vs baseline, checkpoint penalty configuration, and noise/budget metadata.
           - rows: flattened annotated behavior rows (one row per evaluated episode/scenario/seed) suitable for CSV export.
     """
-    requested_regime_names = [str(name) for name in regime_names]
-    if not requested_regime_names:
-        requested_regime_names = [
+    requested_regime_specs = [] if regime_names is None else list(regime_names)
+    if not requested_regime_specs:
+        requested_regime_specs = [
             "baseline",
             "reflex_annealed",
             EXPERIMENT_OF_RECORD_REGIME,
         ]
-    if "baseline" not in requested_regime_names:
-        requested_regime_names.insert(0, "baseline")
-    deduped_regime_names = list(dict.fromkeys(requested_regime_names))
+    normalized_regime_specs: list[TrainingRegimeSpec] = []
+    seen_regime_names: set[str] = set()
+    has_baseline = False
+    for item in requested_regime_specs:
+        regime_spec = (
+            item
+            if isinstance(item, TrainingRegimeSpec)
+            else resolve_training_regime(str(item))
+        )
+        if regime_spec.name == "baseline":
+            has_baseline = True
+        if regime_spec.name in seen_regime_names:
+            continue
+        seen_regime_names.add(regime_spec.name)
+        normalized_regime_specs.append(regime_spec)
+    if not has_baseline:
+        normalized_regime_specs.insert(0, resolve_training_regime("baseline"))
+    deduped_regime_names = [spec.name for spec in normalized_regime_specs]
     regime_specs = {
-        name: resolve_training_regime(name)
-        for name in deduped_regime_names
+        spec.name: spec
+        for spec in normalized_regime_specs
     }
     resolved_noise_profile = resolve_noise_profile(noise_profile)
     budget = resolve_budget(
@@ -214,15 +226,13 @@ def _compare_named_training_regimes(
                 capture_evaluation_trace=False,
                 debug_trace=False,
                 checkpoint_selection=checkpoint_selection,
-                checkpoint_metric=checkpoint_metric,
-                checkpoint_override_penalty=checkpoint_override_penalty,
-                checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                checkpoint_penalty_mode=checkpoint_penalty_mode,
+                checkpoint_selection_config=checkpoint_selection_config,
                 checkpoint_interval=budget.checkpoint_interval,
                 checkpoint_dir=run_checkpoint_dir,
                 checkpoint_scenario_names=scenario_names,
                 selection_scenario_episodes=budget.selection_scenario_episodes,
                 training_regime=regime_spec,
+                distillation_config=distillation_config,
             )
             training_summaries.append(deepcopy(training_summary))
             seed_training_metadata = deepcopy(sim._latest_training_regime_summary)
@@ -442,18 +452,82 @@ def _compare_named_training_regimes(
             ),
         }
 
-    return {
+    def _average_summary_runs(
+        summary_runs: list[Dict[str, object]],
+    ) -> Dict[str, object] | None:
+        if not summary_runs:
+            return None
+        averaged_summary = deepcopy(summary_runs[-1])
+        for metric_name in (
+            "scenario_success_rate",
+            "episode_success_rate",
+            "mean_reward",
+        ):
+            averaged_summary[metric_name] = float(
+                sum(float(run.get(metric_name, 0.0)) for run in summary_runs)
+                / len(summary_runs)
+            )
+        return averaged_summary
+
+    teacher_runs: list[Dict[str, object]] = []
+    distilled_runs: list[Dict[str, object]] = []
+    finetuned_runs: list[Dict[str, object]] = []
+    for regime_name, regime_spec in regime_specs.items():
+        if not bool(regime_spec.distillation_enabled):
+            continue
+        payload = regime_payloads.get(regime_name, {})
+        training_summaries = payload.get("training_summaries", [])
+        if not isinstance(training_summaries, list):
+            continue
+        for run_summary in training_summaries:
+            if not isinstance(run_summary, dict):
+                continue
+            distillation_summary = run_summary.get("distillation", {})
+            if not isinstance(distillation_summary, dict):
+                continue
+            comparison = distillation_summary.get("post_distillation_comparison", {})
+            if not isinstance(comparison, dict):
+                continue
+            teacher_summary = comparison.get("teacher")
+            if isinstance(teacher_summary, dict):
+                teacher_runs.append(deepcopy(teacher_summary))
+            distilled_summary = comparison.get("modular_distilled")
+            if distilled_summary is None:
+                distilled_summary = comparison.get("student_after_distillation")
+            if isinstance(distilled_summary, dict):
+                distilled_runs.append(deepcopy(distilled_summary))
+            finetuned_summary = comparison.get(
+                "modular_distilled_plus_rl_finetuning"
+            )
+            if finetuned_summary is None:
+                finetuned_summary = comparison.get("student_after_finetuning")
+            if isinstance(finetuned_summary, dict):
+                finetuned_runs.append(deepcopy(finetuned_summary))
+
+    teacher_reference = _average_summary_runs(teacher_runs)
+    distillation_report: Dict[str, object] | None = None
+    distilled_summary = _average_summary_runs(distilled_runs)
+    finetuned_summary = _average_summary_runs(finetuned_runs)
+    baseline_summary = (
+        baseline_payload.get("summary", {})
+        if isinstance(baseline_payload, dict)
+        else {}
+    )
+    if teacher_reference is not None and distilled_summary is not None:
+        distillation_report = build_distillation_comparison_report(
+            teacher=teacher_reference,
+            modular_rl_from_scratch=baseline_summary,
+            modular_distilled=distilled_summary,
+            modular_distilled_plus_rl_finetuning=finetuned_summary,
+        )
+
+    result_payload = {
         "comparison_type": "training_regimes",
         "budget_profile": budget.profile,
         "benchmark_strength": budget.benchmark_strength,
         "checkpoint_selection": checkpoint_selection,
-        "checkpoint_metric": checkpoint_metric,
-        "checkpoint_penalty_config": CheckpointSelectionConfig(
-            metric=checkpoint_metric,
-            override_penalty_weight=checkpoint_override_penalty,
-            dominance_penalty_weight=checkpoint_dominance_penalty,
-            penalty_mode=checkpoint_penalty_mode,
-        ).to_summary(),
+        "checkpoint_metric": checkpoint_selection_config.metric,
+        "checkpoint_penalty_config": checkpoint_selection_config.to_summary(),
         "reference_regime": "baseline",
         "experiment_of_record_regime": EXPERIMENT_OF_RECORD_REGIME,
         "regime_names": deduped_regime_names,
@@ -467,10 +541,15 @@ def _compare_named_training_regimes(
         },
         "deltas_vs_baseline": deltas_vs_baseline,
         **noise_profile_metadata(resolved_noise_profile),
-    }, rows
+    }
+    if teacher_reference is not None:
+        result_payload["teacher_reference"] = teacher_reference
+    if distillation_report is not None:
+        result_payload["distillation_report"] = distillation_report
+    return result_payload, rows
 
 def compare_training_regimes(
-    regime_names: Sequence[str] | None = None,
+    regime_names: Sequence[str | TrainingRegimeSpec] | None = None,
     *,
     width: int = 12,
     height: int = 12,
@@ -493,25 +572,24 @@ def compare_training_regimes(
     names: Sequence[str] | None = None,
     episodes_per_scenario: int | None = None,
     checkpoint_selection: str = "none",
-    checkpoint_metric: str = "scenario_success_rate",
-    checkpoint_override_penalty: float = 0.0,
-    checkpoint_dominance_penalty: float = 0.0,
-    checkpoint_penalty_mode: CheckpointPenaltyMode | str = (
-        CheckpointPenaltyMode.TIEBREAKER
-    ),
+    checkpoint_selection_config: CheckpointSelectionConfig | None = None,
     checkpoint_interval: int | None = None,
     checkpoint_dir: str | Path | None = None,
     curriculum_profile: str = "ecological_v1",
+    distillation_config: DistillationConfig | None = None,
 ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
     """
     Compare 'flat' and curriculum training regimes by training and evaluating both under a shared budget and seed set.
 
-    Trains a flat regime and a curriculum regime (using the provided curriculum_profile) for each seed, optionally capturing checkpoints per the checkpoint parameters, evaluates both regimes across the same scenario suite, and aggregates per-scenario episode statistics, behavioral scores, training/curriculum metadata, and computed deltas comparing curriculum versus flat.
+    Trains a flat regime and a curriculum regime (using the provided curriculum_profile) for each seed, optionally capturing checkpoints per the checkpoint selection config, evaluates both regimes across the same scenario suite, and aggregates per-scenario episode statistics, behavioral scores, training/curriculum metadata, and computed deltas comparing curriculum versus flat.
 
     Returns:
         result_payload (Dict[str, object]): Aggregated comparison payload containing budget and seed metadata, per-regime compact behavior payloads under "regimes", computed deltas versus the flat reference under "deltas_vs_flat", focus summaries, and noise profile metadata.
         rows (List[Dict[str, object]]): A flattened, annotated list of per-episode/behavior rows suitable for CSV export.
     """
+    checkpoint_selection_config = resolve_checkpoint_selection_config(
+        checkpoint_selection_config
+    )
     if regime_names is not None:
         return _compare_named_training_regimes(
             regime_names=regime_names,
@@ -536,12 +614,10 @@ def compare_training_regimes(
             names=names,
             episodes_per_scenario=episodes_per_scenario,
             checkpoint_selection=checkpoint_selection,
-            checkpoint_metric=checkpoint_metric,
-            checkpoint_override_penalty=checkpoint_override_penalty,
-            checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-            checkpoint_penalty_mode=checkpoint_penalty_mode,
+            checkpoint_selection_config=checkpoint_selection_config,
             checkpoint_interval=checkpoint_interval,
             checkpoint_dir=checkpoint_dir,
+            distillation_config=distillation_config,
         )
     profile_name = validate_curriculum_profile(curriculum_profile)
     if profile_name == "none":
@@ -645,10 +721,7 @@ def compare_training_regimes(
                     capture_evaluation_trace=False,
                     debug_trace=False,
                     checkpoint_selection=checkpoint_selection,
-                    checkpoint_metric=checkpoint_metric,
-                    checkpoint_override_penalty=checkpoint_override_penalty,
-                    checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                    checkpoint_penalty_mode=checkpoint_penalty_mode,
+                    checkpoint_selection_config=checkpoint_selection_config,
                     checkpoint_interval=budget.checkpoint_interval,
                     checkpoint_dir=run_checkpoint_dir,
                     checkpoint_scenario_names=scenario_names,
@@ -738,13 +811,8 @@ def compare_training_regimes(
         "budget_profile": budget.profile,
         "benchmark_strength": budget.benchmark_strength,
         "checkpoint_selection": checkpoint_selection,
-        "checkpoint_metric": checkpoint_metric,
-        "checkpoint_penalty_config": CheckpointSelectionConfig(
-            metric=checkpoint_metric,
-            override_penalty_weight=checkpoint_override_penalty,
-            dominance_penalty_weight=checkpoint_dominance_penalty,
-            penalty_mode=checkpoint_penalty_mode,
-        ).to_summary(),
+        "checkpoint_metric": checkpoint_selection_config.metric,
+        "checkpoint_penalty_config": checkpoint_selection_config.to_summary(),
         "curriculum_profile": profile_name,
         "reference_regime": "flat",
         "seeds": list(seed_values),

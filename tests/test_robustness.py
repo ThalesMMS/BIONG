@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from unittest import mock
 
+from spider_cortex_sim.checkpointing import CheckpointSelectionConfig
 from spider_cortex_sim.comparison import (
     compare_noise_robustness,
     matrix_cell_success_rate,
@@ -539,7 +540,9 @@ class CompareNoiseRobustnessValidationTest(unittest.TestCase):
                     eval_conditions=("none",),
                 ),
                 checkpoint_selection="best",
-                checkpoint_metric="not_a_metric",
+                checkpoint_selection_config=CheckpointSelectionConfig(
+                    metric="not_a_metric",
+                ),
             )
 
     def test_compare_noise_robustness_loads_and_saves_brains_when_requested(self) -> None:

@@ -247,6 +247,15 @@ class ScenarioSetupRegressionTest(ScenarioWorldHelpers, unittest.TestCase):
         self.assertLess(world.spider_pos()[0], world.food_positions[0][0])
         self.assertGreater(len(world.shelter_deep_cells), 2)
 
+    def test_night_rest_uses_extended_setup_first_budget(self) -> None:
+        scenario = get_scenario("night_rest")
+        self.assertEqual(scenario.max_steps, 14)
+
+    def test_two_shelter_tradeoff_starts_earlier_and_avoids_exact_center_choke(self) -> None:
+        world = self._setup_world("two_shelter_tradeoff")
+        self.assertEqual(world.tick, world.day_length - 4)
+        self.assertNotEqual(world.lizard_pos()[0], world.width // 2)
+
     def test_exposed_day_foraging_starts_with_nearby_patrol_pressure(self) -> None:
         """
         Verify the "exposed_day_foraging" scenario starts in daytime on the "exposed_feeding_ground" map with the lizard positioned three Manhattan steps from the first food.

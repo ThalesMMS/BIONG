@@ -16,7 +16,7 @@ from typing import Dict, List, Sequence
 from ..ablations import BrainAblationConfig, compare_predator_type_ablation_performance
 from ..benchmark_types import SeedLevelResult
 from ..budget_profiles import BudgetProfile
-from ..checkpointing import CheckpointPenaltyMode
+from ..checkpointing import CheckpointSelectionConfig
 from ..claim_tests import (
     ClaimTestSpec,
     assess_scaffold_support,
@@ -231,12 +231,7 @@ def run_claim_test_suite(
     episodes_per_scenario: int | None = None,
     robustness_matrix: RobustnessMatrixSpec | None = None,
     checkpoint_selection: str = "none",
-    checkpoint_metric: str = "scenario_success_rate",
-    checkpoint_override_penalty: float = 0.0,
-    checkpoint_dominance_penalty: float = 0.0,
-    checkpoint_penalty_mode: CheckpointPenaltyMode | str = (
-        CheckpointPenaltyMode.TIEBREAKER
-    ),
+    checkpoint_selection_config: CheckpointSelectionConfig | None = None,
     checkpoint_interval: int | None = None,
     checkpoint_dir: str | Path | None = None,
     ablation_payload: Dict[str, object] | None = None,
@@ -265,7 +260,7 @@ def run_claim_test_suite(
             Sequence of RNG seeds to use for generated comparisons; when omitted comparison helpers choose defaults.
         robustness_matrix:
             Optional robustness-matrix spec to use for noise-robustness comparisons.
-        checkpoint_selection, checkpoint_metric, checkpoint_interval, checkpoint_dir:
+        checkpoint_selection, checkpoint_selection_config, checkpoint_interval, checkpoint_dir:
             Checkpointing controls passed through to comparison runs that support candidate selection.
         ablation_payload, learning_evidence_payload, noise_robustness_payload, austere_survival_payload:
             Optional precomputed primitive payloads to reuse; when provided the method will not regenerate that source.
@@ -373,10 +368,7 @@ def run_claim_test_suite(
                 condition_names=learning_conditions or None,
                 episodes_per_scenario=episodes_per_scenario,
                 checkpoint_selection=checkpoint_selection,
-                checkpoint_metric=checkpoint_metric,
-                checkpoint_override_penalty=checkpoint_override_penalty,
-                checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                checkpoint_penalty_mode=checkpoint_penalty_mode,
+                checkpoint_selection_config=checkpoint_selection_config,
                 checkpoint_interval=checkpoint_interval,
                 checkpoint_dir=checkpoint_dir,
             )
@@ -406,10 +398,7 @@ def run_claim_test_suite(
                 variant_names=ablation_variants or None,
                 episodes_per_scenario=episodes_per_scenario,
                 checkpoint_selection=checkpoint_selection,
-                checkpoint_metric=checkpoint_metric,
-                checkpoint_override_penalty=checkpoint_override_penalty,
-                checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                checkpoint_penalty_mode=checkpoint_penalty_mode,
+                checkpoint_selection_config=checkpoint_selection_config,
                 checkpoint_interval=checkpoint_interval,
                 checkpoint_dir=checkpoint_dir,
             )
@@ -438,10 +427,7 @@ def run_claim_test_suite(
                 episodes_per_scenario=episodes_per_scenario,
                 robustness_matrix=robustness_matrix,
                 checkpoint_selection=checkpoint_selection,
-                checkpoint_metric=checkpoint_metric,
-                checkpoint_override_penalty=checkpoint_override_penalty,
-                checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                checkpoint_penalty_mode=checkpoint_penalty_mode,
+                checkpoint_selection_config=checkpoint_selection_config,
                 checkpoint_interval=checkpoint_interval,
                 checkpoint_dir=checkpoint_dir,
             )
@@ -473,10 +459,7 @@ def run_claim_test_suite(
                 names=austere_scenarios or None,
                 episodes_per_scenario=episodes_per_scenario,
                 checkpoint_selection=checkpoint_selection,
-                checkpoint_metric=checkpoint_metric,
-                checkpoint_override_penalty=checkpoint_override_penalty,
-                checkpoint_dominance_penalty=checkpoint_dominance_penalty,
-                checkpoint_penalty_mode=checkpoint_penalty_mode,
+                checkpoint_selection_config=checkpoint_selection_config,
                 checkpoint_interval=checkpoint_interval,
                 checkpoint_dir=checkpoint_dir,
             )

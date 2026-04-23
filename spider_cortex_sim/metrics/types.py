@@ -161,6 +161,7 @@ class EpisodeStats:
     module_disagreement_rate: float = 0.0
     mean_module_credit_weights: Dict[str, float] = field(default_factory=dict)
     module_gradient_norm_means: Dict[str, float] = field(default_factory=dict)
+    mean_counterfactual_credit_weights: Dict[str, float] = field(default_factory=dict)
     motor_slip_rate: float = 0.0
     mean_orientation_alignment: float = 0.0
     mean_terrain_difficulty: float = 0.0

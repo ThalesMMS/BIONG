@@ -75,6 +75,10 @@ class AccumulatorSnapshotMixin:
             name: float(self.module_gradient_norm_sums[name] / learning_total)
             for name in self.module_gradient_norm_sums
         }
+        mean_counterfactual_credit_weights = {
+            name: float(self.counterfactual_credit_weight_sums[name] / learning_total)
+            for name in self.counterfactual_credit_weight_sums
+        }
         dominant_module_distribution = {
             name: float(self.dominant_module_counts[name] / decision_total)
             for name in self.dominant_module_counts
@@ -270,6 +274,7 @@ class AccumulatorSnapshotMixin:
             "module_contribution_share": module_contribution_share,
             "mean_module_credit_weights": mean_module_credit_weights,
             "module_gradient_norm_means": module_gradient_norm_means,
+            "mean_counterfactual_credit_weights": mean_counterfactual_credit_weights,
             "motor_slip_rate": float(
                 self.motor_slip_steps / self.motor_execution_steps
                 if self.motor_execution_steps
@@ -465,6 +470,12 @@ class AccumulatorSnapshotMixin:
             module_gradient_norm_means={
                 name: float(value)
                 for name, value in snapshot["module_gradient_norm_means"].items()
+            },
+            mean_counterfactual_credit_weights={
+                name: float(value)
+                for name, value in snapshot[
+                    "mean_counterfactual_credit_weights"
+                ].items()
             },
             motor_slip_rate=float(snapshot["motor_slip_rate"]),
             mean_orientation_alignment=float(snapshot["mean_orientation_alignment"]),

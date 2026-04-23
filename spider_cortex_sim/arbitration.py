@@ -32,6 +32,9 @@ PRIORITY_GATING_WEIGHTS = MappingProxyType(
                 "sleep_center": 0.14,
                 "visual_cortex": 0.58,
                 "sensory_cortex": 0.68,
+                "perception_center": 0.5,
+                "homeostasis_center": 0.2,
+                "threat_center": 1.0,
                 MONOLITHIC_POLICY_NAME: 1.0,
             }
         ),
@@ -42,6 +45,9 @@ PRIORITY_GATING_WEIGHTS = MappingProxyType(
                 "sleep_center": 0.34,
                 "visual_cortex": 0.74,
                 "sensory_cortex": 0.7,
+                "perception_center": 0.5,
+                "homeostasis_center": 1.0,
+                "threat_center": 0.3,
                 MONOLITHIC_POLICY_NAME: 1.0,
             }
         ),
@@ -52,6 +58,9 @@ PRIORITY_GATING_WEIGHTS = MappingProxyType(
                 "sleep_center": 1.0,
                 "visual_cortex": 0.48,
                 "sensory_cortex": 0.56,
+                "perception_center": 0.5,
+                "homeostasis_center": 1.0,
+                "threat_center": 0.3,
                 MONOLITHIC_POLICY_NAME: 1.0,
             }
         ),
@@ -62,6 +71,9 @@ PRIORITY_GATING_WEIGHTS = MappingProxyType(
                 "sleep_center": 0.55,
                 "visual_cortex": 0.96,
                 "sensory_cortex": 0.92,
+                "perception_center": 0.7,
+                "homeostasis_center": 0.6,
+                "threat_center": 0.5,
                 MONOLITHIC_POLICY_NAME: 1.0,
             }
         ),
@@ -109,6 +121,9 @@ ARBITRATION_GATE_MODULE_ORDER = (
     "sleep_center",
     "visual_cortex",
     "sensory_cortex",
+    "perception_center",
+    "homeostasis_center",
+    "threat_center",
     MONOLITHIC_POLICY_NAME,
 )
 VALENCE_EVIDENCE_WEIGHTS: MappingProxyType = MappingProxyType(
@@ -348,6 +363,15 @@ def warm_start_arbitration_network(
     """
     Initialize the arbitration network so its initial valence logits approximate the legacy fixed-formula scores.
     """
+    def _resize_into(source: np.ndarray, target_shape: tuple[int, ...]) -> np.ndarray:
+        resized = np.zeros(target_shape, dtype=float)
+        slices = tuple(
+            slice(0, min(source.shape[index], target_shape[index]))
+            for index in range(len(target_shape))
+        )
+        resized[slices] = source[slices]
+        return resized
+
     net = arbitration_network
     scale = (
         float(ablation_config.warm_start_scale)
@@ -366,38 +390,50 @@ def warm_start_arbitration_network(
     )
     if signal_names != ArbitrationNetwork.EVIDENCE_SIGNAL_NAMES:
         raise RuntimeError("Arbitration evidence order does not match ArbitrationNetwork input order.")
-    if net.hidden_dim < net.input_dim:
-        raise ValueError("Arbitration warm start requires hidden_dim >= input_dim.")
-
-    net.W1.fill(0.0)
-    net.b1.fill(0.0)
-    net.W2_valence.fill(0.0)
-    net.b2_valence.fill(0.0)
-    net.W2_gate.fill(0.0)
-    net.b2_gate.fill(0.0)
-    net.W2_value.fill(0.0)
-    net.b2_value.fill(0.0)
+    source_hidden_dim = net.hidden_dim
+    source_W1 = np.zeros((source_hidden_dim, net.input_dim), dtype=float)
+    source_b1 = np.zeros(source_hidden_dim, dtype=float)
+    source_W2_valence = np.zeros((net.valence_dim, source_hidden_dim), dtype=float)
+    source_b2_valence = np.zeros(net.valence_dim, dtype=float)
+    source_W2_gate = np.zeros((net.gate_dim, source_hidden_dim), dtype=float)
+    source_b2_gate = np.zeros(net.gate_dim, dtype=float)
+    source_W2_value = np.zeros((1, source_hidden_dim), dtype=float)
+    source_b2_value = np.zeros(1, dtype=float)
 
     copy_scale = 0.1
     valence_logit_scale = 6.0
     per_side_scale = math.sqrt(scale)
-    for index in range(net.input_dim):
-        net.W1[index, index] = copy_scale * per_side_scale
-
     input_index = 0
     for evidence_valence in valence_order:
         weights = valence_evidence_weights[evidence_valence]
         for evidence_field in arbitration_evidence_fields[evidence_valence]:
+            hidden_index = min(
+                source_hidden_dim - 1,
+                math.floor(input_index * source_hidden_dim / net.input_dim),
+            )
+            feature_coef = weights.get(evidence_field, 0.0)
+            source_W1[hidden_index, input_index] = (
+                copy_scale
+                * per_side_scale
+                * feature_coef
+            )
             for output_index, output_valence in enumerate(valence_order):
-                net.W2_valence[output_index, input_index] = (
+                if output_valence != evidence_valence:
+                    continue
+                source_W2_valence[output_index, hidden_index] = (
                     per_side_scale
                     * valence_logit_scale
-                    * weights.get(evidence_field, 0.0)
                     / copy_scale
-                    if output_valence == evidence_valence
-                    else 0.0
                 )
             input_index += 1
+    net.W1 = _resize_into(source_W1, net.W1.shape)
+    net.b1 = _resize_into(source_b1, net.b1.shape)
+    net.W2_valence = _resize_into(source_W2_valence, net.W2_valence.shape)
+    net.b2_valence = _resize_into(source_b2_valence, net.b2_valence.shape)
+    net.W2_gate = _resize_into(source_W2_gate, net.W2_gate.shape)
+    net.b2_gate = _resize_into(source_b2_gate, net.b2_gate.shape)
+    net.W2_value = _resize_into(source_W2_value, net.W2_value.shape)
+    net.b2_value = _resize_into(source_b2_value, net.b2_value.shape)
     net.cache = None
 
 
@@ -523,6 +559,10 @@ def compute_arbitration(
     hunger = _bound_observation("hunger_center", observations)
     sleep = _bound_observation("sleep_center", observations)
     alert = _bound_observation("alert_center", observations)
+    perception = _bound_observation("perception_center", observations)
+    homeostasis = _bound_observation("homeostasis_center", observations)
+    threat = _bound_observation("threat_center", observations)
+    _ = (perception, homeostasis, threat)
 
     threat_evidence = {
         "predator_visible": action_context["predator_visible"],

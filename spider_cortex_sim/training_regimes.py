@@ -23,6 +23,10 @@ class TrainingRegimeSpec:
     finetuning_reflex_scale: float
     loss_override_penalty_weight: float
     loss_dominance_penalty_weight: float
+    distillation_epochs: int = 0
+    distillation_temperature: float = 1.0
+    distillation_lr: float = 0.0
+    distillation_enabled: bool = False
 
     def __post_init__(self) -> None:
         """Normalize fields and raise ValueError for invalid schedule/fine-tuning combinations."""
@@ -30,6 +34,11 @@ class TrainingRegimeSpec:
         if not name:
             raise ValueError("Training regime name must be non-empty.")
         object.__setattr__(self, "name", name)
+        object.__setattr__(
+            self,
+            "distillation_enabled",
+            bool(self.distillation_enabled),
+        )
 
         try:
             schedule = AnnealingSchedule(self.annealing_schedule)
@@ -78,11 +87,46 @@ class TrainingRegimeSpec:
             self.loss_dominance_penalty_weight,
             "loss_dominance_penalty_weight",
         )
+        raw_distillation_epochs = self.distillation_epochs
+        if isinstance(raw_distillation_epochs, bool):
+            raise ValueError("distillation_epochs must be an integer.")
+        if isinstance(raw_distillation_epochs, int):
+            distillation_epochs = raw_distillation_epochs
+        elif isinstance(raw_distillation_epochs, float):
+            if (
+                not math.isfinite(raw_distillation_epochs)
+                or not raw_distillation_epochs.is_integer()
+            ):
+                raise ValueError("distillation_epochs must be an integer.")
+            distillation_epochs = int(raw_distillation_epochs)
+        else:
+            raise ValueError("distillation_epochs must be an integer.")
+        if distillation_epochs < 0:
+            raise ValueError("distillation_epochs must be non-negative.")
+        distillation_temperature = self._finite_non_negative(
+            self.distillation_temperature,
+            "distillation_temperature",
+        )
+        if distillation_temperature <= 0.0:
+            raise ValueError("distillation_temperature must be positive.")
+        distillation_lr = self._finite_non_negative(
+            self.distillation_lr,
+            "distillation_lr",
+        )
 
         if schedule is AnnealingSchedule.NONE and warmup_fraction != 0.0:
             raise ValueError(
                 "anneal_warmup_fraction requires an active annealing schedule."
             )
+        if self.distillation_enabled:
+            if distillation_epochs <= 0:
+                raise ValueError(
+                    "distillation_enabled requires distillation_epochs > 0."
+                )
+            if distillation_lr <= 0.0:
+                raise ValueError(
+                    "distillation_enabled requires distillation_lr > 0."
+                )
         if finetuning_episodes > 0:
             if schedule is AnnealingSchedule.NONE:
                 raise ValueError("finetuning requires an active annealing schedule.")
@@ -103,6 +147,13 @@ class TrainingRegimeSpec:
         object.__setattr__(self, "finetuning_reflex_scale", finetuning_reflex_scale)
         object.__setattr__(self, "loss_override_penalty_weight", override_penalty)
         object.__setattr__(self, "loss_dominance_penalty_weight", dominance_penalty)
+        object.__setattr__(self, "distillation_epochs", distillation_epochs)
+        object.__setattr__(
+            self,
+            "distillation_temperature",
+            distillation_temperature,
+        )
+        object.__setattr__(self, "distillation_lr", distillation_lr)
 
     @staticmethod
     def _finite_non_negative(value: float, field_name: str) -> float:
@@ -148,6 +199,7 @@ class TrainingRegimeSpec:
         """
         return {
             "name": self.name,
+            "distillation_enabled": bool(self.distillation_enabled),
             "annealing_schedule": self.annealing_schedule.value,
             "anneal_target_scale": float(self.anneal_target_scale),
             "anneal_warmup_fraction": float(self.anneal_warmup_fraction),
@@ -159,6 +211,9 @@ class TrainingRegimeSpec:
             "loss_dominance_penalty_weight": float(
                 self.loss_dominance_penalty_weight
             ),
+            "distillation_epochs": int(self.distillation_epochs),
+            "distillation_temperature": float(self.distillation_temperature),
+            "distillation_lr": float(self.distillation_lr),
         }
 
 
@@ -172,6 +227,9 @@ TRAINING_REGIMES: dict[str, TrainingRegimeSpec] = {
         finetuning_reflex_scale=0.0,
         loss_override_penalty_weight=0.0,
         loss_dominance_penalty_weight=0.0,
+        distillation_epochs=0,
+        distillation_temperature=1.0,
+        distillation_lr=0.0,
     ),
     "reflex_annealed": TrainingRegimeSpec(
         name="reflex_annealed",
@@ -182,6 +240,9 @@ TRAINING_REGIMES: dict[str, TrainingRegimeSpec] = {
         finetuning_reflex_scale=0.0,
         loss_override_penalty_weight=0.0,
         loss_dominance_penalty_weight=0.0,
+        distillation_epochs=0,
+        distillation_temperature=1.0,
+        distillation_lr=0.0,
     ),
     "late_finetuning": TrainingRegimeSpec(
         name="late_finetuning",
@@ -192,20 +253,25 @@ TRAINING_REGIMES: dict[str, TrainingRegimeSpec] = {
         finetuning_reflex_scale=0.0,
         loss_override_penalty_weight=0.0,
         loss_dominance_penalty_weight=0.0,
+        distillation_epochs=0,
+        distillation_temperature=1.0,
+        distillation_lr=0.0,
     ),
     "distillation": TrainingRegimeSpec(
         name="distillation",
+        distillation_enabled=True,
         annealing_schedule=AnnealingSchedule.LINEAR,
         anneal_target_scale=0.0,
         anneal_warmup_fraction=0.0,
-        finetuning_episodes=0,
+        finetuning_episodes=10,
         finetuning_reflex_scale=0.0,
         loss_override_penalty_weight=0.0,
         loss_dominance_penalty_weight=0.0,
+        distillation_epochs=5,
+        distillation_temperature=1.0,
+        distillation_lr=0.01,
     ),
 }
-
-_UNIMPLEMENTED_TRAINING_REGIME_NAMES = frozenset({"distillation"})
 
 
 def canonical_training_regime_names() -> tuple[str, ...]:
@@ -215,18 +281,12 @@ def canonical_training_regime_names() -> tuple[str, ...]:
     return tuple(
         name
         for name in TRAINING_REGIMES
-        if name not in _UNIMPLEMENTED_TRAINING_REGIME_NAMES
     )
 
 
 def resolve_training_regime(name: str) -> TrainingRegimeSpec:
-    """Return a canonical regime spec, reserving distillation and rejecting unknown names."""
+    """Return a canonical regime spec or raise ValueError for unknown names."""
     regime_name = str(name)
-    if regime_name in _UNIMPLEMENTED_TRAINING_REGIME_NAMES:
-        raise NotImplementedError(
-            "The 'distillation' training regime is reserved for scaffolded-policy "
-            "to no-reflex-policy distillation and is not implemented yet."
-        )
     try:
         return TRAINING_REGIMES[regime_name]
     except KeyError as exc:

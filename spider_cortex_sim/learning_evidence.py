@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Sequence
+
+from .training_regimes import TrainingRegimeSpec, resolve_training_regime
 
 
 @dataclass(frozen=True)
@@ -10,7 +12,7 @@ class LearningEvidenceConditionSpec:
     description: str
     policy_mode: str = "normal"
     train_budget: str = "base"
-    training_regime: str | None = None
+    training_regime: str | TrainingRegimeSpec | None = None
     eval_reflex_scale: float | None = None
     checkpoint_source: str = "final"
     supports_architectures: tuple[str, ...] = ("modular", "monolithic")
@@ -32,6 +34,11 @@ def canonical_learning_evidence_conditions() -> Dict[str, LearningEvidenceCondit
         Dict[str, LearningEvidenceConditionSpec]: Mapping from canonical condition
             name to its LearningEvidenceConditionSpec.
     """
+    distillation_regime = resolve_training_regime("distillation")
+    distilled_only_regime = replace(
+        distillation_regime,
+        finetuning_episodes=0,
+    )
     return {
         "trained_final": LearningEvidenceConditionSpec(
             name="trained_final",
@@ -61,6 +68,24 @@ def canonical_learning_evidence_conditions() -> Dict[str, LearningEvidenceCondit
             training_regime="late_finetuning",
             eval_reflex_scale=0.0,
             checkpoint_source="final",
+        ),
+        "trained_distilled": LearningEvidenceConditionSpec(
+            name="trained_distilled",
+            description="Modular student trained with offline distillation only, evaluated without reflex support.",
+            train_budget="base",
+            training_regime=distilled_only_regime,
+            eval_reflex_scale=0.0,
+            checkpoint_source="final",
+            supports_architectures=("modular",),
+        ),
+        "trained_distilled_finetuned": LearningEvidenceConditionSpec(
+            name="trained_distilled_finetuned",
+            description="Modular student trained with offline distillation followed by no-reflex RL fine-tuning, evaluated without reflex support.",
+            train_budget="base",
+            training_regime=distillation_regime,
+            eval_reflex_scale=0.0,
+            checkpoint_source="final",
+            supports_architectures=("modular",),
         ),
         "random_init": LearningEvidenceConditionSpec(
             name="random_init",

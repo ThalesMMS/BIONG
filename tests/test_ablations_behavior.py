@@ -139,7 +139,7 @@ class BrainAblationBehaviorTest(unittest.TestCase):
             active=True,
         )
 
-    def test_disabled_module_is_inactive_and_zeroed(self) -> None:
+    def test_disabled_module_is_removed_from_runtime_results(self) -> None:
         config = BrainAblationConfig(
             name="drop_alert_center",
             architecture="modular",
@@ -152,14 +152,10 @@ class BrainAblationBehaviorTest(unittest.TestCase):
         observation = sim.world.reset(seed=7)
 
         decision = sim.brain.act(observation, sample=False)
-        alert_result = next(result for result in decision.module_results if result.name == "alert_center")
-
-        self.assertFalse(alert_result.active)
-        self.assertIsNone(alert_result.reflex)
-        np.testing.assert_allclose(alert_result.logits, np.zeros(len(LOCOMOTION_ACTIONS), dtype=float))
-        np.testing.assert_allclose(
-            alert_result.probs,
-            np.full(len(LOCOMOTION_ACTIONS), 1.0 / len(LOCOMOTION_ACTIONS), dtype=float),
+        self.assertTrue(decision.module_results)
+        self.assertNotIn(
+            "alert_center",
+            [result.name for result in decision.module_results],
         )
 
     def test_reflex_disabled_leaves_reflex_none(self) -> None:
@@ -337,38 +333,72 @@ class CorticalModuleBankDisabledModulesTest(unittest.TestCase):
                 disabled_modules=("nonexistent_module",),
             )
 
-    def test_disabled_module_produces_zero_logits(self) -> None:
-        bank = self._make_bank(("hunger_center",))
-        obs = self._blank_observation()
-        results = bank.forward(obs, store_cache=False, training=False)
-        hunger_result = next(r for r in results if r.name == "hunger_center")
-        np.testing.assert_allclose(hunger_result.logits, np.zeros(len(LOCOMOTION_ACTIONS), dtype=float))
+    def test_unknown_hidden_dim_override_raises_value_error(self) -> None:
+        rng = np.random.default_rng(42)
+        with self.assertRaisesRegex(ValueError, "nonexistent_module"):
+            CorticalModuleBank(
+                action_dim=len(LOCOMOTION_ACTIONS),
+                rng=rng,
+                module_dropout=0.0,
+                hidden_dims={"nonexistent_module": 16},
+            )
 
-    def test_disabled_module_skips_forward_pass(self) -> None:
+    def test_non_positive_hidden_dim_override_raises_value_error(self) -> None:
+        rng = np.random.default_rng(42)
+        with self.assertRaisesRegex(ValueError, "int > 0"):
+            CorticalModuleBank(
+                action_dim=len(LOCOMOTION_ACTIONS),
+                rng=rng,
+                module_dropout=0.0,
+                hidden_dims={"visual_cortex": 0},
+            )
+
+    def test_all_disabled_modules_raises_value_error(self) -> None:
+        rng = np.random.default_rng(42)
+        with self.assertRaisesRegex(
+            ValueError,
+            "all modules were disabled; at least one module must be enabled",
+        ):
+            CorticalModuleBank(
+                action_dim=len(LOCOMOTION_ACTIONS),
+                rng=rng,
+                module_dropout=0.0,
+                disabled_modules=MODULE_NAMES,
+            )
+
+    def test_disabled_module_preserves_canonical_specs_and_prunes_enabled_specs(self) -> None:
+        bank = self._make_bank(("hunger_center",))
+        self.assertIn("hunger_center", [spec.name for spec in bank.specs])
+        self.assertNotIn("hunger_center", [spec.name for spec in bank.enabled_specs])
+
+    def test_disabled_module_is_absent_from_networks_and_results(self) -> None:
         """
-        Verifies that a disabled module's forward pass is skipped and its outputs are zeroed.
+        Verifies that a disabled module is removed from the bank rather than kept as an inactive zero-logit slot.
         
-        Asserts the module's forward method is not invoked, the corresponding ModuleResult is marked inactive, and its logits are all zeros with length equal to the locomotion action space.
+        Asserts the disabled module is absent from both the instantiated network map and the
+        returned ModuleResult list.
         """
         bank = self._make_bank(("hunger_center",))
         obs = self._blank_observation()
-
-        def _disabled_forward(*args: object, **kwargs: object) -> np.ndarray:
-            raise AssertionError("disabled module forward should not run")
-
-        bank.modules["hunger_center"].forward = _disabled_forward  # type: ignore[assignment]
         results = bank.forward(obs, store_cache=False, training=False)
+        self.assertNotIn("hunger_center", bank.modules)
+        self.assertNotIn("hunger_center", [result.name for result in results])
 
-        hunger_result = next(r for r in results if r.name == "hunger_center")
-        self.assertFalse(hunger_result.active)
-        np.testing.assert_allclose(hunger_result.logits, np.zeros(len(LOCOMOTION_ACTIONS), dtype=float))
-
-    def test_disabled_module_marked_inactive(self) -> None:
+    def test_disabled_module_not_returned(self) -> None:
         bank = self._make_bank(("sleep_center",))
         obs = self._blank_observation()
         results = bank.forward(obs, store_cache=False, training=False)
-        sleep_result = next(r for r in results if r.name == "sleep_center")
-        self.assertFalse(sleep_result.active)
+        self.assertNotIn("sleep_center", [result.name for result in results])
+
+    def test_load_state_dict_ignores_modules_absent_from_bank(self) -> None:
+        source_bank = self._make_bank(())
+        target_bank = self._make_bank(("hunger_center",))
+        loaded = target_bank.load_state_dict(
+            source_bank.state_dict(),
+            modules=list(source_bank.state_dict().keys()),
+        )
+        expected_loaded = set(source_bank.state_dict().keys()) & set(target_bank.state_dict().keys())
+        self.assertSetEqual(set(loaded), expected_loaded)
 
     def test_enabled_modules_remain_active(self) -> None:
         bank = self._make_bank(("alert_center",))
@@ -402,7 +432,11 @@ class CorticalModuleBankDisabledModulesTest(unittest.TestCase):
         results = bank.forward(obs, store_cache=False, training=True)
 
         active_names = [result.name for result in results if result.active]
-        self.assertEqual(active_names, ["visual_cortex"])
+        self.assertEqual(len(active_names), 1)
+        self.assertNotIn("sensory_cortex", active_names)
+        self.assertNotIn("hunger_center", active_names)
+        self.assertNotIn("sleep_center", active_names)
+        self.assertNotIn("alert_center", active_names)
 
 class CorticalModuleBankRecurrentModulesTest(unittest.TestCase):
     """Tests for selecting and resetting recurrent module proposers."""

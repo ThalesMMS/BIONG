@@ -4,7 +4,14 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .constants import SHAPING_DEPENDENCE_WARNING_THRESHOLD
+from .constants import (
+    LADDER_ACTIVE_RUNGS,
+    LADDER_ADJACENT_COMPARISONS,
+    LADDER_PROTOCOL_NAMES,
+    LADDER_RUNG_DESCRIPTIONS,
+    LADDER_RUNG_MAPPING,
+    SHAPING_DEPENDENCE_WARNING_THRESHOLD,
+)
 from .extractors import (
     _noise_robustness_marginal,
     _noise_robustness_rate,
@@ -23,6 +30,7 @@ from .extractors import (
     extract_training_eval_series,
 )
 from .ingestion import normalize_behavior_rows
+from .plots import build_capacity_comparison_plot
 from .renderers import (
     render_bar_chart,
     render_line_chart,
@@ -55,13 +63,50 @@ from .writers import (
 
 from .report_data import build_report_data
 
+
+def _section_artifact_state(section: Mapping[str, object]) -> str:
+    if bool(section.get("available")):
+        return "available"
+    return str(section.get("artifact_state") or "expected_but_missing")
+
+
+def _unavailable_section_message(
+    section: Mapping[str, object],
+    *,
+    expected_but_missing: str,
+    not_in_artifact: str,
+) -> str:
+    return (
+        not_in_artifact
+        if _section_artifact_state(section) == "not_in_this_artifact"
+        else expected_but_missing
+    )
+
+
+def _markdown_table_or_message(
+    rows: Sequence[Sequence[object]],
+    columns: Sequence[str],
+    *,
+    section: Mapping[str, object],
+    expected_but_missing: str,
+    not_in_artifact: str,
+) -> str:
+    if rows:
+        return _markdown_table(rows, columns)
+    return _unavailable_section_message(
+        section,
+        expected_but_missing=expected_but_missing,
+        not_in_artifact=not_in_artifact,
+    )
+
+
 def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[str, str]:
     """
     Write filesystem artifacts (SVG, CSV, JSON, and Markdown) that represent the provided analysis report.
     
     Parameters:
         output_dir (str | Path): Target directory where artifact files will be created; created if missing.
-        report (Mapping[str, object]): Report data used to populate charts, tables, and markdown. Expected keys include (but are not limited to) "training_eval", "scenario_success", "shaping_program", "ablations", "reflex_frequency", "scenario_checks", "reward_components", "diagnostics", "primary_benchmark", "limitations", and "inputs".
+        report (Mapping[str, object]): Report data used to populate charts, tables, and markdown. Expected keys include (but are not limited to) "training_eval", "scenario_success", "shaping_program", "ablations", "ladder_comparison", "ladder_profile_comparison", "reflex_frequency", "scenario_checks", "reward_components", "diagnostics", "primary_benchmark", "limitations", and "inputs".
     
     Returns:
         dict[str, str]: Mapping of artifact identifiers to their filesystem paths. Keys include "report_md", "report_json", "training_eval_svg", "scenario_success_svg", "scenario_checks_csv", "reward_components_csv", "ablation_comparison_svg", and "reflex_frequency_svg".
@@ -75,14 +120,38 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
     shaping_program = report.get("shaping_program", {})
     noise_robustness = report.get("noise_robustness", {})
     ablations = report.get("ablations", {})
+    ladder_comparison = _mapping_or_empty(report.get("ladder_comparison"))
+    ladder_profile_comparison = _mapping_or_empty(
+        report.get("ladder_profile_comparison")
+    )
+    unified_ladder_report = _mapping_or_empty(report.get("unified_ladder_report"))
     predator_type_specialization = report.get("predator_type_specialization", {})
     representation_specialization = report.get("representation_specialization", {})
+    capacity_analysis = _mapping_or_empty(report.get("capacity_analysis"))
+    model_capacity = _mapping_or_empty(report.get("model_capacity"))
+    capacity_sweeps = _mapping_or_empty(report.get("capacity_sweeps"))
     reflex_frequency = report.get("reflex_frequency", {})
+    credit_assignment = _mapping_or_empty(report.get("credit_assignment"))
+    credit_analysis = _mapping_or_empty(report.get("credit_analysis"))
     aggregate_benchmark_tables = _mapping_or_empty(
         report.get("aggregate_benchmark_tables")
     )
     claim_test_tables = _mapping_or_empty(report.get("claim_test_tables"))
     effect_size_tables = _mapping_or_empty(report.get("effect_size_tables"))
+    module_local_sufficiency = _mapping_or_empty(
+        report.get("module_local_sufficiency")
+    )
+    distillation_analysis = _mapping_or_empty(report.get("distillation_analysis"))
+    if not module_local_sufficiency:
+        module_local_sufficiency = {
+            "available": False,
+            "artifact_state": "not_in_this_artifact",
+        }
+    if not distillation_analysis:
+        distillation_analysis = {
+            "available": False,
+            "artifact_state": "not_in_this_artifact",
+        }
 
     training_series = []
     if isinstance(training_eval, Mapping):
@@ -189,6 +258,22 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
                 ),
             )
 
+    capacity_comparison_svg_path = ""
+    capacity_sweep_rows = (
+        capacity_sweeps.get("rows", [])
+        if isinstance(capacity_sweeps.get("rows"), list)
+        else []
+    )
+    if capacity_sweep_rows:
+        capacity_comparison_plot = build_capacity_comparison_plot(capacity_sweep_rows)
+        capacity_comparison_svg = str(capacity_comparison_plot.get("svg") or "")
+        if capacity_comparison_plot.get("available") and capacity_comparison_svg:
+            capacity_comparison_svg_path = str(output_path / "capacity_comparison.svg")
+            _write_svg(
+                Path(capacity_comparison_svg_path),
+                capacity_comparison_svg,
+            )
+
     reflex_svg_path = ""
     if isinstance(reflex_frequency, Mapping) and reflex_frequency.get("available"):
         modules = reflex_frequency.get("modules", [])
@@ -255,6 +340,7 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
     )
 
     diagnostics = report.get("diagnostics", [])
+    combined_inputs = _mapping_or_empty(report.get("combined_inputs"))
     diagnostic_rows = [
         (
             str(item.get("label") or ""),
@@ -330,6 +416,99 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
                 str(int(_coerce_float(item.get("n_seeds"), 0.0))),
             )
         )
+    model_capacity_rows = []
+    for item in (
+        model_capacity.get("networks", [])
+        if isinstance(model_capacity.get("networks"), list)
+        else []
+    ):
+        if not isinstance(item, Mapping):
+            continue
+        model_capacity_rows.append(
+            (
+                str(item.get("network") or ""),
+                str(int(_coerce_float(item.get("parameters"), 0.0))),
+                _markdown_value(item.get("proportion")),
+            )
+        )
+    aggregate_architecture_rows = []
+    aggregate_architecture_table = _mapping_or_empty(
+        aggregate_benchmark_tables.get("architecture_capacity")
+    )
+    for item in _table_rows(aggregate_architecture_table):
+        if not isinstance(item, Mapping):
+            continue
+        aggregate_architecture_rows.append(
+            (
+                str(item.get("variant") or ""),
+                str(item.get("architecture") or ""),
+                str(int(_coerce_float(item.get("total_trainable"), 0.0))),
+                str(item.get("key_components") or ""),
+                str(item.get("capacity_status") or ""),
+                _markdown_value(item.get("total_ratio_vs_reference")),
+            )
+        )
+    capacity_reference_variant = ""
+    architecture_capacity_rows = _table_rows(aggregate_architecture_table)
+    if architecture_capacity_rows:
+        capacity_reference_variant = str(
+            architecture_capacity_rows[0].get("reference_variant") or ""
+        )
+    capacity_sweep_curve_rows = []
+    aggregate_capacity_sweep_table = _mapping_or_empty(
+        aggregate_benchmark_tables.get("capacity_sweep_curves")
+    )
+    for item in _table_rows(aggregate_capacity_sweep_table):
+        if not isinstance(item, Mapping):
+            continue
+        capacity_sweep_curve_rows.append(
+            (
+                str(item.get("variant") or ""),
+                str(item.get("capacity_profile") or ""),
+                _markdown_value(item.get("scale_factor")),
+                str(int(_coerce_float(item.get("total_trainable"), 0.0))),
+                str(int(_coerce_float(item.get("approximate_compute_cost_total"), 0.0))),
+                _markdown_value(item.get("scenario_success_rate")),
+                _markdown_value(item.get("capability_probe_success_rate")),
+            )
+        )
+    capacity_sweep_interpretation_rows = [
+        (
+            str(item.get("variant") or ""),
+            str(item.get("status") or ""),
+            str(item.get("interpretation") or ""),
+        )
+        for item in (
+            capacity_sweeps.get("interpretations", [])
+            if isinstance(capacity_sweeps.get("interpretations"), list)
+            else []
+        )
+        if isinstance(item, Mapping)
+    ]
+    if capacity_sweep_curve_rows:
+        capacity_sweep_summary_block = _markdown_table(
+            capacity_sweep_curve_rows,
+            (
+                "variant",
+                "capacity_profile",
+                "scale_factor",
+                "total_trainable",
+                "approx_compute",
+                "scenario_success_rate",
+                "capability_probe_success_rate",
+            ),
+        )
+    elif capacity_sweep_interpretation_rows:
+        capacity_sweep_summary_block = (
+            "_Raw capacity-sweep curve rows were not exported in this artifact; "
+            "fallback interpretations are reported below._"
+        )
+    else:
+        capacity_sweep_summary_block = _unavailable_section_message(
+            capacity_sweeps,
+            expected_but_missing="_Capacity-sweep payload was expected in this artifact but missing._",
+            not_in_artifact="_Capacity-sweep payload was not included in this artifact._",
+        )
 
     claim_uncertainty_rows = []
     claim_results_table = _mapping_or_empty(claim_test_tables.get("claim_results"))
@@ -372,6 +551,339 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
                 str(int(_coerce_float(item.get("n_seeds"), 0.0))),
             )
         )
+
+    ladder_description_rows = []
+    ladder_comparison_rows = []
+    ladder_summary_base = (
+        "The ladder validation asks whether gains or regressions come from adding "
+        "the decision-execution pipeline itself or from later sensory/proposer modularization."
+    )
+    ladder_summary_line = ladder_summary_base
+    ladder_rungs_payload = _mapping_or_empty(_mapping_or_empty(ablations).get("ladder_rungs"))
+    recognized_rungs = ladder_rungs_payload.get("recognized_rungs", [])
+    recognized_rung_set = (
+        {str(item) for item in recognized_rungs}
+        if isinstance(recognized_rungs, list)
+        else set()
+    )
+    for rung in LADDER_ACTIVE_RUNGS:
+        if rung not in recognized_rung_set:
+            continue
+        ladder_description_rows.append(
+            (
+                rung,
+                LADDER_PROTOCOL_NAMES.get(rung, rung),
+                LADDER_RUNG_DESCRIPTIONS.get(rung, ""),
+            )
+        )
+    ladder_effect_size_lookup: dict[tuple[str, str], Mapping[str, object]] = {}
+    for item in _table_rows(effect_size_table):
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("domain") or "") != "ladder":
+            continue
+        ladder_effect_size_lookup[
+            (
+                str(item.get("baseline") or ""),
+                str(item.get("comparison") or ""),
+            )
+        ] = item
+    comparison_items = ladder_comparison.get("comparisons", [])
+    produced_pair_labels: set[str] = set()
+    if isinstance(comparison_items, list):
+        for item in comparison_items:
+            if not isinstance(item, Mapping):
+                continue
+            produced_pair_labels.add(
+                f"{str(item.get('baseline_rung') or '')}->{str(item.get('comparison_rung') or '')}"
+            )
+            metrics_payload = _mapping_or_empty(item.get("metrics"))
+            deltas_payload = _mapping_or_empty(item.get("deltas"))
+            baseline_variant = str(metrics_payload.get("baseline_variant") or "")
+            comparison_variant = str(metrics_payload.get("comparison_variant") or "")
+            effect_row = ladder_effect_size_lookup.get(
+                (baseline_variant, comparison_variant),
+                {},
+            )
+            effect_size = _coerce_optional_float(effect_row.get("cohens_d"))
+            effect_magnitude = str(effect_row.get("magnitude_label") or "")
+            scenario_delta = _coerce_float(
+                deltas_payload.get("scenario_success_rate_delta")
+            )
+            interpretation = (
+                (
+                    f"{'positive' if scenario_delta >= 0.0 else 'negative'} "
+                    f"{effect_magnitude or 'unlabeled'} effect"
+                )
+                if effect_size is not None
+                else "Effect size unavailable"
+            )
+            ladder_comparison_rows.append(
+                (
+                    str(item.get("baseline_rung") or ""),
+                    str(item.get("comparison_rung") or ""),
+                    f"{scenario_delta:.2f}",
+                    f"{effect_size:.2f}" if effect_size is not None else "n/a",
+                    interpretation,
+                )
+            )
+    present_variants = {
+        str(variant_name)
+        for variant_name in _mapping_or_empty(ablations.get("variants")).keys()
+    }
+    required_variants = {
+        variant_name
+        for variant_name, rung in LADDER_RUNG_MAPPING.items()
+        if rung in set(LADDER_ACTIVE_RUNGS)
+    }
+    missing_variants = sorted(required_variants - present_variants)
+    expected_pair_labels = {
+        f"{baseline_rung}->{comparison_rung}"
+        for baseline_rung, comparison_rung in LADDER_ADJACENT_COMPARISONS
+    }
+    missing_pair_labels = sorted(expected_pair_labels - produced_pair_labels)
+    ladder_limitations = [
+        str(item)
+        for item in ladder_comparison.get("limitations", [])
+        if item
+    ]
+    if missing_variants or missing_pair_labels or ladder_limitations:
+        summary_parts = [ladder_summary_base]
+        if missing_variants:
+            summary_parts.append(
+                "Missing variants: "
+                + ", ".join(f"`{name}`" for name in missing_variants)
+                + "."
+            )
+        if missing_pair_labels:
+            summary_parts.append(
+                "Missing adjacent ladder pairs: "
+                + ", ".join(f"`{label}`" for label in missing_pair_labels)
+                + "."
+            )
+        if ladder_limitations:
+            summary_parts.append(
+                "Notes: " + " ".join(ladder_limitations)
+            )
+        ladder_summary_line = " ".join(summary_parts)
+
+    ladder_profile_summary_rows = []
+    ladder_profile_gap_rows = []
+    ladder_profile_summary_line = _unavailable_section_message(
+        ladder_profile_comparison,
+        expected_but_missing="_Cross-profile architectural ladder comparison was expected in this artifact but missing._",
+        not_in_artifact="_Cross-profile architectural ladder comparison was not included in this artifact._",
+    )
+    ladder_profile_rows_payload = _mapping_or_empty(
+        ladder_profile_comparison.get("classification_summary")
+    ).get("rows", [])
+    if (
+        bool(ladder_profile_comparison.get("available"))
+        and isinstance(ladder_profile_rows_payload, list)
+        and ladder_profile_rows_payload
+    ):
+        ladder_profile_summary_line = (
+            "The cross-profile ladder re-runs A0-A4 under `classic`, "
+            "`ecological`, and `austere` while preserving no-reflex "
+            "`scenario_success_rate` as the benchmark surface. "
+            "Classifications use the four-term taxonomy: "
+            "`shaping_dependent`, `austere_survivor`, "
+            "`fails_with_shaping`, and `mixed_or_borderline`."
+        )
+        for item in ladder_profile_rows_payload:
+            if not isinstance(item, Mapping):
+                continue
+            ladder_profile_summary_rows.append(
+                (
+                    str(item.get("protocol_name") or ""),
+                    str(item.get("classification") or ""),
+                    _markdown_value(item.get("classic_success_rate")),
+                    _markdown_value(item.get("ecological_success_rate")),
+                    _markdown_value(item.get("austere_success_rate")),
+                    _markdown_value(item.get("austere_competence_gap")),
+                    str(item.get("reason") or ""),
+                )
+            )
+            ladder_profile_gap_rows.append(
+                (
+                    str(item.get("protocol_name") or ""),
+                    _markdown_value(item.get("classic_minus_austere")),
+                    _markdown_value(item.get("classic_gap_ci_lower")),
+                    _markdown_value(item.get("classic_gap_ci_upper")),
+                    _markdown_value(item.get("classic_gap_effect_size")),
+                    str(int(_coerce_float(item.get("classic_gap_n_seeds"), 0.0))),
+                    _markdown_value(item.get("ecological_minus_austere")),
+                    _markdown_value(item.get("ecological_gap_ci_lower")),
+                    _markdown_value(item.get("ecological_gap_ci_upper")),
+                    _markdown_value(item.get("ecological_gap_effect_size")),
+                    str(int(_coerce_float(item.get("ecological_gap_n_seeds"), 0.0))),
+                )
+            )
+
+    ladder_report_summary_line = _unavailable_section_message(
+        unified_ladder_report,
+        expected_but_missing="_Unified architectural ladder report was expected in this artifact but missing._",
+        not_in_artifact="_Unified architectural ladder report was not included in this artifact._",
+    )
+    ladder_report_rows = []
+    ladder_report_adjacent_rows = []
+    ladder_report_capacity_rows = []
+    ladder_report_credit_rows = []
+    ladder_report_shaping_rows = []
+    ladder_report_no_reflex_rows = []
+    ladder_report_capability_rows = []
+    ladder_report_conclusion_rows = []
+    ladder_report_missing_rows = []
+    ladder_report_limitation_lines = ["- None."]
+    if unified_ladder_report and bool(unified_ladder_report.get("available")):
+        conclusion = str(
+            unified_ladder_report.get("conclusion") or "modularity inconclusive"
+        )
+        rationale = str(unified_ladder_report.get("conclusion_rationale") or "")
+        ladder_report_summary_line = (
+            f"Conclusion: `{conclusion}`. {rationale}".strip()
+        )
+        ladder_report_tables = _mapping_or_empty(unified_ladder_report.get("tables"))
+
+        for item in _table_rows(
+            _mapping_or_empty(ladder_report_tables.get("primary_rung_table"))
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            ladder_report_rows.append(
+                (
+                    str(item.get("rung") or ""),
+                    str(item.get("protocol_name") or ""),
+                    str(item.get("variant") or ""),
+                    str(int(_coerce_float(item.get("total_parameters"), 0.0))),
+                    _markdown_value(item.get("scenario_success_rate")),
+                    _markdown_value(item.get("ci_lower")),
+                    _markdown_value(item.get("ci_upper")),
+                    _markdown_value(item.get("effect_size_vs_a0")),
+                    str(item.get("effect_magnitude") or ""),
+                    str(int(_coerce_float(item.get("n_seeds"), 0.0))),
+                )
+            )
+        for item in _table_rows(
+            _mapping_or_empty(ladder_report_tables.get("adjacent_comparison_table"))
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            ladder_report_adjacent_rows.append(
+                (
+                    str(item.get("baseline_rung") or ""),
+                    str(item.get("comparison_rung") or ""),
+                    _markdown_value(item.get("delta")),
+                    _markdown_value(item.get("ci_lower")),
+                    _markdown_value(item.get("ci_upper")),
+                    _markdown_value(item.get("cohens_d")),
+                    str(item.get("effect_magnitude") or ""),
+                    str(item.get("interpretation") or ""),
+                )
+            )
+        for item in _table_rows(
+            _mapping_or_empty(ladder_report_tables.get("capacity_summary_table"))
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            ladder_report_capacity_rows.append(
+                (
+                    "yes" if bool(item.get("capacity_matched")) else "no",
+                    _markdown_value(item.get("ratio")),
+                    str(item.get("largest_variant") or ""),
+                    str(item.get("smallest_variant") or ""),
+                )
+            )
+        for item in _table_rows(
+            _mapping_or_empty(ladder_report_tables.get("credit_assignment_summary"))
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            ladder_report_credit_rows.append(
+                (
+                    str(item.get("rung") or ""),
+                    _markdown_value(item.get("local_only_delta_vs_broadcast")),
+                    _markdown_value(item.get("counterfactual_delta_vs_broadcast")),
+                    str(item.get("strategies_present") or ""),
+                )
+            )
+        for item in _table_rows(
+            _mapping_or_empty(
+                ladder_report_tables.get("reward_shaping_sensitivity_summary")
+            )
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            ladder_report_shaping_rows.append(
+                (
+                    str(item.get("rung") or ""),
+                    _markdown_value(item.get("classic_minus_austere")),
+                    _markdown_value(item.get("classic_effect_size")),
+                    _markdown_value(item.get("ecological_minus_austere")),
+                    _markdown_value(item.get("ecological_effect_size")),
+                )
+            )
+        for item in _table_rows(
+            _mapping_or_empty(ladder_report_tables.get("no_reflex_competence_summary"))
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            ladder_report_no_reflex_rows.append(
+                (
+                    str(item.get("rung") or ""),
+                    "yes" if bool(item.get("no_reflex_evaluated")) else "no",
+                    _markdown_value(item.get("eval_reflex_scale")),
+                    _markdown_value(item.get("scenario_success_rate")),
+                )
+            )
+        for item in _table_rows(
+            _mapping_or_empty(ladder_report_tables.get("capability_probe_boundaries"))
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            ladder_report_capability_rows.append(
+                (
+                    str(item.get("scenario") or ""),
+                    str(item.get("requirement_level") or ""),
+                    _markdown_value(item.get("first_competent_rung")),
+                    _markdown_value(item.get("highest_competent_rung")),
+                    str(item.get("rationale") or ""),
+                )
+            )
+        for item in _table_rows(
+            _mapping_or_empty(ladder_report_tables.get("conclusion_table"))
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            ladder_report_conclusion_rows.append(
+                (
+                    str(item.get("conclusion") or ""),
+                    str(item.get("rationale") or ""),
+                    _markdown_value(item.get("confidence_level")),
+                    str(item.get("confounding_factors") or ""),
+                )
+            )
+        for item in _table_rows(
+            _mapping_or_empty(ladder_report_tables.get("missing_experiments_table"))
+        ):
+            if not isinstance(item, Mapping):
+                continue
+            ladder_report_missing_rows.append(
+                (
+                    str(item.get("experiment") or ""),
+                    str(item.get("description") or ""),
+                    str(item.get("priority") or ""),
+                )
+            )
+        limitations = unified_ladder_report.get("limitations", [])
+        if isinstance(limitations, list) and limitations:
+            ladder_report_limitation_lines = [
+                f"- {str(item)}"
+                for item in limitations
+                if item
+            ]
+            if not ladder_report_limitation_lines:
+                ladder_report_limitation_lines = ["- No limitations reported."]
 
     shaping_gap_rows = []
     shaping_component_rows = []
@@ -498,12 +1010,20 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
     ablation_predator_type_rows = []
     if isinstance(ablations, Mapping):
         variants_payload = ablations.get("variants", {})
+        architecture_capacity_by_variant = {
+            str(item.get("variant") or ""): item
+            for item in architecture_capacity_rows
+            if isinstance(item, Mapping)
+        }
         if isinstance(variants_payload, Mapping):
             for variant_name, payload in sorted(variants_payload.items()):
                 if not isinstance(payload, Mapping):
                     continue
                 summary_payload = payload.get("summary", {})
                 config_payload = payload.get("config", {})
+                capacity_payload = _mapping_or_empty(
+                    architecture_capacity_by_variant.get(str(variant_name))
+                )
                 if not isinstance(summary_payload, Mapping):
                     summary_payload = {}
                 if not isinstance(config_payload, Mapping):
@@ -514,6 +1034,7 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
                         str(config_payload.get("architecture") or ""),
                         f"{_coerce_float(summary_payload.get('eval_reflex_scale'), _coerce_float(payload.get('eval_reflex_scale'), 0.0)):.2f}",
                         f"{_coerce_float(summary_payload.get('scenario_success_rate')):.2f}",
+                        str(capacity_payload.get("capacity_status") or ""),
                     )
                 )
         predator_type_comparisons = ablations.get("predator_type_comparisons", {})
@@ -615,6 +1136,161 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
             f"Source: {representation_section.get('source') or 'unknown'!s}."
         )
 
+    credit_strategy_rows = []
+    for item in _table_rows(
+        _mapping_or_empty(credit_analysis.get("strategy_comparison_table"))
+    ):
+        if not isinstance(item, Mapping):
+            continue
+        credit_strategy_rows.append(
+            (
+                str(item.get("rung") or item.get("architecture_rung") or ""),
+                str(item.get("credit_strategy") or ""),
+                _markdown_value(item.get("scenario_success_rate")),
+                _markdown_value(item.get("scenario_success_delta_vs_broadcast")),
+                str(item.get("dominant_module") or ""),
+            )
+        )
+    credit_architecture_rows = []
+    for item in _table_rows(
+        _mapping_or_empty(credit_analysis.get("architecture_strategy_matrix"))
+    ):
+        if not isinstance(item, Mapping):
+            continue
+        credit_architecture_rows.append(
+            (
+                str(item.get("architecture_rung") or ""),
+                str(item.get("credit_strategy") or ""),
+                str(item.get("variant") or ""),
+                _markdown_value(item.get("scenario_success_rate")),
+                _markdown_value(item.get("mean_effective_module_count")),
+            )
+        )
+    credit_module_rows = []
+    for item in _table_rows(_mapping_or_empty(credit_assignment.get("module_credit"))):
+        if not isinstance(item, Mapping):
+            continue
+        credit_module_rows.append(
+            (
+                str(item.get("rung") or ""),
+                str(item.get("credit_strategy") or ""),
+                str(item.get("module") or ""),
+                _markdown_value(item.get("mean_module_credit_weight")),
+                _markdown_value(item.get("mean_counterfactual_credit_weight")),
+                _markdown_value(item.get("mean_module_gradient_norm")),
+                _markdown_value(item.get("dominant_module_rate")),
+            )
+        )
+    credit_scenario_rows = []
+    for item in _table_rows(_mapping_or_empty(credit_assignment.get("scenario_success"))):
+        if not isinstance(item, Mapping):
+            continue
+        credit_scenario_rows.append(
+            (
+                str(item.get("rung") or ""),
+                str(item.get("credit_strategy") or ""),
+                str(item.get("scenario") or ""),
+                _markdown_value(item.get("success_rate")),
+            )
+        )
+    credit_interpretation_lines = [
+        (
+            "- "
+            + " / ".join(
+                part
+                for part in (
+                    str(item.get("scope") or ""),
+                    str(item.get("strategy") or ""),
+                    str(item.get("pattern") or ""),
+                )
+                if part
+            )
+            + f": {str(item.get('interpretation') or '')}"
+        )
+        for item in (
+            credit_analysis.get("findings", [])
+            if isinstance(credit_analysis.get("findings"), list)
+            else []
+        )
+        if isinstance(item, Mapping)
+        and (item.get("pattern") or item.get("interpretation"))
+    ]
+    if not credit_interpretation_lines:
+        credit_interpretation_lines = [
+            _unavailable_section_message(
+                credit_analysis,
+                expected_but_missing="_Credit diagnostics were expected in this artifact but missing._",
+                not_in_artifact="_Credit diagnostics were not included in this artifact._",
+            )
+        ]
+
+    module_local_rows = []
+    module_local_summary_line = ""
+    if module_local_sufficiency and bool(module_local_sufficiency.get("available")):
+        partial_coverage = [
+            str(name)
+            for name in module_local_sufficiency.get("partial_variant_coverage", [])
+            if name
+        ]
+        summary_parts = [
+            "Paper gate: "
+            + (
+                "pass"
+                if bool(module_local_sufficiency.get("paper_gate_pass"))
+                else "blocked"
+            )
+            + "."
+        ]
+        if partial_coverage:
+            summary_parts.append(
+                "Partial variant coverage: "
+                + ", ".join(f"`{name}`" for name in partial_coverage)
+                + "."
+            )
+        blocked_reasons = [
+            str(reason)
+            for reason in module_local_sufficiency.get("blocked_reasons", [])
+            if reason
+        ]
+        if blocked_reasons:
+            summary_parts.append("Blocked reasons: " + " ".join(blocked_reasons))
+        module_local_summary_line = " ".join(summary_parts)
+        for item in module_local_sufficiency.get("rows", []):
+            if not isinstance(item, Mapping):
+                continue
+            module_local_rows.append(
+                (
+                    str(item.get("module") or ""),
+                    str(item.get("coverage_mode") or ""),
+                    str(item.get("seeds") or ""),
+                    _markdown_value(item.get("minimal_sufficient_level")),
+                    "yes" if bool(item.get("canonical_v4_pass")) else "no",
+                    "yes" if bool(item.get("partial_variant_coverage")) else "no",
+                )
+            )
+
+    distillation_rows = []
+    distillation_summary_line = ""
+    distillation_assessment = _mapping_or_empty(
+        distillation_analysis.get("assessment")
+    )
+    if distillation_analysis and bool(distillation_analysis.get("available")):
+        answer = str(distillation_assessment.get("answer") or "unknown")
+        rationale = str(distillation_assessment.get("rationale") or "")
+        distillation_summary_line = f"Assessment: `{answer}`. {rationale}".strip()
+        for item in distillation_analysis.get("rows", []):
+            if not isinstance(item, Mapping):
+                continue
+            distillation_rows.append(
+                (
+                    str(item.get("condition") or ""),
+                    str(int(_coerce_float(item.get("episodes"), 0.0))),
+                    _markdown_value(item.get("survival_rate")),
+                    _markdown_value(item.get("mean_reward")),
+                    _markdown_value(item.get("mean_food_distance_delta")),
+                )
+            )
+
     robustness_rows = []
     if robustness_train_conditions and robustness_eval_conditions:
         for train_condition in robustness_train_conditions:
@@ -663,10 +1339,81 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
         f"- `summary`: {report['inputs']['summary_path']}",
         f"- `trace`: {report['inputs']['trace_path']}",
         f"- `behavior_csv`: {report['inputs']['behavior_csv_path']}",
+        *(
+            [
+                f"- `ablation_summary`: {combined_inputs.get('ablation_summary_path')}",
+                f"- `ablation_behavior_csv`: {combined_inputs.get('ablation_behavior_csv_path')}",
+                f"- `profile_summary`: {combined_inputs.get('profile_summary_path')}",
+                f"- `profile_behavior_csv`: {combined_inputs.get('profile_behavior_csv_path')}",
+                f"- `capacity_summary`: {combined_inputs.get('capacity_summary_path')}",
+                f"- `capacity_behavior_csv`: {combined_inputs.get('capacity_behavior_csv_path')}",
+                f"- `module_local_report`: {combined_inputs.get('module_local_report_path')}",
+                f"- `distillation_summary`: {combined_inputs.get('distillation_summary_path')}",
+            ]
+            if combined_inputs
+            else []
+        ),
         "",
         "## Diagnostics",
         "",
         _markdown_table(diagnostic_rows, ("metric", "value")),
+        "",
+        "## Architecture Capacity",
+        "",
+        (
+            "Current run "
+            f"({model_capacity.get('variant') or 'unknown'} / "
+            f"{model_capacity.get('architecture') or 'unknown'}): "
+            f"{int(_coerce_float(model_capacity.get('total_trainable'), 0.0))} "
+            "trainable parameters."
+            if model_capacity.get("available")
+            else _unavailable_section_message(
+                model_capacity,
+                expected_but_missing="_Trainable-parameter payload was expected in this artifact but missing._",
+                not_in_artifact="_Trainable-parameter payload was not included in this artifact._",
+            )
+        ),
+        "",
+        (
+            "Capacity status: "
+            f"{capacity_analysis.get('status') or 'unavailable'} "
+            f"(ratio {_markdown_value(capacity_analysis.get('ratio'))})."
+            if capacity_analysis.get("available")
+            else "Capacity status: unavailable."
+        ),
+        "",
+        _markdown_table(
+            model_capacity_rows,
+            ("network", "parameters", "proportion"),
+        ),
+        "",
+        (
+            "Capacity comparison against the reference variant "
+            f"`{capacity_reference_variant}`:"
+            if capacity_reference_variant
+            else "Capacity comparison:"
+        ),
+        "",
+        _markdown_table(
+            aggregate_architecture_rows,
+            (
+                "variant",
+                "architecture",
+                "total_trainable",
+                "key_components",
+                "capacity_status",
+                "ratio_vs_reference",
+            ),
+        ),
+        "",
+        "## Capacity Sweep",
+        "",
+        capacity_sweep_summary_block,
+        "",
+        _markdown_table(
+            capacity_sweep_interpretation_rows,
+            ("variant", "status", "interpretation"),
+        ),
         "",
         "## Primary Benchmark",
         "",
@@ -677,7 +1424,7 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
         "",
         "## Benchmark-of-Record Summary",
         "",
-        _markdown_table(
+        _markdown_table_or_message(
             aggregate_primary_rows,
             (
                 "primary_metric",
@@ -688,25 +1435,34 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
                 "reference_variant",
                 "source",
             ),
+            section=aggregate_benchmark_tables,
+            expected_but_missing="_Benchmark-of-record summary rows were expected in this artifact but missing._",
+            not_in_artifact="_Benchmark-of-record summary rows were not included in this artifact._",
         ),
         "",
         "Per-scenario success rates with CI[^ci-method]:",
         "",
-        _markdown_table(
+        _markdown_table_or_message(
             aggregate_scenario_rows,
             ("scenario", "success_rate", "ci_lower", "ci_upper", "n_seeds"),
+            section=aggregate_benchmark_tables,
+            expected_but_missing="_Per-scenario benchmark rows were expected in this artifact but missing._",
+            not_in_artifact="_Per-scenario benchmark rows were not included in this artifact._",
         ),
         "",
         "Learning-evidence deltas with CI[^ci-method]:",
         "",
-        _markdown_table(
+        _markdown_table_or_message(
             aggregate_learning_rows,
             ("comparison", "metric", "delta", "ci_lower", "ci_upper", "n_seeds"),
+            section=aggregate_benchmark_tables,
+            expected_but_missing="_Learning-evidence benchmark rows were expected in this artifact but missing._",
+            not_in_artifact="_Learning-evidence benchmark rows were not included in this artifact._",
         ),
         "",
         "## Claim Test Results with Uncertainty",
         "",
-        _markdown_table(
+        _markdown_table_or_message(
             claim_uncertainty_rows,
             (
                 "claim",
@@ -720,13 +1476,16 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
                 "cohens_d",
                 "magnitude",
             ),
+            section=claim_test_tables,
+            expected_but_missing="_Claim-test uncertainty rows were expected in this artifact but missing._",
+            not_in_artifact="_Claim-test uncertainty rows were not included in this artifact._",
         ),
         "",
         "## Effect Sizes Against Baselines",
         "",
         "Cohen's d and magnitude labels are reported for the main baselines[^effect-size].",
         "",
-        _markdown_table(
+        _markdown_table_or_message(
             effect_size_rows,
             (
                 "domain",
@@ -742,7 +1501,193 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
                 "effect_ci_upper",
                 "n_seeds",
             ),
+            section=effect_size_tables,
+            expected_but_missing="_Effect-size rows were expected in this artifact but missing._",
+            not_in_artifact="_Effect-size rows were not included in this artifact._",
         ),
+        "",
+        "## Architectural Ladder Comparison",
+        "",
+        ladder_summary_line,
+        "",
+        _markdown_table(
+            ladder_description_rows,
+            (
+                "rung",
+                "protocol_name",
+                "experimental_isolation_question",
+            ),
+        ),
+        "",
+        "Pairwise ladder comparisons:",
+        "",
+        _markdown_table(
+            ladder_comparison_rows,
+            (
+                "baseline_rung",
+                "comparison_rung",
+                "scenario_success_rate_delta",
+                "effect_size",
+                "interpretation",
+            ),
+        ),
+        "",
+        "## Cross-Profile Ladder Comparison",
+        "",
+        ladder_profile_summary_line,
+        "",
+        _markdown_table(
+            ladder_profile_summary_rows,
+            (
+                "protocol_name",
+                "classification",
+                "classic_success_rate",
+                "ecological_success_rate",
+                "austere_success_rate",
+                "austere_competence_gap",
+                "interpretation",
+            ),
+        ),
+        "",
+        "Scenario-success shaping gaps:",
+        "",
+        _markdown_table(
+            ladder_profile_gap_rows,
+            (
+                "protocol_name",
+                "classic_minus_austere",
+                "classic_ci_lower",
+                "classic_ci_upper",
+                "classic_effect_size",
+                "classic_n_seeds",
+                "ecological_minus_austere",
+                "ecological_ci_lower",
+                "ecological_ci_upper",
+                "ecological_effect_size",
+                "ecological_n_seeds",
+            ),
+        ),
+        "",
+        "## Unified Architectural Ladder Report",
+        "",
+        ladder_report_summary_line,
+        "",
+        _markdown_table(
+            ladder_report_rows,
+            (
+                "rung",
+                "protocol_name",
+                "variant",
+                "total_parameters",
+                "scenario_success_rate",
+                "ci_lower",
+                "ci_upper",
+                "effect_size_vs_a0",
+                "effect_magnitude",
+                "n_seeds",
+            ),
+        ),
+        "",
+        "Adjacent rung comparisons:",
+        "",
+        _markdown_table(
+            ladder_report_adjacent_rows,
+            (
+                "baseline_rung",
+                "comparison_rung",
+                "delta",
+                "ci_lower",
+                "ci_upper",
+                "cohens_d",
+                "effect_magnitude",
+                "interpretation",
+            ),
+        ),
+        "",
+        "Capacity matching summary:",
+        "",
+        _markdown_table(
+            ladder_report_capacity_rows,
+            (
+                "capacity_matched",
+                "ratio",
+                "largest_variant",
+                "smallest_variant",
+            ),
+        ),
+        "",
+        "Credit assignment comparison summary:",
+        "",
+        _markdown_table(
+            ladder_report_credit_rows,
+            (
+                "rung",
+                "local_only_delta_vs_broadcast",
+                "counterfactual_delta_vs_broadcast",
+                "strategies_present",
+            ),
+        ),
+        "",
+        "Reward shaping sensitivity:",
+        "",
+        _markdown_table(
+            ladder_report_shaping_rows,
+            (
+                "rung",
+                "classic_minus_austere",
+                "classic_effect_size",
+                "ecological_minus_austere",
+                "ecological_effect_size",
+            ),
+        ),
+        "",
+        "No-reflex competence:",
+        "",
+        _markdown_table(
+            ladder_report_no_reflex_rows,
+            (
+                "rung",
+                "no_reflex_evaluated",
+                "eval_reflex_scale",
+                "scenario_success_rate",
+            ),
+        ),
+        "",
+        "Capability probe boundaries:",
+        "",
+        _markdown_table(
+            ladder_report_capability_rows,
+            (
+                "scenario",
+                "requirement_level",
+                "first_competent_rung",
+                "highest_competent_rung",
+                "rationale",
+            ),
+        ),
+        "",
+        "> Conclusion",
+        "",
+        _markdown_table(
+            ladder_report_conclusion_rows,
+            (
+                "conclusion",
+                "rationale",
+                "confidence_level",
+                "confounding_factors",
+            ),
+        ),
+        "",
+        "Missing experiments before asserting modular emergence:",
+        "",
+        _markdown_table(
+            ladder_report_missing_rows,
+            ("experiment", "description", "priority"),
+        ),
+        "",
+        "Unified ladder limitations:",
+        "",
+        *ladder_report_limitation_lines,
         "",
         "## Shaping Minimization Program",
         "",
@@ -806,7 +1751,13 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
             "",
             _markdown_table(
                 ablation_rows,
-                ("variant", "architecture", "eval_reflex_scale", "scenario_success_rate"),
+                (
+                    "variant",
+                    "architecture",
+                    "eval_reflex_scale",
+                    "scenario_success_rate",
+                    "capacity_status",
+                ),
             ),
             "",
             "Ablation predator-type comparisons:",
@@ -815,6 +1766,50 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
                 ablation_predator_type_rows,
                 ("variant", "visual_scenarios", "olfactory_scenarios", "visual_minus_olfactory"),
             ),
+            "",
+            "## Credit Assignment Analysis",
+            "",
+            _markdown_table(
+                credit_strategy_rows,
+                (
+                    "rung",
+                    "strategy",
+                    "scenario_success_rate",
+                    "delta_vs_broadcast",
+                    "dominant_module",
+                ),
+            ),
+            "",
+            _markdown_table(
+                credit_architecture_rows,
+                (
+                    "architecture_rung",
+                    "strategy",
+                    "variant",
+                    "scenario_success_rate",
+                    "effective_module_count",
+                ),
+            ),
+            "",
+            _markdown_table(
+                credit_module_rows,
+                (
+                    "rung",
+                    "strategy",
+                    "module",
+                    "module_credit_weight",
+                    "counterfactual_credit_weight",
+                    "module_gradient_norm",
+                    "dominant_module_rate",
+                ),
+            ),
+            "",
+            _markdown_table(
+                credit_scenario_rows,
+                ("rung", "strategy", "scenario", "success_rate"),
+            ),
+            "",
+            *credit_interpretation_lines,
             "",
             "## Predator Type Specialization",
             "",
@@ -869,6 +1864,59 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
             "Off-diagonal score: "
             f"{_format_optional_metric(_coerce_optional_float(_mapping_or_empty(noise_robustness).get('off_diagonal_score')))}.",
             "",
+            "## Module-Local Sufficiency",
+            "",
+            (
+                module_local_summary_line
+                if module_local_summary_line
+                else _unavailable_section_message(
+                    module_local_sufficiency,
+                    expected_but_missing="_Module-local sufficiency summary was expected in this artifact but missing._",
+                    not_in_artifact="_Module-local sufficiency summary was not included in this artifact._",
+                )
+            ),
+            "",
+            _markdown_table_or_message(
+                module_local_rows,
+                (
+                    "module",
+                    "coverage_mode",
+                    "seeds",
+                    "minimal_sufficient_level",
+                    "canonical_v4_pass",
+                    "partial_variant_coverage",
+                ),
+                section=module_local_sufficiency,
+                expected_but_missing="_Module-local sufficiency rows were expected in this artifact but missing._",
+                not_in_artifact="_Module-local sufficiency rows were not included in this artifact._",
+            ),
+            "",
+            "## Distillation Diagnostic",
+            "",
+            (
+                distillation_summary_line
+                if distillation_summary_line
+                else _unavailable_section_message(
+                    distillation_analysis,
+                    expected_but_missing="_Distillation diagnostic summary was expected in this artifact but missing._",
+                    not_in_artifact="_Distillation diagnostic summary was not included in this artifact._",
+                )
+            ),
+            "",
+            _markdown_table_or_message(
+                distillation_rows,
+                (
+                    "condition",
+                    "episodes",
+                    "survival_rate",
+                    "mean_reward",
+                    "mean_food_distance_delta",
+                ),
+                section=distillation_analysis,
+                expected_but_missing="_Distillation diagnostic rows were expected in this artifact but missing._",
+                not_in_artifact="_Distillation diagnostic rows were not included in this artifact._",
+            ),
+            "",
             "## Limitations",
             "",
         ]
@@ -899,6 +1947,8 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
     )
     if ablation_svg_path:
         markdown_lines.append("- `ablation_comparison.svg`")
+    if capacity_comparison_svg_path:
+        markdown_lines.append("- `capacity_comparison.svg`")
     if reflex_svg_path:
         markdown_lines.append("- `reflex_frequency.svg`")
 
@@ -915,5 +1965,8 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
         "scenario_checks_csv": str(scenario_checks_path),
         "reward_components_csv": str(reward_components_path),
         "ablation_comparison_svg": ablation_svg_path,
+        "capacity_comparison_svg": capacity_comparison_svg_path,
+        # Keep the legacy key as an alias for API stability while callers migrate.
+        "capacity_sweep_svg": capacity_comparison_svg_path,
         "reflex_frequency_svg": reflex_svg_path,
     }

@@ -75,6 +75,8 @@ class CanonicalLearningEvidenceConditionsTest(unittest.TestCase):
         "trained_without_reflex_support",
         "trained_reflex_annealed",
         "trained_late_finetuning",
+        "trained_distilled",
+        "trained_distilled_finetuned",
         "random_init",
         "reflex_only",
         "freeze_half_budget",
@@ -121,6 +123,20 @@ class CanonicalLearningEvidenceConditionsTest(unittest.TestCase):
         self.assertEqual(spec.training_regime, "late_finetuning")
         self.assertEqual(spec.eval_reflex_scale, 0.0)
         self.assertEqual(spec.train_budget, "base")
+
+    def test_trained_distilled_uses_distillation_without_rl_finetuning(self) -> None:
+        spec = canonical_learning_evidence_conditions()["trained_distilled"]
+        self.assertEqual(spec.training_regime.name, "distillation")
+        self.assertEqual(spec.training_regime.finetuning_episodes, 0)
+        self.assertEqual(spec.eval_reflex_scale, 0.0)
+        self.assertEqual(spec.supports_architectures, ("modular",))
+
+    def test_trained_distilled_finetuned_uses_distillation_with_rl_finetuning(self) -> None:
+        spec = canonical_learning_evidence_conditions()["trained_distilled_finetuned"]
+        self.assertEqual(spec.training_regime.name, "distillation")
+        self.assertGreater(spec.training_regime.finetuning_episodes, 0)
+        self.assertEqual(spec.eval_reflex_scale, 0.0)
+        self.assertEqual(spec.supports_architectures, ("modular",))
 
     def test_trained_without_reflex_support_is_primary_gating_condition(self) -> None:
         """
@@ -224,6 +240,8 @@ class CanonicalLearningEvidenceConditionNamesTest(unittest.TestCase):
             "trained_without_reflex_support",
             "trained_reflex_annealed",
             "trained_late_finetuning",
+            "trained_distilled",
+            "trained_distilled_finetuned",
             "random_init",
             "reflex_only",
             "freeze_half_budget",
@@ -301,6 +319,26 @@ class LearningEvidenceRegimeConditionIntegrationTest(unittest.TestCase):
                 row["learning_evidence_training_regime"] == "reflex_annealed"
                 for row in regime_rows
             )
+        )
+
+    def test_distillation_conditions_are_skipped_without_teacher_checkpoint(self) -> None:
+        payload, _ = compare_learning_evidence(
+            budget_profile="smoke",
+            episodes=1,
+            evaluation_episodes=0,
+            names=("night_rest",),
+            condition_names=("trained_distilled", "trained_distilled_finetuned"),
+            seeds=(7,),
+            episodes_per_scenario=1,
+        )
+
+        self.assertTrue(payload["conditions"]["trained_distilled"]["skipped"])
+        self.assertTrue(
+            payload["conditions"]["trained_distilled_finetuned"]["skipped"]
+        )
+        self.assertIn(
+            "teacher checkpoint",
+            payload["conditions"]["trained_distilled"]["reason"].lower(),
         )
 
     def test_default_eval_scale_records_runtime_scale(self) -> None:

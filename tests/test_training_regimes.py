@@ -44,7 +44,7 @@ class TrainingRegimeSpecTest(unittest.TestCase):
     def test_canonical_names_include_requested_regimes(self) -> None:
         self.assertEqual(
             canonical_training_regime_names(),
-            ("baseline", "reflex_annealed", "late_finetuning"),
+            ("baseline", "reflex_annealed", "late_finetuning", "distillation"),
         )
 
     def test_baseline_matches_current_training_defaults(self) -> None:
@@ -75,11 +75,13 @@ class TrainingRegimeSpecTest(unittest.TestCase):
         self.assertEqual(spec.loss_override_penalty_weight, 0.0)
         self.assertEqual(spec.loss_dominance_penalty_weight, 0.0)
 
-    def test_distillation_is_reserved_but_not_cli_canonical(self) -> None:
+    def test_distillation_is_resolved_as_canonical_regime(self) -> None:
         self.assertIn("distillation", TRAINING_REGIMES)
-        self.assertNotIn("distillation", canonical_training_regime_names())
-        with self.assertRaises(NotImplementedError):
-            resolve_training_regime("distillation")
+        self.assertIn("distillation", canonical_training_regime_names())
+        spec = resolve_training_regime("distillation")
+        self.assertTrue(spec.distillation_enabled)
+        self.assertGreater(spec.distillation_epochs, 0)
+        self.assertGreater(spec.distillation_lr, 0.0)
 
     def test_unknown_regime_raises_value_error(self) -> None:
         with self.assertRaises(ValueError):
@@ -264,6 +266,38 @@ class TrainingRegimeScheduleTest(unittest.TestCase):
 
 
 class TrainingRegimeSimulationTest(unittest.TestCase):
+    def test_distillation_training_populates_summary_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            teacher_checkpoint = Path(tmpdir) / "teacher"
+            SpiderSimulation(seed=3, max_steps=2).brain.save(teacher_checkpoint)
+
+            sim = SpiderSimulation(seed=7, max_steps=2)
+            summary, _ = sim.train(
+                episodes=1,
+                evaluation_episodes=0,
+                capture_evaluation_trace=False,
+                training_regime="distillation",
+                teacher_checkpoint=str(teacher_checkpoint),
+            )
+
+        self.assertIn("distillation", summary)
+        distillation = summary["distillation"]
+        self.assertEqual(distillation["teacher_checkpoint"], str(teacher_checkpoint))
+        self.assertIn("teacher_architecture", distillation)
+        self.assertIn("dataset_episodes", distillation)
+        self.assertIn("dataset_sample_count", distillation)
+        self.assertIn("distillation_epochs", distillation)
+        self.assertIn("final_loss", distillation)
+        self.assertIn("loss_curve", distillation)
+        self.assertEqual(
+            summary["config"]["learning"]["distillation_lr"],
+            distillation["distillation_lr"],
+        )
+        self.assertEqual(
+            summary["config"]["learning"]["distillation_temperature"],
+            distillation["distillation_temperature"],
+        )
+
     def test_named_regime_is_recorded_in_summary(self) -> None:
         """Record named regimes and their resolved reflex schedule in summaries."""
         sim = SpiderSimulation(seed=7, max_steps=1)
@@ -420,10 +454,63 @@ class TrainingRegimeCliTest(unittest.TestCase):
         args = build_parser().parse_args(["--training-regime", "reflex_annealed"])
         self.assertEqual(args.training_regime, "reflex_annealed")
 
-    def test_training_regime_parser_rejects_reserved_distillation(self) -> None:
-        parser = build_parser()
-        with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(["--training-regime", "distillation"])
+    def test_training_regime_parser_accepts_distillation(self) -> None:
+        args = build_parser().parse_args(["--training-regime", "distillation"])
+        self.assertEqual(args.training_regime, "distillation")
+
+    def test_learning_evidence_cli_passes_distillation_teacher_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            teacher_checkpoint = Path(tmpdir) / "teacher"
+            SpiderSimulation(seed=5, max_steps=1).brain.save(teacher_checkpoint)
+
+            proc = run_spider_cortex_sim(
+                [
+                    "--budget-profile",
+                    "smoke",
+                    "--learning-evidence",
+                    "--behavior-scenario",
+                    "night_rest",
+                    "--distillation-teacher-checkpoint",
+                    str(teacher_checkpoint),
+                    "--distillation-epochs",
+                    "3",
+                    "--distillation-temperature",
+                    "0.7",
+                    "--full-summary",
+                ],
+                check=True,
+            )
+
+            payload = json.loads(proc.stdout)
+            conditions = payload["behavior_evaluation"]["learning_evidence"][
+                "conditions"
+            ]
+            self.assertFalse(conditions["trained_distilled"]["skipped"])
+            self.assertFalse(conditions["trained_distilled_finetuned"]["skipped"])
+            self.assertEqual(
+                conditions["trained_distilled"]["training_regime_summary"][
+                    "distillation_epochs"
+                ],
+                3,
+            )
+            self.assertEqual(
+                conditions["trained_distilled"]["training_regime_summary"][
+                    "distillation_temperature"
+                ],
+                0.7,
+            )
+            self.assertEqual(
+                conditions["trained_distilled"]["training_regime_summary"][
+                    "finetuning_episodes"
+                ],
+                0,
+            )
+            self.assertGreater(
+                conditions["trained_distilled_finetuned"][
+                    "training_regime_summary"
+                ]["finetuning_episodes"],
+                0,
+            )
 
     def test_training_regime_and_reflex_anneal_are_mutually_exclusive(self) -> None:
         parser = build_parser()
@@ -540,6 +627,44 @@ class TrainingRegimeCliTest(unittest.TestCase):
                 ],
                 1.0,
             )
+
+    def test_curriculum_comparison_cli_threads_checkpoint_selection_config(self) -> None:
+        proc = run_spider_cortex_sim(
+            [
+                "--episodes",
+                "1",
+                "--eval-episodes",
+                "0",
+                "--max-steps",
+                "1",
+                "--behavior-scenario",
+                "night_rest",
+                "--curriculum-profile",
+                "ecological_v1",
+                "--checkpoint-selection",
+                "best",
+                "--checkpoint-penalty-mode",
+                "direct",
+                "--checkpoint-override-penalty",
+                "1.0",
+                "--full-summary",
+            ],
+            check=True,
+        )
+
+        payload = json.loads(proc.stdout)
+        comparison = payload["behavior_evaluation"]["curriculum_comparison"]
+        self.assertEqual(comparison["checkpoint_selection"], "best")
+        self.assertEqual(comparison["checkpoint_metric"], "scenario_success_rate")
+        self.assertEqual(
+            comparison["checkpoint_penalty_config"],
+            {
+                "metric": "scenario_success_rate",
+                "override_penalty_weight": 1.0,
+                "dominance_penalty_weight": 0.0,
+                "penalty_mode": "direct",
+            },
+        )
 
 
 if __name__ == "__main__":

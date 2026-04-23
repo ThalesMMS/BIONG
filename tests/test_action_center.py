@@ -733,9 +733,9 @@ class InterfacesArbitrationConstantsTest(unittest.TestCase):
         from spider_cortex_sim.interfaces import ARBITRATION_VALENCE_DIM
         self.assertEqual(ARBITRATION_VALENCE_DIM, 4)
 
-    def test_arbitration_gate_dim_is_6(self) -> None:
+    def test_arbitration_gate_dim_is_9(self) -> None:
         from spider_cortex_sim.interfaces import ARBITRATION_GATE_DIM
-        self.assertEqual(ARBITRATION_GATE_DIM, 6)
+        self.assertEqual(ARBITRATION_GATE_DIM, 9)
 
     def test_evidence_input_dim_matches_arbitration_network_input_dim(self) -> None:
         from spider_cortex_sim.interfaces import ARBITRATION_EVIDENCE_INPUT_DIM

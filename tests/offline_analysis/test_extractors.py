@@ -17,12 +17,16 @@ from spider_cortex_sim.offline_analysis.extractors import (
     _normalize_noise_marginals,
     _ordered_noise_conditions,
     extract_ablations,
+    extract_architecture_capacity,
+    extract_model_capacity,
     extract_noise_robustness,
     extract_predator_type_specialization,
     extract_reflex_frequency,
+    extract_ladder_comparison,
     extract_representation_specialization,
     extract_shaping_audit,
     extract_training_eval_series,
+    extract_unified_ladder_report,
 )
 from spider_cortex_sim.offline_analysis.ingestion import load_summary, normalize_behavior_rows
 from spider_cortex_sim.offline_analysis.report import build_report_data, write_report
@@ -36,6 +40,7 @@ from .conftest import (
     MEAN_REWARD_SHAPING_GAP,
     SHAPING_GAP_EPSILON,
     SMALL_SHAPING_GAP,
+    build_uncertainty_summary,
 )
 
 class OfflineAnalysisToleranceTest(unittest.TestCase):
@@ -117,6 +122,200 @@ class OfflineAnalysisToleranceTest(unittest.TestCase):
                         },
                     },
                 },
+            }
+        }
+
+    def _summary_with_credit_analysis_program(self) -> dict[str, object]:
+        return {
+            "behavior_evaluation": {
+                "ablations": {
+                    "reference_variant": "modular_full",
+                    "variants": {
+                        "three_center_modular": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "broadcast",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.6,
+                                "episode_success_rate": 0.6,
+                                "mean_module_credit_weights": {
+                                    "perception_center": 0.34,
+                                    "action_center": 0.33,
+                                    "context_center": 0.33,
+                                },
+                                "module_gradient_norm_means": {
+                                    "perception_center": 0.4,
+                                    "action_center": 0.4,
+                                    "context_center": 0.4,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "perception_center": 0.2,
+                                    "action_center": 0.2,
+                                    "context_center": 0.2,
+                                },
+                                "dominant_module": "perception_center",
+                                "mean_dominant_module_share": 0.34,
+                                "mean_effective_module_count": 3.0,
+                            },
+                            "suite": {"night_rest": {"success_rate": 0.6}},
+                        },
+                        "three_center_modular_local_credit": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "local_only",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.25,
+                                "episode_success_rate": 0.25,
+                                "mean_module_credit_weights": {
+                                    "perception_center": 0.0,
+                                    "action_center": 0.0,
+                                    "context_center": 0.0,
+                                },
+                                "module_gradient_norm_means": {
+                                    "perception_center": 0.0,
+                                    "action_center": 0.0,
+                                    "context_center": 0.0,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "perception_center": 0.0,
+                                    "action_center": 0.0,
+                                    "context_center": 0.0,
+                                },
+                                "dominant_module": "",
+                                "mean_dominant_module_share": 0.0,
+                                "mean_effective_module_count": 0.0,
+                            },
+                            "suite": {"night_rest": {"success_rate": 0.25}},
+                        },
+                        "three_center_modular_counterfactual": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "counterfactual",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.75,
+                                "episode_success_rate": 0.75,
+                                "mean_module_credit_weights": {
+                                    "perception_center": 0.65,
+                                    "action_center": 0.2,
+                                    "context_center": 0.15,
+                                },
+                                "module_gradient_norm_means": {
+                                    "perception_center": 1.8,
+                                    "action_center": 0.8,
+                                    "context_center": 0.6,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "perception_center": 0.7,
+                                    "action_center": 0.2,
+                                    "context_center": 0.1,
+                                },
+                                "dominant_module": "perception_center",
+                                "mean_dominant_module_share": 0.65,
+                                "mean_effective_module_count": 1.9,
+                            },
+                            "suite": {"night_rest": {"success_rate": 0.75}},
+                        },
+                        "modular_full": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "broadcast",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.5,
+                                "episode_success_rate": 0.5,
+                                "mean_module_credit_weights": {
+                                    "visual_cortex": 0.26,
+                                    "motor_cortex": 0.25,
+                                    "decision_cortex": 0.24,
+                                    "memory_cortex": 0.25,
+                                },
+                                "module_gradient_norm_means": {
+                                    "visual_cortex": 0.35,
+                                    "motor_cortex": 0.35,
+                                    "decision_cortex": 0.35,
+                                    "memory_cortex": 0.35,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "visual_cortex": 0.15,
+                                    "motor_cortex": 0.15,
+                                    "decision_cortex": 0.15,
+                                    "memory_cortex": 0.15,
+                                },
+                                "dominant_module": "visual_cortex",
+                                "mean_dominant_module_share": 0.26,
+                                "mean_effective_module_count": 4.0,
+                            },
+                            "suite": {"night_rest": {"success_rate": 0.5}},
+                        },
+                        "local_credit_only": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "local_only",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.05,
+                                "episode_success_rate": 0.05,
+                                "mean_module_credit_weights": {
+                                    "visual_cortex": 0.0,
+                                    "motor_cortex": 0.0,
+                                    "decision_cortex": 0.0,
+                                    "memory_cortex": 0.0,
+                                },
+                                "module_gradient_norm_means": {
+                                    "visual_cortex": 0.0,
+                                    "motor_cortex": 0.0,
+                                    "decision_cortex": 0.0,
+                                    "memory_cortex": 0.0,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "visual_cortex": 0.0,
+                                    "motor_cortex": 0.0,
+                                    "decision_cortex": 0.0,
+                                    "memory_cortex": 0.0,
+                                },
+                                "dominant_module": "",
+                                "mean_dominant_module_share": 0.0,
+                                "mean_effective_module_count": 0.0,
+                            },
+                            "suite": {"night_rest": {"success_rate": 0.05}},
+                        },
+                        "counterfactual_credit": {
+                            "config": {
+                                "architecture": "modular",
+                                "credit_strategy": "counterfactual",
+                            },
+                            "summary": {
+                                "scenario_success_rate": 0.82,
+                                "episode_success_rate": 0.82,
+                                "mean_module_credit_weights": {
+                                    "visual_cortex": 0.72,
+                                    "motor_cortex": 0.12,
+                                    "decision_cortex": 0.1,
+                                    "memory_cortex": 0.06,
+                                },
+                                "module_gradient_norm_means": {
+                                    "visual_cortex": 2.1,
+                                    "motor_cortex": 0.8,
+                                    "decision_cortex": 0.7,
+                                    "memory_cortex": 0.5,
+                                },
+                                "mean_counterfactual_credit_weights": {
+                                    "visual_cortex": 0.75,
+                                    "motor_cortex": 0.1,
+                                    "decision_cortex": 0.08,
+                                    "memory_cortex": 0.07,
+                                },
+                                "dominant_module": "visual_cortex",
+                                "mean_dominant_module_share": 0.72,
+                                "mean_effective_module_count": 1.7,
+                            },
+                            "suite": {"night_rest": {"success_rate": 0.82}},
+                        },
+                    },
+                }
             }
         }
 
@@ -224,6 +423,95 @@ class OfflineAnalysisToleranceTest(unittest.TestCase):
         self.assertIn("1/2 scenarios survive minimal shaping", report_md)
         self.assertIn("| night_rest | 1.00 | yes | 2 |", report_md)
 
+    def test_build_report_data_includes_credit_analysis(self) -> None:
+        report = build_report_data(
+            summary=self._summary_with_credit_analysis_program(),
+            trace=[],
+            behavior_rows=[],
+        )
+
+        self.assertIn("credit_analysis", report)
+        self.assertTrue(report["credit_analysis"]["available"])
+        strategy_rows = report["credit_analysis"]["strategy_comparison_table"]["rows"]
+        self.assertEqual(len(strategy_rows), 6)
+        matrix_rows = report["credit_analysis"]["architecture_strategy_matrix"]["rows"]
+        self.assertEqual(len(matrix_rows), 6)
+        patterns = {
+            item["pattern"]
+            for item in report["credit_analysis"]["findings"]
+            if isinstance(item, dict)
+        }
+        self.assertIn("excessive global credit", patterns)
+        self.assertIn("insufficient local credit", patterns)
+        self.assertIn("counterfactual improvement", patterns)
+        self.assertIn("local_only differential failure", patterns)
+        self.assertIn("counterfactual benefit scales with module count", patterns)
+
+    def test_write_report_renders_credit_assignment_analysis_section(self) -> None:
+        report = build_report_data(
+            summary=self._summary_with_credit_analysis_program(),
+            trace=[],
+            behavior_rows=[],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            write_report(tmpdir, report)
+            report_md = (Path(tmpdir) / "report.md").read_text(encoding="utf-8")
+
+        self.assertIn("## Credit Assignment Analysis", report_md)
+        self.assertIn("| architecture_rung | strategy | variant |", report_md)
+        self.assertIn("insufficient local credit", report_md)
+        self.assertIn("counterfactual benefit scales with module count", report_md)
+
+    def test_extract_unified_ladder_report_marks_capacity_confounded(self) -> None:
+        result = extract_unified_ladder_report(build_uncertainty_summary())
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["conclusion"], "capacity/interface confounded")
+        self.assertEqual(len(result["ladder_table"]["rows"]), 5)
+        self.assertTrue(
+            any(
+                item["experiment_name"] == "capacity_matched_ladder"
+                for item in result["missing_experiments"]
+            )
+        )
+
+    def test_extract_unified_ladder_report_supports_capacity_matched_positive_case(
+        self,
+    ) -> None:
+        summary = build_uncertainty_summary()
+        variants = summary["behavior_evaluation"]["ablations"]["variants"]
+        for variant_name, total in (
+            ("true_monolithic_policy", 1000),
+            ("monolithic_policy", 1020),
+            ("three_center_modular", 980),
+            ("four_center_modular", 1010),
+            ("modular_full", 990),
+        ):
+            variants[variant_name]["parameter_counts"]["total"] = total
+            variants[variant_name]["parameter_counts"]["total_trainable"] = total
+        summary["behavior_evaluation"]["claim_tests"]["claims"][
+            "escape_without_reflex_support"
+        ] = {
+            "status": "passed",
+            "passed": True,
+            "reference_value": 0.45,
+            "comparison_values": {"trained_without_reflex_support": 0.75},
+            "delta": {"trained_without_reflex_support": 0.30},
+            "cohens_d": {"trained_without_reflex_support": 1.2},
+            "primary_metric": "predator_response_scenario_success_rate",
+            "scenarios_evaluated": [
+                "predator_edge",
+                "entrance_ambush",
+                "shelter_blockade",
+            ],
+        }
+
+        result = extract_unified_ladder_report(summary)
+
+        self.assertEqual(result["conclusion"], "modularity supported")
+        self.assertIn("A4 exceeded A0", result["conclusion_rationale"])
+
     def test_extract_ablations_falls_back_to_behavior_csv_rows(self) -> None:
         rows = normalize_behavior_rows(
             [
@@ -248,6 +536,7 @@ class OfflineAnalysisToleranceTest(unittest.TestCase):
         self.assertTrue(ablations["available"])
         self.assertIn("modular_full", ablations["variants"])
         self.assertIn("monolithic_policy", ablations["variants"])
+        self.assertEqual(ablations["variants"]["modular_full"]["ladder_rung"], "A4")
 
     def test_extract_ablations_fallback_uses_minimal_reflex_rows(self) -> None:
         rows = normalize_behavior_rows(
@@ -303,6 +592,365 @@ class OfflineAnalysisToleranceTest(unittest.TestCase):
                 "scenario_success_rate_delta"
             ],
             -1.0,
+        )
+        self.assertEqual(
+            ablations["variants"]["monolithic_policy"]["ladder_rung"],
+            "A1",
+        )
+
+    def test_extract_ablations_builds_architectural_ladder(self) -> None:
+        summary = {
+            "behavior_evaluation": {
+                "ablations": {
+                    "reference_variant": "modular_full",
+                    "variants": {
+                        "true_monolithic_policy": {
+                            "config": {"architecture": "true_monolithic"},
+                            "summary": {"scenario_success_rate": 0.2},
+                            "suite": {"night_rest": {"success_rate": 0.2}},
+                        },
+                        "monolithic_policy": {
+                            "config": {"architecture": "monolithic"},
+                            "summary": {"scenario_success_rate": 0.5},
+                            "suite": {"night_rest": {"success_rate": 0.5}},
+                        },
+                        "three_center_modular": {
+                            "config": {"architecture": "modular"},
+                            "summary": {"scenario_success_rate": 0.6},
+                            "suite": {"night_rest": {"success_rate": 0.6}},
+                        },
+                        "four_center_modular": {
+                            "config": {"architecture": "modular"},
+                            "summary": {"scenario_success_rate": 0.7},
+                            "suite": {"night_rest": {"success_rate": 0.7}},
+                        },
+                        "modular_full": {
+                            "config": {"architecture": "modular"},
+                            "summary": {"scenario_success_rate": 0.8},
+                            "suite": {"night_rest": {"success_rate": 0.8}},
+                        },
+                        "no_module_dropout": {
+                            "config": {"architecture": "modular"},
+                            "summary": {"scenario_success_rate": 0.75},
+                            "suite": {"night_rest": {"success_rate": 0.75}},
+                        },
+                    },
+                }
+            }
+        }
+
+        ablations = extract_ablations(summary, [])
+
+        self.assertIn("ladder_rungs", ablations)
+        self.assertIn("ladder_comparison", ablations)
+        self.assertEqual(
+            ablations["variants"]["true_monolithic_policy"]["ladder_rung"],
+            "A0",
+        )
+        self.assertEqual(
+            ablations["variants"]["monolithic_policy"]["ladder_rung"],
+            "A1",
+        )
+        self.assertEqual(
+            ablations["variants"]["three_center_modular"]["ladder_rung"],
+            "A2",
+        )
+        self.assertEqual(
+            ablations["variants"]["modular_full"]["ladder_rung"],
+            "A4",
+        )
+        self.assertEqual(
+            ablations["variants"]["four_center_modular"]["ladder_rung"],
+            "A3",
+        )
+        self.assertIsNone(
+            ablations["variants"]["no_module_dropout"]["ladder_rung"],
+        )
+        self.assertEqual(
+            ablations["ladder_rungs"]["recognized_rungs"],
+            ["A0", "A1", "A2", "A3", "A4"],
+        )
+        self.assertEqual(
+            ablations["ladder_rungs"]["descriptions"]["A1"],
+            "Monolithic representation with the existing action_center plus motor_cortex pipeline, isolating whether separating decision from execution helps even without modular sensory processing.",
+        )
+        self.assertEqual(
+            ablations["ladder_rungs"]["applicable_comparisons"],
+            [
+                {"baseline_rung": "A0", "comparison_rung": "A1"},
+                {"baseline_rung": "A1", "comparison_rung": "A2"},
+                {"baseline_rung": "A2", "comparison_rung": "A3"},
+                {"baseline_rung": "A3", "comparison_rung": "A4"},
+            ],
+        )
+        ladder = ablations["ladder"]
+        self.assertTrue(ladder["available"])
+        self.assertEqual(
+            ladder["rungs"]["A0"]["technical_variant"],
+            "true_monolithic_policy",
+        )
+        self.assertEqual(
+            ladder["rungs"]["A1"]["technical_variant"],
+            "monolithic_policy",
+        )
+        self.assertEqual(
+            ladder["rungs"]["A2"]["technical_variant"],
+            "three_center_modular",
+        )
+        self.assertEqual(
+            ladder["rungs"]["A3"]["technical_variant"],
+            "four_center_modular",
+        )
+        self.assertEqual(
+            ladder["rungs"]["A4"]["technical_variant"],
+            "modular_full",
+        )
+        a0_vs_a1 = next(
+            item
+            for item in ladder["adjacent_comparisons"]
+            if item["baseline_rung"] == "A0" and item["comparison_rung"] == "A1"
+        )
+        self.assertAlmostEqual(
+            a0_vs_a1["summary"]["scenario_success_rate_delta"],
+            0.3,
+        )
+        a2_vs_a3 = next(
+            item
+            for item in ladder["adjacent_comparisons"]
+            if item["baseline_rung"] == "A2" and item["comparison_rung"] == "A3"
+        )
+        self.assertAlmostEqual(
+            a2_vs_a3["summary"]["scenario_success_rate_delta"],
+            0.1,
+        )
+
+    def test_extract_ladder_comparison_returns_requested_shape(self) -> None:
+        variants = {
+            "true_monolithic_policy": {
+                "summary": {
+                    "scenario_success_rate": 0.2,
+                    "episode_success_rate": 0.2,
+                    "mean_reward": 2.0,
+                }
+            },
+            "monolithic_policy": {
+                "summary": {
+                    "scenario_success_rate": 0.5,
+                    "episode_success_rate": 0.4,
+                    "mean_reward": 4.0,
+                }
+            },
+            "three_center_modular": {
+                "summary": {
+                    "scenario_success_rate": 0.6,
+                    "episode_success_rate": 0.55,
+                    "mean_reward": 6.0,
+                }
+            },
+            "four_center_modular": {
+                "summary": {
+                    "scenario_success_rate": 0.7,
+                    "episode_success_rate": 0.625,
+                    "mean_reward": 6.5,
+                }
+            },
+            "modular_full": {
+                "summary": {
+                    "scenario_success_rate": 0.8,
+                    "episode_success_rate": 0.7,
+                    "mean_reward": 7.0,
+                }
+            },
+        }
+
+        result = extract_ladder_comparison(variants, source="test")
+
+        self.assertTrue(result["available"])
+        self.assertEqual(len(result["comparisons"]), 4)
+        self.assertIn("A0", result["explanatory_notes"])
+        self.assertIn("A1", result["explanatory_notes"])
+        self.assertIn("A2", result["explanatory_notes"])
+        self.assertIn("A3", result["explanatory_notes"])
+        self.assertIn("A4", result["explanatory_notes"])
+        a0_vs_a1 = next(
+            item
+            for item in result["comparisons"]
+            if item["baseline_rung"] == "A0" and item["comparison_rung"] == "A1"
+        )
+        self.assertEqual(
+            a0_vs_a1["metrics"]["baseline_variant"],
+            "true_monolithic_policy",
+        )
+        self.assertEqual(
+            a0_vs_a1["metrics"]["comparison_variant"],
+            "monolithic_policy",
+        )
+        self.assertAlmostEqual(
+            a0_vs_a1["deltas"]["scenario_success_rate_delta"],
+            0.3,
+        )
+        self.assertAlmostEqual(
+            a0_vs_a1["deltas"]["episode_success_rate_delta"],
+            0.2,
+        )
+        self.assertAlmostEqual(
+            a0_vs_a1["deltas"]["mean_reward_delta"],
+            2.0,
+        )
+        a1_vs_a2 = next(
+            item
+            for item in result["comparisons"]
+            if item["baseline_rung"] == "A1" and item["comparison_rung"] == "A2"
+        )
+        self.assertAlmostEqual(
+            a1_vs_a2["deltas"]["scenario_success_rate_delta"],
+            0.1,
+        )
+        a2_vs_a3 = next(
+            item
+            for item in result["comparisons"]
+            if item["baseline_rung"] == "A2" and item["comparison_rung"] == "A3"
+        )
+        self.assertAlmostEqual(
+            a2_vs_a3["deltas"]["scenario_success_rate_delta"],
+            0.1,
+        )
+        a3_vs_a4 = next(
+            item
+            for item in result["comparisons"]
+            if item["baseline_rung"] == "A3" and item["comparison_rung"] == "A4"
+        )
+        self.assertAlmostEqual(
+            a3_vs_a4["deltas"]["scenario_success_rate_delta"],
+            0.1,
+        )
+
+    def test_extract_ladder_comparison_preserves_missing_mean_reward(self) -> None:
+        variants = {
+            "true_monolithic_policy": {
+                "summary": {
+                    "scenario_success_rate": 0.2,
+                    "episode_success_rate": 0.2,
+                }
+            },
+            "monolithic_policy": {
+                "summary": {
+                    "scenario_success_rate": 0.5,
+                    "episode_success_rate": 0.4,
+                }
+            },
+        }
+
+        result = extract_ladder_comparison(variants, source="test")
+
+        a0_vs_a1 = next(
+            item
+            for item in result["comparisons"]
+            if item["baseline_rung"] == "A0" and item["comparison_rung"] == "A1"
+        )
+        self.assertIsNone(a0_vs_a1["metrics"]["baseline"]["mean_reward"])
+        self.assertIsNone(a0_vs_a1["metrics"]["comparison"]["mean_reward"])
+        self.assertIsNone(a0_vs_a1["deltas"]["mean_reward_delta"])
+
+    def test_extract_ladder_comparison_skips_missing_variant_gracefully(self) -> None:
+        variants = {
+            "monolithic_policy": {
+                "summary": {
+                    "scenario_success_rate": 0.5,
+                    "episode_success_rate": 0.4,
+                    "mean_reward": 4.0,
+                }
+            },
+            "three_center_modular": {
+                "summary": {
+                    "scenario_success_rate": 0.6,
+                    "episode_success_rate": 0.5,
+                    "mean_reward": 5.5,
+                }
+            },
+            "modular_full": {
+                "summary": {
+                    "scenario_success_rate": 0.8,
+                    "episode_success_rate": 0.7,
+                    "mean_reward": 7.0,
+                }
+            },
+        }
+
+        result = extract_ladder_comparison(variants, source="test")
+
+        self.assertTrue(result["available"])
+        self.assertEqual(len(result["comparisons"]), 1)
+        only_comparison = next(
+            item
+            for item in result["comparisons"]
+            if item["baseline_rung"] == "A1" and item["comparison_rung"] == "A2"
+        )
+        self.assertEqual(only_comparison["baseline_rung"], "A1")
+        self.assertEqual(only_comparison["comparison_rung"], "A2")
+        self.assertTrue(
+            any("A0 vs A1" in item for item in result["limitations"]),
+        )
+        self.assertTrue(
+            any("A2 vs A3" in item for item in result["limitations"]),
+        )
+
+    def test_extract_model_capacity_flat_payload_ignores_metadata_keys(self) -> None:
+        result = extract_model_capacity(
+            {
+                "config": {
+                    "brain": {
+                        "name": "modular_full",
+                        "architecture": "modular",
+                    }
+                },
+                "parameter_counts": {
+                    "architecture": "modular",
+                    "visual_cortex": 120,
+                    "motor_cortex": 80,
+                    "total": 200,
+                    "total_trainable": 200,
+                },
+            }
+        )
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["total_trainable"], 200)
+        self.assertEqual(
+            [item["network"] for item in result["networks"]],
+            ["visual_cortex", "motor_cortex"],
+        )
+
+    def test_extract_architecture_capacity_is_unavailable_when_variant_counts_missing(
+        self,
+    ) -> None:
+        summary = build_uncertainty_summary()
+        summary["behavior_evaluation"]["ablations"]["variants"]["broken_variant"] = {
+            "config": {"architecture": "modular"}
+        }
+
+        result = extract_architecture_capacity(summary)
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["rows"], [])
+        self.assertIn(
+            "Variant broken_variant was missing parameter counts.",
+            result["limitations"],
+        )
+
+    def test_extract_architecture_capacity_is_unavailable_for_non_mapping_variant(
+        self,
+    ) -> None:
+        summary = build_uncertainty_summary()
+        summary["behavior_evaluation"]["ablations"]["variants"]["broken_variant"] = None
+
+        result = extract_architecture_capacity(summary)
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["rows"], [])
+        self.assertIn(
+            "Variant broken_variant had a non-mapping payload.",
+            result["limitations"],
         )
 
     def test_extract_ablations_summary_promotes_without_reflex_support(self) -> None:

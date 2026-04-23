@@ -4,6 +4,62 @@
 
 This project implements a simulated spider with a modular brain, explicit predator pressure, standardized neural interfaces, online learning, deterministic behavioral scenarios, and reproducible evaluation workflows.
 
+## Release Posture
+
+This repository is an experimental research codebase. It is appropriate for
+research iteration, benchmark packaging, and publication-facing result bundles,
+but it should not be read as a claim of production stability or a stable public
+API.
+
+In this repo, "publication-grade" means benchmark rigor and reproducibility for
+benchmark-of-record outputs. It does not mean long-term interface stability.
+
+The benchmark-of-record artifacts are the benchmark package plus the run summary
+and exported behavior rows used to build it. The package-of-record includes
+`benchmark_manifest.json`, `resolved_config.json`, `pip_freeze.txt`,
+`seed_level_rows.csv`, aggregate and claim tables, plots, and `limitations.txt`.
+
+See [RELEASE.md](RELEASE.md) for the checklist and release posture details,
+[CHANGELOG.md](CHANGELOG.md) for reproducibility-relevant changes, and
+[CITATION.cff](CITATION.cff) for citation guidance.
+
+## Start Here
+
+If you want the shortest trustworthy first run, use the smoke budget from the
+repository root:
+
+Python 3.10+ is required for the full simulator and CLI. The commands below
+assume `python3` resolves to Python 3.10 or newer.
+
+```bash
+python3 -m spider_cortex_sim --budget-profile smoke --summary spider_summary.json
+```
+
+This runs a short training-plus-evaluation cycle and writes
+`./spider_summary.json`. The smoke budget is intended to finish in under a
+minute on a local development machine.
+
+For a quick success check, open `spider_summary.json` and look at:
+
+- `config.budget` for the resolved budget profile, benchmark strength, and seed
+- `training_last_window.survival_rate` for survival over the final training window
+- `evaluation.mean_reward` for average reward during evaluation
+- `evaluation.survival_rate` for post-training survival performance
+- `parameter_norms` for the final parameter magnitudes of each module
+
+Add `--trace spider_trace.jsonl` if you want a per-tick evaluation trace for
+deeper inspection.
+
+### Choose Your Path
+
+- Just run the simulator: start with [Quick Start](#quick-start) or add `--render-eval` for an ASCII replay
+- Run with the GUI: add `--gui`; see [Graphical Interface (Pygame)](#graphical-interface-pygame)
+- Inspect behavior scenarios or the behavior suite: see [Behavioral Evaluation](#behavioral-evaluation)
+- Run claim tests: see [Claim Test Suite](#claim-test-suite)
+- Run ablations or learning-evidence workflows: see [Ablations And Learning Evidence](#ablations-and-learning-evidence) and [docs/ablation_workflow.md](docs/ablation_workflow.md)
+- Diagnose progressive modularity before adding new centers: see [docs/architectural_ladder.md](docs/architectural_ladder.md)
+- Generate an offline analysis bundle: `python3 -m spider_cortex_sim.offline_analysis --summary spider_summary.json --output-dir ./report/`; see [Offline Analysis](#offline-analysis)
+
 The current version centers on three structural changes:
 
 1. explicit predator instances inside the world, with a backward-compatible primary `lizard`
@@ -50,12 +106,18 @@ The action space is now:
 - `MOVE_LEFT`
 - `MOVE_RIGHT`
 - `STAY`
+- `ORIENT_UP`
+- `ORIENT_DOWN`
+- `ORIENT_LEFT`
+- `ORIENT_RIGHT`
 
-That keeps the simulator closer to basic locomotion control instead of scripted behavior verbs.
+`ORIENT_*` actions are active-sensing turns: they rotate the heading and refresh perception for the current tick, but they do not translate the spider.
+
+That keeps the simulator closer to primitive locomotion and active-sensing control instead of scripted behavior verbs.
 
 ### 3. Eating And Sleeping As Situated Behaviors
 
-Because the motor output is now limited to locomotion, feeding and rest emerge from spatial context:
+Because the motor output is now limited to primitive movement plus active-sensing orientation, feeding and rest emerge from spatial context:
 
 - when the spider reaches food, feeding happens automatically
 - when the spider reaches shelter under fatigue or night pressure, recovery happens automatically
@@ -96,6 +158,18 @@ Layer responsibilities:
 
 The generated contract documentation lives in [docs/interfaces.md](docs/interfaces.md). The short topology note for the newer arbitration chain lives in [docs/action_center_design.md](docs/action_center_design.md).
 
+### Architectural Ladder Protocol
+
+For systematic validation of modularity, see [docs/architectural_ladder.md](docs/architectural_ladder.md).
+
+The ladder complements the ablation workflow: use [docs/architectural_ladder.md](docs/architectural_ladder.md) as the diagnostic framework for deciding where a regression likely comes from, and use [docs/ablation_workflow.md](docs/ablation_workflow.md) for the detailed variant definitions, competence-gap and shaping-gap reads, and benchmark-of-record comparison procedures.
+
+That policy is intentionally blocking at `A5`: no finer biological module is an automatic improvement, and no new center should be added until `A2` learns, `A3` preserves it, `A4` does not collapse relative to the coarse control, local interface tasks pass, credit remains interpretable, and the candidate comes with an explicit hypothesis plus a selective ablation test.
+
+#### A5 Admission Policy
+
+Readers considering any new biological center should start with [docs/architectural_ladder.md](docs/architectural_ladder.md), not with interface expansion alone. That document is the source of truth for the prerequisite checklist, module admission criteria, and reusable proposal checklist, and it explicitly treats every proposed module as a hypothesis to test rather than an automatic improvement.
+
 ## Environment
 
 The 2D grid world contains:
@@ -134,11 +208,12 @@ Scenario setup code can also assign explicit `LizardState(profile=...)` instance
 ## Project Layout
 
 ```text
-neuro_modular_sim/
+.
 ├── README.md
 ├── docs/
 │   ├── ablation_workflow.md
 │   ├── action_center_design.md
+│   ├── architectural_ladder.md
 │   └── interfaces.md
 ├── spider_cortex_sim/
 │   ├── __main__.py
@@ -172,24 +247,24 @@ pip install -r requirements.txt
 
 Notes:
 
+- Python 3.10+ is required for the simulator and CLI entrypoints
 - `numpy` is required
 - `pygame-ce` is optional and only needed for the graphical interface (`--gui`)
 
 ## Quick Start
 
-Run a standard training and evaluation session:
+Budget profiles are the recommended way to run reproducible experiments. Start
+with the smoke profile for a first local run:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim --episodes 120 --eval-episodes 3 --max-steps 90
+python3 -m spider_cortex_sim --budget-profile smoke
 ```
 
 Save a summary and trace:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
-  --episodes 120 \
-  --eval-episodes 1 \
-  --max-steps 90 \
+python3 -m spider_cortex_sim \
+  --budget-profile smoke \
   --summary spider_summary.json \
   --trace spider_trace.jsonl
 ```
@@ -197,11 +272,24 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Render the final evaluation episode in ASCII:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+python3 -m spider_cortex_sim --budget-profile smoke --render-eval
+```
+
+Move to the `dev` budget when you want a slightly stronger reproducible local
+benchmark:
+
+```bash
+python3 -m spider_cortex_sim --budget-profile dev --summary spider_summary.json
+```
+
+Use explicit episode and step flags only when you want a custom non-profiled
+run:
+
+```bash
+python3 -m spider_cortex_sim \
   --episodes 120 \
-  --eval-episodes 1 \
-  --max-steps 90 \
-  --render-eval
+  --eval-episodes 3 \
+  --max-steps 90
 ```
 
 ## Reward Profiles And Maps
@@ -249,8 +337,10 @@ are removed or reduced. `classic` and `ecological` remain useful training and
 comparison profiles, but claims should increasingly rest on behavior that
 survives the austere profile.
 
-The reduction roadmap in `spider_cortex_sim/reward.py` tracks the next reward
-terms to defend, weaken, or investigate:
+The reduction roadmap in `spider_cortex_sim/reward/shaping.py` tracks the next
+reward terms to defend, weaken, or investigate. The
+`SHAPING_REDUCTION_ROADMAP` definition lives in that `shaping.py` submodule
+inside the `spider_cortex_sim/reward/` package:
 
 - `resting`: high priority, kept weakened while rest outcome evidence is
   separated from configurable rest bonuses.
@@ -686,7 +776,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --full-summary
 ```
 
-The package manifest records file hashes, seed count, confidence level, resolved budget metadata, and checkpoint-selection metadata. The CLI rejects `--benchmark-package` unless both `--budget-profile paper` and `--checkpoint-selection best` are present.
+The package manifest records file hashes, seed count, confidence level, resolved budget metadata, checkpoint-selection metadata, and an `environment` block with git commit/tag/dirty-state plus Python version and platform. `pip_freeze.txt` preserves the dependency snapshot as a hashed package artifact. The CLI rejects `--benchmark-package` unless both `--budget-profile paper` and `--checkpoint-selection best` are present.
 
 Uncertainty reporting is seed-level. Confidence intervals are percentile bootstrap intervals over seed-level metric values and default to 95%. Claim-test pass/fail logic remains based on point estimates; the package adds `reference_uncertainty`, `comparison_uncertainty`, `delta_uncertainty`, and `effect_size_uncertainty` for reporting. Effect-size tables report Cohen's d with `negligible`, `small`, `medium`, and `large` magnitude labels.
 

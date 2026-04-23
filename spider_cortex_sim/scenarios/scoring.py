@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from .scoring_diagnostics import (
+    _classify_night_rest_failure,
+    _classify_two_shelter_tradeoff_failure,
     _food_approached,
     _classify_food_deprivation_failure,
     _classify_open_field_foraging_failure,
@@ -67,9 +69,11 @@ __all__ = [
     'VISUAL_HUNTER_OPEN_FIELD_CHECKS',
     'VISUAL_OLFACTORY_PINCER_CHECKS',
     '_classify_corridor_gauntlet_failure',
+    '_classify_night_rest_failure',
     '_classify_exposed_day_foraging_failure',
     '_classify_food_deprivation_failure',
     '_classify_open_field_foraging_failure',
+    '_classify_two_shelter_tradeoff_failure',
     '_food_approached',
     '_module_response_for_type',
     '_module_share_for_type',

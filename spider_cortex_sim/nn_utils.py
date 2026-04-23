@@ -6,7 +6,7 @@ import numpy as np
 Array = np.ndarray
 
 
-def softmax(logits: Array) -> Array:
+def softmax(logits: Array, temperature: float = 1.0) -> Array:
     """
     Convert a vector of logits into a numerically stable probability distribution using the softmax function.
     
@@ -14,21 +14,99 @@ def softmax(logits: Array) -> Array:
     
     Parameters:
         logits (Array): 1-D array-like of unnormalized log-probabilities.
+        temperature (float): Positive softmax temperature; probabilities are computed as `softmax(logits / temperature)`.
     
     Returns:
         Array: Float array of the same shape containing probabilities that sum to 1.0; if normalization fails, a uniform distribution across elements.
     """
+    temperature = float(temperature)
+    if not np.isfinite(temperature) or temperature <= 0.0:
+        raise ValueError("temperature must be a finite positive scalar")
     logits = np.clip(
         np.nan_to_num(np.asarray(logits, dtype=float), nan=0.0, posinf=20.0, neginf=-20.0),
         -20.0,
         20.0,
     )
+    logits = logits / temperature
     shifted = logits - np.max(logits)
     exp = np.exp(shifted)
     total = float(np.sum(exp))
     if total <= 0.0 or not np.isfinite(total):
         return np.full_like(logits, 1.0 / len(logits), dtype=float)
     return exp / total
+
+
+def cross_entropy_loss(
+    student_logits: Array,
+    teacher_probs: Array,
+    *,
+    temperature: float = 1.0,
+) -> float:
+    """
+    Compute soft-target cross-entropy between student logits and teacher probabilities.
+
+    The student distribution is computed as `softmax(student_logits / temperature)`.
+    Teacher probabilities are sanitized, renormalized, and clamped away from zero
+    in the log term to avoid numerical issues.
+    """
+    student_probs = softmax(student_logits, temperature=temperature)
+    teacher_probs = np.asarray(teacher_probs, dtype=float)
+    if teacher_probs.ndim != 1:
+        raise ValueError("teacher_probs must be a 1-D vector")
+    if student_probs.shape != teacher_probs.shape:
+        raise ValueError(
+            "student_logits and teacher_probs must describe the same distribution shape"
+        )
+    teacher_probs = np.nan_to_num(
+        teacher_probs,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    teacher_probs = np.clip(teacher_probs, 0.0, None)
+    total = float(np.sum(teacher_probs))
+    if total <= 0.0 or not np.isfinite(total):
+        teacher_probs = np.full_like(student_probs, 1.0 / len(student_probs), dtype=float)
+    else:
+        teacher_probs = teacher_probs / total
+    return float(-np.sum(teacher_probs * np.log(np.clip(student_probs, 1e-8, 1.0))))
+
+
+def kl_divergence(
+    student_logits: Array,
+    teacher_probs: Array,
+    *,
+    temperature: float = 1.0,
+) -> float:
+    """
+    Compute KL(teacher || student) from teacher probabilities and student logits.
+
+    Both distributions are sanitized and the student distribution is computed as
+    `softmax(student_logits / temperature)`.
+    """
+    student_probs = softmax(student_logits, temperature=temperature)
+    teacher_probs = np.asarray(teacher_probs, dtype=float)
+    if teacher_probs.ndim != 1:
+        raise ValueError("teacher_probs must be a 1-D vector")
+    if student_probs.shape != teacher_probs.shape:
+        raise ValueError(
+            "student_logits and teacher_probs must describe the same distribution shape"
+        )
+    teacher_probs = np.nan_to_num(
+        teacher_probs,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    teacher_probs = np.clip(teacher_probs, 0.0, None)
+    total = float(np.sum(teacher_probs))
+    if total <= 0.0 or not np.isfinite(total):
+        teacher_probs = np.full_like(student_probs, 1.0 / len(student_probs), dtype=float)
+    else:
+        teacher_probs = teacher_probs / total
+    teacher_safe = np.clip(teacher_probs, 1e-8, 1.0)
+    student_safe = np.clip(student_probs, 1e-8, 1.0)
+    return float(np.sum(teacher_safe * (np.log(teacher_safe) - np.log(student_safe))))
 
 
 def one_hot(index: int, size: int) -> Array:

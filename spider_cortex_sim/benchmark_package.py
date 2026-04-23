@@ -16,18 +16,23 @@ import csv
 import hashlib
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .offline_analysis import (
     build_aggregate_benchmark_tables,
+    build_capacity_sweep_tables,
     build_claim_test_tables,
+    build_credit_table,
     build_effect_size_tables,
     build_report_data,
     load_behavior_csv,
+    normalize_behavior_rows,
     write_report,
 )
 
@@ -40,16 +45,24 @@ BENCHMARK_PACKAGE_VERSION = "1.0"
 BENCHMARK_PACKAGE_CONTENTS: tuple[str, ...] = (
     "benchmark_manifest.json",
     "resolved_config.json",
+    "pip_freeze.txt",
     "seed_level_rows.csv",
     "aggregate_benchmark_tables.json",
+    "credit_table.json",
+    "capacity_sweep_tables.json",
     "claim_test_tables.json",
     "effect_size_tables.json",
+    "reward_profile_ladder_tables.json",
+    "ladder_comparison.json",
+    "ladder_profile_comparison.json",
+    "unified_ladder_report.json",
     "report.md",
     "report.json",
     "plots/training_eval.svg",
     "plots/scenario_success.svg",
     "plots/robustness_matrix.svg",
     "plots/ablation_comparison.svg",
+    "plots/capacity_comparison.svg",
     "plots/reflex_frequency.svg",
     "supporting_csvs/behavior_rows.csv",
     "supporting_csvs/scenario_checks.csv",
@@ -71,6 +84,7 @@ class BenchmarkManifest:
     seed_count: int
     confidence_level: float
     limitations: Sequence[str]
+    environment: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.package_version, str) or not self.package_version:
@@ -83,6 +97,8 @@ class BenchmarkManifest:
             raise ValueError("budget_profile must be a mapping.")
         if not isinstance(self.checkpoint_selection, Mapping):
             raise ValueError("checkpoint_selection must be a mapping.")
+        if not isinstance(self.environment, Mapping):
+            raise ValueError("environment must be a mapping.")
         if isinstance(self.seed_count, bool) or not isinstance(self.seed_count, int):
             raise ValueError("seed_count must be an integer.")
         if self.seed_count < 0:
@@ -118,6 +134,7 @@ class BenchmarkManifest:
             "command_metadata": dict(self.command_metadata),
             "budget_profile": dict(self.budget_profile),
             "checkpoint_selection": dict(self.checkpoint_selection),
+            "environment": dict(self.environment),
             "contents": [dict(item) for item in self.contents],
             "seed_count": int(self.seed_count),
             "confidence_level": float(self.confidence_level),
@@ -153,8 +170,162 @@ def _file_inventory(output_path: Path) -> list[dict[str, object]]:
     return files
 
 
+def _get_git_info() -> dict[str, object]:
+    repo_root = Path(__file__).resolve().parent.parent
+
+    def run_git(*args: str) -> str | None:
+        try:
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return None
+        if completed.returncode != 0:
+            return None
+        return completed.stdout.strip()
+
+    commit = run_git("rev-parse", "HEAD")
+    tag = run_git("describe", "--tags", "--exact-match")
+    dirty_output = run_git("status", "--porcelain")
+    return {
+        "commit": commit,
+        "tag": tag,
+        "dirty": None if dirty_output is None else bool(dirty_output),
+    }
+
+
+def _get_python_info() -> dict[str, object]:
+    return {
+        "python_version": sys.version,
+        "platform": sys.platform,
+    }
+
+
+def _get_pip_freeze() -> str:
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "pip", "freeze"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout
+
+
 def _mapping_or_empty(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _rows_from_table(value: object) -> list[dict[str, object]]:
+    rows = _mapping_or_empty(value).get("rows", [])
+    if not isinstance(rows, list):
+        return []
+    return [dict(item) for item in rows if isinstance(item, Mapping)]
+
+
+def _benchmark_package_unified_ladder_payload(
+    report: Mapping[str, object],
+) -> dict[str, object]:
+    unified = _mapping_or_empty(report.get("unified_ladder_report"))
+    tables = _mapping_or_empty(unified.get("tables"))
+    capacity_rows = _rows_from_table(tables.get("capacity_summary_table"))
+    conclusion_rows = _rows_from_table(tables.get("conclusion_table"))
+    rung_rows = _rows_from_table(tables.get("primary_rung_table"))
+    comparison_rows = _rows_from_table(tables.get("adjacent_comparison_table"))
+    credit_rows = _rows_from_table(tables.get("credit_assignment_summary"))
+    shaping_rows = _rows_from_table(tables.get("reward_shaping_sensitivity_summary"))
+    no_reflex_rows = _rows_from_table(tables.get("no_reflex_competence_summary"))
+    capability_rows = _rows_from_table(tables.get("capability_probe_boundaries"))
+    missing_rows = _rows_from_table(tables.get("missing_experiments_table"))
+    limitations = [
+        str(item)
+        for item in unified.get("limitations", [])
+        if item
+    ]
+
+    def _section_payload(
+        table_name: str,
+        value: object,
+        *,
+        has_rows: bool | None = None,
+    ) -> dict[str, object]:
+        if has_rows is not None:
+            available = bool(has_rows)
+        elif isinstance(value, Mapping):
+            if "available" in value:
+                available = bool(value.get("available"))
+            else:
+                rows = value.get("rows")
+                available = isinstance(rows, Sequence) and not isinstance(
+                    rows,
+                    (str, bytes),
+                ) and bool(rows)
+        else:
+            available = bool(value)
+        return {
+            "available": available,
+            "value": value,
+        }
+
+    return {
+        "rungs": _section_payload(
+            "primary_rung_table",
+            rung_rows,
+            has_rows=bool(rung_rows),
+        ),
+        "comparisons": _section_payload(
+            "adjacent_comparison_table",
+            comparison_rows,
+            has_rows=bool(comparison_rows),
+        ),
+        "capacity_summary": _section_payload(
+            "capacity_summary_table",
+            capacity_rows[0] if capacity_rows else {},
+            has_rows=bool(capacity_rows),
+        ),
+        "credit_summary": _section_payload(
+            "credit_assignment_summary",
+            credit_rows,
+            has_rows=bool(credit_rows),
+        ),
+        "shaping_sensitivity": _section_payload(
+            "reward_shaping_sensitivity_summary",
+            shaping_rows,
+            has_rows=bool(shaping_rows),
+        ),
+        "no_reflex_competence": _section_payload(
+            "no_reflex_competence_summary",
+            no_reflex_rows,
+            has_rows=bool(no_reflex_rows),
+        ),
+        "capability_probes": _section_payload(
+            "capability_probe_boundaries",
+            capability_rows,
+            has_rows=bool(capability_rows),
+        ),
+        "conclusion": _section_payload(
+            "conclusion_table",
+            conclusion_rows[0] if conclusion_rows else {},
+            has_rows=bool(conclusion_rows),
+        ),
+        "missing_experiments": _section_payload(
+            "missing_experiments_table",
+            missing_rows,
+            has_rows=bool(missing_rows),
+        ),
+        "limitations": {
+            "available": bool("limitations" in unified or limitations),
+            "value": limitations,
+        },
+    }
 
 
 def _budget_profile_from_summary(summary: Mapping[str, object]) -> dict[str, object]:
@@ -311,6 +482,7 @@ def _copy_generated_report_artifacts(
         "scenario_success_svg": "scenario_success.svg",
         "robustness_matrix_svg": "robustness_matrix.svg",
         "ablation_comparison_svg": "ablation_comparison.svg",
+        "capacity_comparison_svg": "capacity_comparison.svg",
         "reflex_frequency_svg": "reflex_frequency.svg",
     }
     for key, filename in plot_targets.items():
@@ -367,6 +539,7 @@ def assemble_benchmark_package(
         if behavior_rows is not None
         else load_behavior_csv(behavior_csv)
     )
+    loaded_behavior_rows = normalize_behavior_rows(loaded_behavior_rows)
     loaded_trace = [dict(item) for item in trace] if trace is not None else []
 
     report = build_report_data(
@@ -376,16 +549,46 @@ def assemble_benchmark_package(
         behavior_csv_path=behavior_csv,
     )
     aggregate_tables = build_aggregate_benchmark_tables(summary)
+    credit_tables = build_credit_table(summary)
+    capacity_sweep_tables = build_capacity_sweep_tables(summary)
     claim_tables = build_claim_test_tables(summary)
-    effect_size_tables = build_effect_size_tables(summary)
+    effect_size_tables = build_effect_size_tables(summary, loaded_behavior_rows)
+    reward_profile_ladder_tables = dict(
+        _mapping_or_empty(report.get("reward_profile_ladder_tables"))
+    )
     report["aggregate_benchmark_tables"] = aggregate_tables
+    report["credit_assignment"] = credit_tables
+    report["capacity_sweep_tables"] = capacity_sweep_tables
     report["claim_test_tables"] = claim_tables
     report["effect_size_tables"] = effect_size_tables
 
-    _json_dump(output_path / "resolved_config.json", summary.get("config", {}))
+    resolved_config = dict(_mapping_or_empty(summary.get("config")))
+    if "parameter_counts" in summary:
+        resolved_config["parameter_counts"] = summary["parameter_counts"]
+    if "approximate_compute_cost" in summary:
+        resolved_config["approximate_compute_cost"] = summary["approximate_compute_cost"]
+    _json_dump(output_path / "resolved_config.json", resolved_config)
     _json_dump(output_path / "aggregate_benchmark_tables.json", aggregate_tables)
+    _json_dump(output_path / "credit_table.json", credit_tables)
+    _json_dump(output_path / "capacity_sweep_tables.json", capacity_sweep_tables)
     _json_dump(output_path / "claim_test_tables.json", claim_tables)
     _json_dump(output_path / "effect_size_tables.json", effect_size_tables)
+    _json_dump(
+        output_path / "reward_profile_ladder_tables.json",
+        reward_profile_ladder_tables,
+    )
+    _json_dump(
+        output_path / "ladder_comparison.json",
+        report.get("ladder_comparison", {}),
+    )
+    _json_dump(
+        output_path / "ladder_profile_comparison.json",
+        report.get("ladder_profile_comparison", {}),
+    )
+    _json_dump(
+        output_path / "unified_ladder_report.json",
+        _benchmark_package_unified_ladder_payload(report),
+    )
 
     seed_level_rows = _seed_level_rows_from_summary(summary)
     if not seed_level_rows:
@@ -407,6 +610,7 @@ def assemble_benchmark_package(
         for item in (
             *(report.get("limitations", []) if isinstance(report.get("limitations"), list) else []),
             *(aggregate_tables.get("limitations", []) if isinstance(aggregate_tables.get("limitations"), list) else []),
+            *(credit_tables.get("limitations", []) if isinstance(credit_tables.get("limitations"), list) else []),
             *(claim_tables.get("limitations", []) if isinstance(claim_tables.get("limitations"), list) else []),
             *(effect_size_tables.get("limitations", []) if isinstance(effect_size_tables.get("limitations"), list) else []),
             *(limitations or ()),
@@ -417,6 +621,16 @@ def assemble_benchmark_package(
         "\n".join(package_limitations) + ("\n" if package_limitations else ""),
         encoding="utf-8",
     )
+    git_info = _get_git_info()
+    python_info = _get_python_info()
+    environment = {
+        "git_commit": git_info.get("commit"),
+        "git_tag": git_info.get("tag"),
+        "git_dirty": git_info.get("dirty"),
+        "python_version": python_info["python_version"],
+        "platform": python_info["platform"],
+    }
+    (output_path / "pip_freeze.txt").write_text(_get_pip_freeze(), encoding="utf-8")
 
     manifest = BenchmarkManifest(
         package_version=BENCHMARK_PACKAGE_VERSION,
@@ -424,6 +638,7 @@ def assemble_benchmark_package(
         command_metadata=dict(command_metadata or {}),
         budget_profile=_budget_profile_from_summary(summary),
         checkpoint_selection=_checkpoint_selection_from_summary(summary),
+        environment=environment,
         contents=_file_inventory(output_path),
         seed_count=_seed_count(seed_level_rows),
         confidence_level=float(confidence_level),
@@ -439,6 +654,11 @@ def summarize_benchmark_manifest(
     output_dir: Path,
 ) -> dict[str, object]:
     """Return compact manifest fields suitable for user-facing summaries."""
+    environment = (
+        manifest.environment
+        if isinstance(manifest.environment, Mapping)
+        else {}
+    )
     manifest_paths = {
         str(item.get("path"))
         for item in manifest.contents
@@ -453,6 +673,8 @@ def summarize_benchmark_manifest(
         "output_dir": str(output_dir),
         "package_version": manifest.package_version,
         "created_at": manifest.created_at,
+        "git_commit": environment.get("git_commit"),
+        "git_tag": environment.get("git_tag"),
         "seed_count": manifest.seed_count,
         "confidence_level": manifest.confidence_level,
         "file_count": file_count,

@@ -119,12 +119,11 @@ class BrainInputMixin:
         training: bool,
     ) -> List[ModuleResult]:
         """
-        Produce per-module proposal outputs for the current architecture (modular or monolithic).
+        Produce per-module proposal outputs for the current architecture.
         
-        For the modular configuration this delegates to the module bank and returns its per-module
-        ModuleResult list. For the monolithic configuration this constructs a single
-        ModuleResult named "monolithic_policy" from the sanitized monolithic observation,
-        with `logits`, `probs`, and reflex-related diagnostic fields initialized (no reflex applied).
+        For the modular configuration this delegates to the module bank and returns its
+        per-module ModuleResult list. For monolithic and true-monolithic configurations
+        this constructs a single ModuleResult from the concatenated observation vector.
         
         Parameters:
             observation (Dict[str, np.ndarray]): Raw observation mapping keyed by module/interface names.
@@ -135,7 +134,7 @@ class BrainInputMixin:
             List[ModuleResult]: Per-proposal-module results including logits, probabilities and reflex/diagnostic fields.
         
         Raises:
-            RuntimeError: If the configured proposal backend (module bank for modular, monolithic policy for monolithic) is not available.
+            RuntimeError: If the configured proposal backend is not available.
         """
         if self.config.is_modular:
             if self.module_bank is None:
@@ -146,19 +145,28 @@ class BrainInputMixin:
                 training=training,
             )
 
-        if self.monolithic_policy is None:
+        network = self.true_monolithic_policy if self.config.is_true_monolithic else self.monolithic_policy
+        network_name = (
+            self.TRUE_MONOLITHIC_POLICY_NAME
+            if self.config.is_true_monolithic
+            else self.MONOLITHIC_POLICY_NAME
+        )
+        if network is None:
             raise RuntimeError("Monolithic network unavailable for the configured architecture.")
         monolithic_observation = self._build_monolithic_observation(observation)
-        logits = self.monolithic_policy.forward(
-            monolithic_observation,
-            store_cache=store_cache,
-            training=training,
-        )
+        if self.config.is_true_monolithic:
+            logits, _ = network.forward(monolithic_observation, store_cache=store_cache)
+        else:
+            logits = network.forward(
+                monolithic_observation,
+                store_cache=store_cache,
+                training=training,
+            )
         return [
             ModuleResult(
                 interface=None,
-                name=self.MONOLITHIC_POLICY_NAME,
-                observation_key=self.MONOLITHIC_POLICY_NAME,
+                name=network_name,
+                observation_key=network_name,
                 observation=monolithic_observation.copy(),
                 logits=logits,
                 probs=softmax(logits),

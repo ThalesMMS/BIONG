@@ -31,7 +31,9 @@ from spider_cortex_sim.scenarios.scoring import (
     _classify_corridor_gauntlet_failure,
     _classify_exposed_day_foraging_failure,
     _classify_food_deprivation_failure,
+    _classify_night_rest_failure,
     _classify_open_field_foraging_failure,
+    _classify_two_shelter_tradeoff_failure,
     _score_corridor_gauntlet,
 )
 from spider_cortex_sim.scenarios.specs import (
@@ -106,6 +108,101 @@ class ScoreFunctionCoreTest(ScoreFunctionTestBase):
         trace = [{"state": {"sleep_phase": "DEEP_SLEEP"}}]
         score = spec.score_episode(stats, trace)
         self.assertIn("deep_night_shelter", score.checks)
+
+    def test_night_rest_emits_trace_diagnostics_and_failure_mode(self) -> None:
+        spec = get_scenario("night_rest")
+        stats = _make_episode_stats(
+            scenario="night_rest",
+            sleep_events=1,
+            night_role_distribution={"outside": 0.0, "entrance": 0.0, "inside": 0.0, "deep": 1.0},
+            final_sleep_debt=NIGHT_REST_INITIAL_SLEEP_DEBT - 0.10,
+        )
+        trace = [
+            {
+                "tick": 0,
+                "state": {
+                    "map_template": "central_burrow",
+                    "width": 12,
+                    "height": 12,
+                    "x": 6,
+                    "y": 6,
+                    "sleep_phase": "DEEP_SLEEP",
+                    "predator_visible": False,
+                },
+            },
+            _make_action_selection_trace_item(
+                {
+                    "winning_valence": "sleep",
+                    "evidence": {
+                        "sleep": {"sleep_debt": 0.8, "fatigue": 0.9},
+                    },
+                }
+            ),
+        ]
+
+        score = spec.score_episode(stats, trace)
+
+        self.assertTrue(
+            {
+                "deep_sleep_reached",
+                "sleep_pressure_tick_count",
+                "sleep_priority_rate",
+                "left_shelter",
+                "shelter_exit_tick",
+                "predator_visible_ticks",
+                "failure_mode",
+            }.issubset(score.behavior_metrics)
+        )
+        self.assertEqual(score.behavior_metrics["failure_mode"], "deep_without_recovery")
+
+    def test_two_shelter_tradeoff_emits_trace_diagnostics_and_failure_mode(self) -> None:
+        spec = get_scenario("two_shelter_tradeoff")
+        stats = _make_episode_stats(
+            scenario="two_shelter_tradeoff",
+            food_distance_delta=2.0,
+            night_shelter_occupancy_rate=0.1,
+            alive=True,
+            predator_contacts=0,
+        )
+        trace = [
+            {
+                "tick": 0,
+                "state": {
+                    "map_template": "two_shelters",
+                    "width": 12,
+                    "height": 12,
+                    "x": 2,
+                    "y": 10,
+                    "food_distance": 8.0,
+                },
+            },
+            {
+                "tick": 1,
+                "state": {
+                    "map_template": "two_shelters",
+                    "width": 12,
+                    "height": 12,
+                    "x": 6,
+                    "y": 9,
+                    "shelter_role": "outside",
+                    "food_distance": 5.0,
+                },
+            },
+        ]
+
+        score = spec.score_episode(stats, trace)
+
+        self.assertTrue(
+            {
+                "initial_food_distance",
+                "min_food_distance_reached",
+                "left_shelter",
+                "shelter_exit_tick",
+                "predator_visible_ticks",
+                "failure_mode",
+            }.issubset(score.behavior_metrics)
+        )
+        self.assertEqual(score.behavior_metrics["failure_mode"], "no_return_to_shelter")
 
     def test_food_deprivation_score_checks_hunger_reduction(self) -> None:
         spec = get_scenario("food_deprivation")

@@ -107,6 +107,17 @@ class SpiderBrainSaveLoadArbitrationTest(unittest.TestCase):
         self.assertIn("hidden_dim", arb_meta)
         self.assertIn("valence_dim", arb_meta)
         self.assertIn("gate_dim", arb_meta)
+        self.assertGreater(arb_meta["parameter_count"], 0)
+
+    def test_save_metadata_contains_parameter_counts_summary(self) -> None:
+        brain = self._brain()
+        brain.save(self._tmpdir)
+        meta_path = Path(self._tmpdir) / "metadata.json"
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertIn("parameter_counts", metadata)
+        self.assertGreater(metadata["total_parameters"], 0)
+        self.assertIn("action_center", metadata["parameter_counts"])
+        self.assertIn("motor_cortex", metadata["parameter_counts"])
 
     def test_save_metadata_includes_arbitration_lr(self) -> None:
         """Verify that saving a Brain writes arbitration hyperparameters into metadata.json."""

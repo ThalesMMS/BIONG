@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .combined import run_combined_offline_analysis
 from .ingestion import load_behavior_csv, load_summary, load_trace
 from .report import build_report_data, write_report
 
@@ -74,6 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Directory where the report and artifacts will be generated.",
     )
+    parser.add_argument("--ablation-summary", type=Path, default=None)
+    parser.add_argument("--ablation-behavior-csv", type=Path, default=None)
+    parser.add_argument("--profile-summary", type=Path, default=None)
+    parser.add_argument("--profile-behavior-csv", type=Path, default=None)
+    parser.add_argument("--capacity-summary", type=Path, default=None)
+    parser.add_argument("--capacity-behavior-csv", type=Path, default=None)
+    parser.add_argument("--module-local-report", type=Path, default=None)
+    parser.add_argument("--distillation-summary", type=Path, default=None)
     return parser
 
 
@@ -85,6 +94,55 @@ def main() -> None:
     """
     parser = build_parser()
     args = parser.parse_args()
+    combined_args = (
+        args.ablation_summary,
+        args.ablation_behavior_csv,
+        args.profile_summary,
+        args.profile_behavior_csv,
+        args.capacity_summary,
+        args.capacity_behavior_csv,
+        args.module_local_report,
+        args.distillation_summary,
+    )
+    combined_mode = any(item is not None for item in combined_args)
+    if combined_mode:
+        if args.summary is not None or args.trace is not None or args.behavior_csv is not None:
+            parser.error(
+                "Use either the single-artifact flags (--summary/--trace/--behavior-csv) "
+                "or the combined ladder flags, not both."
+            )
+        required_missing = [
+            flag
+            for flag, value in (
+                ("--ablation-summary", args.ablation_summary),
+                ("--ablation-behavior-csv", args.ablation_behavior_csv),
+                ("--profile-summary", args.profile_summary),
+                ("--profile-behavior-csv", args.profile_behavior_csv),
+                ("--capacity-summary", args.capacity_summary),
+                ("--capacity-behavior-csv", args.capacity_behavior_csv),
+                ("--module-local-report", args.module_local_report),
+            )
+            if value is None
+        ]
+        if required_missing:
+            parser.error(
+                "Combined ladder mode requires "
+                + ", ".join(required_missing)
+                + "."
+            )
+        report = run_combined_offline_analysis(
+            ablation_summary_path=args.ablation_summary,
+            ablation_behavior_csv_path=args.ablation_behavior_csv,
+            profile_summary_path=args.profile_summary,
+            profile_behavior_csv_path=args.profile_behavior_csv,
+            capacity_summary_path=args.capacity_summary,
+            capacity_behavior_csv_path=args.capacity_behavior_csv,
+            module_local_report_path=args.module_local_report,
+            distillation_summary_path=args.distillation_summary,
+            output_dir=args.output_dir,
+        )
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return
     if args.summary is None and args.trace is None and args.behavior_csv is None:
         parser.error(
             "At least one of --summary, --trace, or --behavior-csv is required."

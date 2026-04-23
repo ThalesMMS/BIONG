@@ -150,6 +150,14 @@ class SpiderTrainingCoreTest(SpiderTrainingTestBase):
         self.assertIn("monolithic_policy", summary["parameter_norms"])
         self.assertIn("action_center", summary["parameter_norms"])
         self.assertIn("motor_cortex", summary["parameter_norms"])
+        self.assertIn("parameter_counts", summary)
+        self.assertGreater(summary["parameter_counts"]["total"], 0)
+        self.assertIn(
+            "monolithic_policy",
+            summary["parameter_counts"]["per_network"],
+        )
+        self.assertIn("action_center", summary["parameter_counts"]["per_network"])
+        self.assertIn("motor_cortex", summary["parameter_counts"]["per_network"])
 
     def test_run_episode_rejects_training_with_non_normal_policy_mode_early(self) -> None:
         sim = SpiderSimulation(seed=7, max_steps=10)

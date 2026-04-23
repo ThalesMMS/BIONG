@@ -16,6 +16,7 @@ import math
 import tempfile
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Sequence
 
@@ -57,6 +58,7 @@ from .checkpointing import (
     persist_checkpoint_pair,
     resolve_checkpoint_load_dir,
 )
+from .capacity_profiles import CapacityProfile, resolve_capacity_profile
 from .curriculum import (
     CURRICULUM_COLUMNS,
     CURRICULUM_FOCUS_SCENARIOS,
@@ -148,6 +150,7 @@ class SpiderSimulation(SimulationEpisodeMixin, SimulationCheckpointMixin, Simula
         module_lr: float = 0.010,
         motor_lr: float = 0.012,
         module_dropout: float = 0.05,
+        capacity_profile: str | CapacityProfile | None = None,
         reward_profile: str = "classic",
         map_template: str = "central_burrow",
         brain_config: BrainAblationConfig | None = None,
@@ -174,6 +177,23 @@ class SpiderSimulation(SimulationEpisodeMixin, SimulationCheckpointMixin, Simula
         """
         self.seed = seed
         self.brain_config = brain_config if brain_config is not None else default_brain_config(module_dropout=module_dropout)
+        resolved_capacity_profile_spec = (
+            capacity_profile
+            if capacity_profile is not None
+            else (
+                self.brain_config.capacity_profile
+                if self.brain_config.capacity_profile is not None
+                else self.brain_config.capacity_profile_name
+            )
+        )
+        self.capacity_profile = resolve_capacity_profile(resolved_capacity_profile_spec)
+        replacement_fields = {
+            "capacity_profile": self.capacity_profile,
+            "capacity_profile_name": self.capacity_profile.name,
+            "module_hidden_dims": dict(self.capacity_profile.module_hidden_dims),
+            "integration_hidden_dim": self.capacity_profile.integration_hidden_dim,
+        }
+        self.brain_config = replace(self.brain_config, **replacement_fields)
         self.module_dropout = self.brain_config.module_dropout
         self.default_map_template = map_template
         self.operational_profile = runtime_operational_profile(operational_profile)
@@ -197,6 +217,7 @@ class SpiderSimulation(SimulationEpisodeMixin, SimulationCheckpointMixin, Simula
             motor_lr=motor_lr,
             module_dropout=self.brain_config.module_dropout,
             config=self.brain_config,
+            capacity_profile=self.capacity_profile,
             operational_profile=self.operational_profile,
         )
         self.max_steps = max_steps
@@ -237,8 +258,10 @@ class SpiderSimulation(SimulationEpisodeMixin, SimulationCheckpointMixin, Simula
         self._latest_reflex_schedule_summary: Dict[str, object] | None = None
         self._latest_evaluation_without_reflex_support: Dict[str, object] | None = None
         self._latest_curriculum_summary: Dict[str, object] | None = None
+        self._latest_distillation_summary: Dict[str, object] | None = None
         self._latest_training_regime_summary: Dict[str, object] = {
             "name": "baseline",
+            "distillation_enabled": False,
             "mode": "flat",
             "curriculum_profile": "none",
             "annealing_schedule": AnnealingSchedule.NONE.value,
@@ -248,6 +271,9 @@ class SpiderSimulation(SimulationEpisodeMixin, SimulationCheckpointMixin, Simula
             "finetuning_reflex_scale": 0.0,
             "loss_override_penalty_weight": 0.0,
             "loss_dominance_penalty_weight": 0.0,
+            "distillation_epochs": 0,
+            "distillation_temperature": 1.0,
+            "distillation_lr": 0.0,
             "is_experiment_of_record": False,
             "resolved_budget": {
                 "total_training_episodes": int(

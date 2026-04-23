@@ -12,6 +12,7 @@ import numpy as np
 
 from spider_cortex_sim.ablations import BrainAblationConfig, canonical_ablation_configs
 from spider_cortex_sim.agent import BrainStep, SpiderBrain
+from spider_cortex_sim.checkpointing import CheckpointSelectionConfig
 from spider_cortex_sim.curriculum import (
     CurriculumPhaseDefinition,
     PromotionCheckCriteria,
@@ -70,7 +71,6 @@ class SpiderTrainingCheckpointingTest(SpiderTrainingTestBase):
                 evaluation_episodes=0,
                 capture_evaluation_trace=False,
                 checkpoint_selection="best",
-                checkpoint_metric="scenario_success_rate",
                 checkpoint_interval=1,
                 checkpoint_dir=Path(tmpdir),
                 checkpoint_scenario_names=["night_rest"],
@@ -167,12 +167,14 @@ class SpiderTrainingCheckpointingTest(SpiderTrainingTestBase):
             evaluation_episodes=0,
             capture_evaluation_trace=False,
             checkpoint_selection="best",
-            checkpoint_metric="scenario_success_rate",
             checkpoint_interval=1,
             checkpoint_scenario_names=["night_rest"],
             selection_scenario_episodes=1,
-            checkpoint_override_penalty=1.0,
-            checkpoint_penalty_mode="direct",
+            checkpoint_selection_config=CheckpointSelectionConfig(
+                metric="scenario_success_rate",
+                override_penalty_weight=1.0,
+                penalty_mode="direct",
+            ),
         )
 
         checkpointing = summary["checkpointing"]
