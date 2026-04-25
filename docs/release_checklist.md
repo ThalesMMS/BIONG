@@ -61,10 +61,18 @@ mature product-release process.
 
 `pip_freeze.txt` is captured automatically in benchmark packages.
 
-To recreate an environment from a benchmark package:
+To recreate an environment from a benchmark package, use Python 3.10+ and a
+versioned interpreter command:
+
+`python3.10 --version`
+
+If `python3.10` is unavailable, install Python 3.10+ or substitute your
+available versioned interpreter, such as `python3.11`. The benchmark manifest
+records the original Python version used for the package; match that version
+when possible, or use a newer supported Python release.
 
 1. Create a virtual environment:
-   `python3 -m venv venv`
+   `python3.10 -m venv venv`
 2. Activate it:
    `source venv/bin/activate`
 3. Install the captured benchmark environment:

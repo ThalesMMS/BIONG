@@ -214,6 +214,14 @@ class ArbitrationDecision:
     dominant_module: str = ""
     dominant_module_share: float = 0.0
     effective_module_count: float = 0.0
+    gate_entropy: float = 0.0
+    dominance_rate: float = 0.0
+    effective_proposer_count: float = 0.0
+    module_counts: Dict[str, int] = field(default_factory=dict)
+    owner_rank: int = 0
+    owner_suppressed_rate: float = 0.0
+    route_active_modules: list[str] = field(default_factory=list)
+    route_credit_weights: Dict[str, float] = field(default_factory=dict)
     module_agreement_rate: float = 0.0
     module_disagreement_rate: float = 0.0
 
@@ -273,6 +281,20 @@ class ArbitrationDecision:
             "dominant_module": self.dominant_module,
             "dominant_module_share": round(float(self.dominant_module_share), 6),
             "effective_module_count": round(float(self.effective_module_count), 6),
+            "gate_entropy": round(float(self.gate_entropy), 6),
+            "dominance_rate": round(float(self.dominance_rate), 6),
+            "effective_proposer_count": round(float(self.effective_proposer_count), 6),
+            "module_counts": {
+                key: int(value)
+                for key, value in sorted(self.module_counts.items())
+            },
+            "owner_rank": int(self.owner_rank),
+            "owner_suppressed_rate": round(float(self.owner_suppressed_rate), 6),
+            "route_active_modules": list(self.route_active_modules),
+            "route_credit_weights": {
+                key: round(float(value), 6)
+                for key, value in sorted(self.route_credit_weights.items())
+            },
             "module_agreement_rate": round(float(self.module_agreement_rate), 6),
             "module_disagreement_rate": round(float(self.module_disagreement_rate), 6),
             "suppressed_modules": list(self.suppressed_modules),
@@ -551,7 +573,28 @@ def compute_arbitration(
     priority_gating_weights: Mapping[str, Mapping[str, float]] = PRIORITY_GATING_WEIGHTS,
 ) -> ArbitrationDecision:
     """
-    Compute an arbitration decision: choose a valence and produce per-module gate weights and diagnostics.
+    Selects a driving valence from observations and module proposals and produces per-module gate weights, routing decisions, and diagnostics.
+    
+    Computes per-valence evidence from bound observations, derives valence scores either from the learned arbitration network or from the fixed-formula scorer (controlled by the ablation config), applies optional deterministic guards, and computes priority-gating for each module. Produces gated and pre-gating intents, per-module contribution shares, suppression lists, dominance and agreement metrics, gate-distribution entropy and effective proposer count, and other diagnostics; all results are returned in an ArbitrationDecision.
+    
+    Parameters:
+        observations (Mapping[str, np.ndarray]): Raw observation arrays keyed by interface name; bound/sanitized inside the function.
+        module_results (list[ModuleResult]): Candidate proposals from proposer modules; used to compute pre- and post-gating intents and contribution shares.
+        arbitration_network (ArbitrationNetwork): Learned arbitration network used when `ablation_config.use_learned_arbitration` is enabled.
+        ablation_config (BrainAblationConfig): Controls whether learned arbitration, deterministic guards, and warm-start behaviors are used.
+        arbitration_rng (np.random.Generator): RNG used for sampling valence during training when learned arbitration is enabled.
+        operational_profile (OperationalProfile | None): Optional runtime profile (passed through; not required for basic arbitration).
+        training (bool): If true and learned arbitration is active, samples the winning valence stochastically; otherwise uses a deterministic winner.
+        store_cache (bool): Passed to the arbitration network forward call to control cache storage.
+        clamp_fn (callable): Function used to clamp intermediate valence raw scores (defaults to clamp_unit).
+        valence_order (Sequence[str]): Order of valences to align logits/probabilities and signal layout.
+        arbitration_evidence_fields (Mapping[str, Sequence[str]]): Mapping from valence to ordered evidence field names used to flatten evidence vectors.
+        valence_evidence_weights (Mapping[str, Mapping[str, float]]): Per-valence weights applied to evidence fields when computing fixed-formula raw scores.
+        arbitration_gate_module_order (Sequence[str]): Ordered module names corresponding to learned gate-adjustment outputs.
+        priority_gating_weights (Mapping[str, Mapping[str, float]]): Base gate weights indexed by valence then module name used before applying adjustments.
+    
+    Returns:
+        ArbitrationDecision: A populated decision object containing the chosen strategy and winning valence, normalized valence scores and logits, per-module base gates and final gates, gate adjustments, suppressed modules, gated and pre-gating intent indices, module contribution shares, dominance and agreement metrics, gate entropy and effective proposer count, the assembled evidence, arbitration value, and flags indicating whether learned adjustment or deterministic guards were applied.
     """
     action_context = _bound_action_context(observations)
     visual = _bound_observation("visual_cortex", observations)
@@ -776,6 +819,32 @@ def compute_arbitration(
         effective_module_count = float(
             1.0 / sum(share * share for share in positive_shares)
         )
+    active_gate_values = [
+        max(0.0, float(module_gates.get(result.name, 0.0)))
+        for result in module_results
+        if result.active
+    ]
+    gate_entropy = 0.0
+    effective_proposer_count = 0.0
+    gate_total = float(sum(active_gate_values))
+    if gate_total > 1e-8 and active_gate_values:
+        gate_probs = [value / gate_total for value in active_gate_values]
+        raw_gate_entropy = -sum(
+            probability * math.log(probability + 1e-12)
+            for probability in gate_probs
+            if probability > 0.0
+        )
+        gate_entropy = float(
+            raw_gate_entropy / math.log(len(gate_probs))
+            if len(gate_probs) > 1
+            else 0.0
+        )
+        effective_proposer_count = float(math.exp(raw_gate_entropy))
+    module_counts = {
+        result.name: (1 if result.name == dominant_module else 0)
+        for result in module_results
+    }
+    dominance_rate = float(1.0 if dominant_module_share >= 0.5 else 0.0)
     active_results = [result for result in module_results if result.active]
     if active_results:
         agreeing_modules = sum(
@@ -796,6 +865,10 @@ def compute_arbitration(
         dominant_module=dominant_module,
         dominant_module_share=dominant_module_share,
         effective_module_count=effective_module_count,
+        gate_entropy=gate_entropy,
+        dominance_rate=dominance_rate,
+        effective_proposer_count=effective_proposer_count,
+        module_counts=module_counts,
         module_agreement_rate=module_agreement_rate,
         module_disagreement_rate=module_disagreement_rate,
         suppressed_modules=suppressed_modules,

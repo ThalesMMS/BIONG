@@ -67,24 +67,42 @@ from .comparison_ablation import (
     compare_ablation_suite,
 )
 from .comparison_capacity import (
+    compare_capacity_axis_sweep,
     compare_capacity_sweep,
     compare_capacity_sweeps,
 )
 
 def compare_learning_evidence(*args, **kwargs):
-    _comparison_learning.resolve_budget = resolve_budget
-    _comparison_learning.resolve_learning_evidence_conditions = (
-        resolve_learning_evidence_conditions
+    runner = _comparison_learning._runner
+    original_resolve_budget = runner.resolve_budget
+    original_resolve_learning_evidence_conditions = (
+        runner.resolve_learning_evidence_conditions
     )
-    return _comparison_learning.compare_learning_evidence(*args, **kwargs)
+    runner.resolve_budget = resolve_budget
+    runner.resolve_learning_evidence_conditions = resolve_learning_evidence_conditions
+    try:
+        return runner.compare_learning_evidence(*args, **kwargs)
+    finally:
+        runner.resolve_budget = original_resolve_budget
+        runner.resolve_learning_evidence_conditions = (
+            original_resolve_learning_evidence_conditions
+        )
 
 def compare_ladder_under_profiles(*args, **kwargs):
+    original_resolve_budget = _comparison_ladder_profiles.resolve_budget
     _comparison_ladder_profiles.resolve_budget = resolve_budget
-    return _comparison_ladder_profiles.compare_ladder_under_profiles(
-        *args,
-        **kwargs,
-    )
+    try:
+        return _comparison_ladder_profiles.compare_ladder_under_profiles(
+            *args,
+            **kwargs,
+        )
+    finally:
+        _comparison_ladder_profiles.resolve_budget = original_resolve_budget
 
 def compare_training_regimes(*args, **kwargs):
+    original_resolve_budget = _comparison_training.resolve_budget
     _comparison_training.resolve_budget = resolve_budget
-    return _comparison_training.compare_training_regimes(*args, **kwargs)
+    try:
+        return _comparison_training.compare_training_regimes(*args, **kwargs)
+    finally:
+        _comparison_training.resolve_budget = original_resolve_budget

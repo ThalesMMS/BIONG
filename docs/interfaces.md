@@ -3,8 +3,8 @@
 <!-- Generated from spider_cortex_sim.interface_docs.render_interfaces_markdown(); do not edit manually. -->
 
 - Schema version: `1`
-- Registry fingerprint: `25164d4bee0652c6da69d28bd983d941690a6e6dfd5471dcdcc412bf522f263f`
-- Proposal interfaces: `visual_cortex, sensory_cortex, hunger_center, sleep_center, alert_center, perception_center, homeostasis_center, threat_center`
+- Registry fingerprint: `cf7df9f21d3a0527bd676a63b010ee22a72edd16e86aa52610a2cb564cd45ce8`
+- Proposal interfaces: `visual_cortex, sensory_cortex, hunger_center, sleep_center, alert_center, perception_center, homeostasis_center, threat_center, alert_v1, alert_v2, alert_v3, hunger_v1, hunger_v2, hunger_v3, sensory_v1, sensory_v2, sensory_v3, sleep_v1, sleep_v2, sleep_v3, visual_v1, visual_v2, visual_v3`
 - Context interfaces: `action_center_context, motor_cortex_context`
 
 ## Compatibility
@@ -574,7 +574,7 @@
 - Role: `context`
 - Version: `3`
 - Description: Raw context used by the action_center to arbitrate competing locomotion proposals.
-- Outputs: `MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY, ORIENT_UP, ORIENT_DOWN, ORIENT_LEFT, ORIENT_RIGHT`
+- Outputs: ``
 - Save policy: `exact_match_required`
 
 | # | Signal | Min | Max | Description |
@@ -601,7 +601,7 @@
 - Role: `context`
 - Version: `5`
 - Description: Raw context used by the motor_cortex to execute locomotion intent within local embodiment constraints.
-- Outputs: `MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY, ORIENT_UP, ORIENT_DOWN, ORIENT_LEFT, ORIENT_RIGHT`
+- Outputs: ``
 - Save policy: `exact_match_required`
 
 | # | Signal | Min | Max | Description |

@@ -31,7 +31,18 @@ from .operational_profiles import OperationalProfile
 from .scenarios import SCENARIO_NAMES, get_scenario
 from .simulation import SpiderSimulation
 
-from .comparison_utils import aggregate_with_uncertainty, attach_behavior_seed_statistics, condition_compact_summary, condition_mean_reward, metric_seed_values_from_payload, noise_profile_metadata, safe_float, seed_level_dicts
+from .comparison_utils import (
+    aggregate_with_uncertainty,
+    attach_behavior_seed_statistics,
+    build_run_budget_summary,
+    condition_compact_summary,
+    condition_mean_reward,
+    create_comparison_simulation,
+    metric_seed_values_from_payload,
+    noise_profile_metadata,
+    safe_float,
+    seed_level_dicts,
+)
 
 def with_noise_profile_metadata(
     payload: Dict[str, object],
@@ -395,10 +406,12 @@ def _train_brain_for_noise(
     load_modules: Sequence[str] | None,
     save_brain: str | Path | None,
 ) -> tuple[SpiderSimulation, Dict[str, object], float]:
-    sim_budget = budget.to_summary()
-    sim_budget["resolved"]["scenario_episodes"] = run_count
-    sim_budget["resolved"]["behavior_seeds"] = list(seed_values)
-    sim_budget["resolved"]["ablation_seeds"] = list(seed_values)
+    sim_budget = build_run_budget_summary(
+        budget,
+        scenario_episodes=run_count,
+        behavior_seeds=seed_values,
+        ablation_seeds=seed_values,
+    )
     fingerprint_budget_resolved = {
         "episodes": budget.episodes,
         "eval_episodes": budget.eval_episodes,
@@ -408,7 +421,7 @@ def _train_brain_for_noise(
         "selection_scenario_episodes": budget.selection_scenario_episodes,
     }
     preload_fingerprint = checkpoint_preload_fingerprint(load_brain, load_modules)
-    sim = SpiderSimulation(
+    sim = create_comparison_simulation(
         width=width,
         height=height,
         food_count=food_count,

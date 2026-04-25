@@ -48,11 +48,14 @@ not treated as a locked benchmark environment.
 For benchmark-of-record runs, preserve the exact environment in one of these
 ways:
 
+Use a supported Python 3.10+ interpreter for benchmark packaging so the captured
+environment reflects a replayable runtime.
+
 1. Prefer the benchmark package itself, which records Python details plus a
    `pip freeze` snapshot in `pip_freeze.txt` and records environment metadata
    in `benchmark_manifest.json`.
 2. If a standalone environment export is needed outside the package, run
-   `python3 -m pip freeze > benchmark_requirements_lock.txt` from the same
+   `python3.10 -m pip freeze > benchmark_requirements_lock.txt` from the same
    environment and archive it beside the benchmark package.
 
 ## Release Notes Convention

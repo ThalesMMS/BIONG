@@ -8,12 +8,82 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 from typing import Dict, Sequence
 
+from .ablations import BrainAblationConfig
 from .benchmark_types import SeedLevelResult, UncertaintyEstimate
+from .budget_profiles import ResolvedBudget
 from .checkpointing import mean_reward_from_behavior_payload
 from .noise import NoiseConfig
+from .operational_profiles import OperationalProfile
+from .simulation import SpiderSimulation
 from .statistics import bootstrap_confidence_interval
+
+def build_run_budget_summary(
+    budget: ResolvedBudget,
+    *,
+    scenario_episodes: int,
+    behavior_seeds: Sequence[int],
+    ablation_seeds: Sequence[int],
+) -> dict[str, object]:
+    """Build the per-run budget summary stored on comparison simulations."""
+    summary = budget.to_summary()
+    resolved = summary["resolved"]
+    if isinstance(resolved, dict):
+        resolved["scenario_episodes"] = int(scenario_episodes)
+        resolved["behavior_seeds"] = list(behavior_seeds)
+        resolved["ablation_seeds"] = list(ablation_seeds)
+    return summary
+
+def create_comparison_simulation(
+    *,
+    width: int,
+    height: int,
+    food_count: int,
+    day_length: int,
+    night_length: int,
+    gamma: float,
+    module_lr: float,
+    motor_lr: float,
+    module_dropout: float,
+    operational_profile: str | OperationalProfile | None,
+    noise_profile: str | NoiseConfig | None,
+    reward_profile: str,
+    map_template: str,
+    max_steps: int,
+    budget_profile_name: str,
+    benchmark_strength: str,
+    budget_summary: Dict[str, object],
+    seed: int,
+    brain_config: BrainAblationConfig | None = None,
+) -> SpiderSimulation:
+    """Create a SpiderSimulation with the common comparison constructor inputs."""
+    return SpiderSimulation(
+        width=width,
+        height=height,
+        food_count=food_count,
+        day_length=day_length,
+        night_length=night_length,
+        max_steps=max_steps,
+        seed=seed,
+        gamma=gamma,
+        module_lr=module_lr,
+        motor_lr=motor_lr,
+        module_dropout=module_dropout,
+        operational_profile=operational_profile,
+        noise_profile=noise_profile,
+        reward_profile=reward_profile,
+        map_template=map_template,
+        brain_config=brain_config,
+        budget_profile_name=budget_profile_name,
+        benchmark_strength=benchmark_strength,
+        budget_summary=budget_summary,
+    )
+
+def build_checkpoint_path(root: Path | str, workflow: str, run_key: str) -> Path:
+    """Build the workflow-scoped checkpoint directory for one comparison run."""
+    return Path(root) / workflow / run_key
 
 def noise_profile_metadata(noise_profile: NoiseConfig) -> Dict[str, object]:
     """

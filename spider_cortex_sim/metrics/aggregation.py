@@ -170,6 +170,8 @@ def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
     module_credit_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names(history, "mean_module_credit_weights") if history else [])
     module_gradient_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names(history, "module_gradient_norm_means") if history else [])
     counterfactual_credit_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names(history, "mean_counterfactual_credit_weights") if history else [])
+    route_active_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names(history, "route_active_modules") if history else [])
+    route_credit_names = list(PROPOSAL_SOURCE_NAMES) + (_extra_module_names(history, "route_credit_weights") if history else [])
     module_credit_weight_means = _mean_map(
         history, module_credit_names,
         lambda s, n: s.mean_module_credit_weights.get(n, 0.0),
@@ -182,6 +184,16 @@ def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
         history,
         counterfactual_credit_names,
         lambda s, n: s.mean_counterfactual_credit_weights.get(n, 0.0),
+    )
+    route_active_module_means = _mean_map(
+        history,
+        route_active_names,
+        lambda s, n: s.route_active_modules.get(n, 0.0),
+    )
+    route_credit_weight_means = _mean_map(
+        history,
+        route_credit_names,
+        lambda s, n: s.route_credit_weights.get(n, 0.0),
     )
     terrain_slip_names = sorted(
         {
@@ -293,6 +305,13 @@ def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
         "mean_module_credit_weights": module_credit_weight_means,
         "module_gradient_norm_means": module_gradient_norm_means,
         "mean_counterfactual_credit_weights": mean_counterfactual_credit_weights,
+        "route_active_modules": route_active_module_means,
+        "route_credit_weights": route_credit_weight_means,
+        "router_health": {
+            "gate_entropy": ms(history, lambda s: s.gate_entropy),
+            "dominance_rate": ms(history, lambda s: s.dominance_rate),
+            "effective_proposer_count": ms(history, lambda s: s.effective_proposer_count),
+        },
         "mean_motor_slip_rate": ms(history, lambda s: s.motor_slip_rate),
         "mean_orientation_alignment": ms(history, lambda s: s.mean_orientation_alignment),
         "mean_terrain_difficulty": ms(history, lambda s: s.mean_terrain_difficulty),
@@ -301,6 +320,19 @@ def aggregate_episode_stats(history: List[EpisodeStats]) -> Dict[str, object]:
         "dominant_module_distribution": dominant_module_distribution,
         "mean_dominant_module_share": ms(history, lambda s: s.dominant_module_share),
         "mean_effective_module_count": ms(history, lambda s: s.effective_module_count),
+        "mean_gate_entropy": ms(history, lambda s: s.gate_entropy),
+        "mean_dominance_rate": ms(history, lambda s: s.dominance_rate),
+        "mean_effective_proposer_count": ms(history, lambda s: s.effective_proposer_count),
+        "expected_owner_modules": sorted(
+            {
+                module_name
+                for stats in history
+                for module_name in stats.expected_owner_modules
+            }
+        ),
+        "owner_alignment": ms(history, lambda s: s.owner_alignment),
+        "owner_rank": ms(history, lambda s: float(s.owner_rank)),
+        "owner_suppressed_rate": ms(history, lambda s: s.owner_suppressed_rate),
         "mean_module_agreement_rate": ms(history, lambda s: s.module_agreement_rate),
         "mean_module_disagreement_rate": ms(history, lambda s: s.module_disagreement_rate),
         "episodes_detail": [asdict(stats) for stats in history],

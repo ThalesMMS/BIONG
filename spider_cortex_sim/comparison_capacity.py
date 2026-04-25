@@ -8,7 +8,9 @@ from .ablations import resolve_ablation_configs
 from .budget_profiles import BudgetProfile, resolve_budget
 from .capacity_profiles import (
     CapacityProfile,
+    canonical_capacity_axis_names,
     canonical_capacity_profile_names,
+    capacity_profile_for_axis,
     resolve_capacity_profile,
 )
 from .checkpointing import (
@@ -52,7 +54,7 @@ def compare_capacity_sweep(
     seeds: Sequence[int] | None = None,
     names: Sequence[str] | None = None,
     architecture_variants: Sequence[str] | None = None,
-    capacity_profiles: Sequence[str] | None = None,
+    capacity_profiles: Sequence[str | CapacityProfile] | None = None,
     episodes_per_scenario: int | None = None,
     checkpoint_selection: str = "none",
     checkpoint_selection_config: CheckpointSelectionConfig | None = None,
@@ -231,11 +233,128 @@ def compare_capacity_sweep(
 
 
 def compare_capacity_sweeps(**kwargs) -> tuple[Dict[str, object], List[Dict[str, object]]]:
+    """
+    Compatibility wrapper that runs a full capacity sweep using the provided keyword arguments.
+    
+    Returns:
+        summary_payload (Dict[str, object]): A dictionary summarizing the sweep configuration and results (budget/profile/variant/scenario resolution, checkpoint metadata, episodes_per_scenario, seeds, performance_matrices, and per-profile payloads).
+        rows (List[Dict[str, object]]): A combined list of per-run row dictionaries aggregated from all executed capacity-profile sweeps.
+    """
     return compare_capacity_sweep(**kwargs)
+
+
+def compare_capacity_axis_sweep(
+    *,
+    capacity_axes: Sequence[str] | None = None,
+    base_profile: str | CapacityProfile | None = "current",
+    **kwargs,
+) -> tuple[Dict[str, object], List[Dict[str, object]]]:
+    """
+    Run capacity sweeps across specified capacity axes and aggregate per-axis results.
+    
+    Parameters:
+        capacity_axes (Sequence[str] | None): Ordered list of capacity axis names to sweep. If omitted or empty, uses the canonical capacity axes.
+        base_profile (str | CapacityProfile | None): Base capacity profile (name or object) used as the starting point for axis-specific profiles; defaults to "current".
+        **kwargs: Passed through to compare_capacity_sweep(); may include an override `capacity_profiles` (sequence of target profile names) to control the target profiles for each axis.
+    
+    Returns:
+        tuple: 
+            - payload (dict): Summary payload containing:
+                - `budget_profile`: budget identifier (string) or empty string,
+                - `capacity_axes`: list of axes that were swept,
+                - `base_profile`: summary of the resolved base profile,
+                - `target_capacity_profiles`: list of summaries for target profiles,
+                - `architecture_variants`: list of architecture variant names (first found across axes) or [],
+                - `performance_matrices`: aggregated performance matrices keyed by metric then axis then variant then profile,
+                - `axes`: mapping from axis name to that axis's per-axis payload (each payload includes `"capacity_axis"`).
+            - all_rows (List[dict]): Combined list of row dictionaries returned from each per-axis sweep; each row is annotated with a `capacity_axis` key.
+    """
+    axes = (
+        list(capacity_axes)
+        if capacity_axes is not None
+        else list(canonical_capacity_axis_names())
+    )
+    if not axes:
+        axes = list(canonical_capacity_axis_names())
+    unknown_axes = [axis for axis in axes if axis not in canonical_capacity_axis_names()]
+    if unknown_axes:
+        available = ", ".join(canonical_capacity_axis_names())
+        raise ValueError(f"Unknown capacity axes: {unknown_axes}. Available: {available}")
+    duplicate_axes = sorted(axis for axis, count in Counter(axes).items() if count > 1)
+    if duplicate_axes:
+        raise ValueError(
+            "compare_capacity_axis_sweep() requires unique capacity axes; "
+            f"duplicates: {duplicate_axes}."
+        )
+    target_profile_specs = kwargs.pop("capacity_profiles", None)
+    target_profile_names = (
+        list(target_profile_specs)
+        if target_profile_specs is not None
+        else list(canonical_capacity_profile_names())
+    )
+    all_rows: List[Dict[str, object]] = []
+    axis_payloads: Dict[str, Dict[str, object]] = {}
+    axis_matrices: Dict[str, Dict[str, Dict[str, Dict[str, float | int | None]]]] = {}
+    for axis in axes:
+        axis_profiles = [
+            capacity_profile_for_axis(
+                axis=axis,
+                target_profile=profile,
+                base_profile=base_profile,
+            )
+            for profile in target_profile_names
+        ]
+        payload, rows = compare_capacity_sweep(
+            capacity_profiles=axis_profiles,
+            **kwargs,
+        )
+        payload["capacity_axis"] = axis
+        axis_payloads[axis] = payload
+        for row in rows:
+            annotated = dict(row)
+            annotated["capacity_axis"] = axis
+            all_rows.append(annotated)
+        matrices = payload.get("performance_matrices", {})
+        if isinstance(matrices, dict):
+            for metric_name, variant_map in matrices.items():
+                if not isinstance(variant_map, dict):
+                    continue
+                axis_metric = axis_matrices.setdefault(str(metric_name), {})
+                axis_metric[axis] = {
+                    str(variant_name): dict(profile_map)
+                    for variant_name, profile_map in variant_map.items()
+                    if isinstance(profile_map, dict)
+                }
+    return {
+        "budget_profile": next(
+            (
+                str(payload.get("budget_profile"))
+                for payload in axis_payloads.values()
+                if payload.get("budget_profile") is not None
+            ),
+            "",
+        ),
+        "capacity_axes": axes,
+        "base_profile": resolve_capacity_profile(base_profile).to_summary(),
+        "target_capacity_profiles": [
+            resolve_capacity_profile(profile).to_summary()
+            for profile in target_profile_names
+        ],
+        "architecture_variants": next(
+            (
+                list(payload.get("architecture_variants", []))
+                for payload in axis_payloads.values()
+            ),
+            [],
+        ),
+        "performance_matrices": axis_matrices,
+        "axes": axis_payloads,
+    }, all_rows
 
 
 __all__ = [
     "CAPACITY_SWEEP_VARIANT_NAMES",
+    "compare_capacity_axis_sweep",
     "compare_capacity_sweep",
     "compare_capacity_sweeps",
 ]

@@ -382,6 +382,17 @@ class EpisodeMetricAccumulatorReflexTest(unittest.TestCase):
 
         self.assertEqual(snapshot["dominant_module"], "")
 
+    def test_snapshot_owner_alignment_uses_passed_scenario(self) -> None:
+        acc = self._make_accumulator()
+        acc._current_scenario_name = "night_rest"
+
+        snapshot = acc.snapshot(scenario="olfactory_ambush")
+
+        self.assertEqual(
+            snapshot["expected_owner_modules"],
+            ["sensory_cortex", "alert_center"],
+        )
+
     def test_record_learning_accumulates_credit_weights_and_gradient_norms(self) -> None:
         acc = self._make_accumulator()
         acc.record_learning(

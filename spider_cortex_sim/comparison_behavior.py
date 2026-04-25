@@ -69,7 +69,17 @@ from .training_regimes import resolve_training_regime
 
 from .comparison_noise import with_noise_profile_metadata
 from .comparison_reward import austere_survival_gate_passed, build_reward_audit, episode_history_reward_payload, shaping_reduction_status
-from .comparison_utils import aggregate_with_uncertainty, metric_seed_values_from_payload, noise_profile_metadata, paired_seed_delta_rows, safe_float, seed_level_dicts
+from .comparison_utils import (
+    aggregate_with_uncertainty,
+    build_checkpoint_path,
+    build_run_budget_summary,
+    create_comparison_simulation,
+    metric_seed_values_from_payload,
+    noise_profile_metadata,
+    paired_seed_delta_rows,
+    safe_float,
+    seed_level_dicts,
+)
 
 def build_ablation_deltas(
     variants: Dict[str, Dict[str, object]],
@@ -478,11 +488,13 @@ def compare_behavior_suite(
             }
             sim: SpiderSimulation | None = None
             for seed in seed_values:
-                sim_budget = budget.to_summary()
-                sim_budget["resolved"]["scenario_episodes"] = run_count
-                sim_budget["resolved"]["behavior_seeds"] = list(seed_values)
-                sim_budget["resolved"]["ablation_seeds"] = list(budget.ablation_seeds)
-                sim = SpiderSimulation(
+                sim_budget = build_run_budget_summary(
+                    budget,
+                    scenario_episodes=run_count,
+                    behavior_seeds=seed_values,
+                    ablation_seeds=budget.ablation_seeds,
+                )
+                sim = create_comparison_simulation(
                     width=width,
                     height=height,
                     food_count=food_count,
@@ -509,10 +521,10 @@ def compare_behavior_suite(
                 ):
                     run_checkpoint_dir = None
                     if checkpoint_dir is not None:
-                        run_checkpoint_dir = (
-                            Path(checkpoint_dir)
-                            / "behavior_compare"
-                            / f"{profile}__{map_name}__seed_{seed}"
+                        run_checkpoint_dir = build_checkpoint_path(
+                            checkpoint_dir,
+                            "behavior_compare",
+                            f"{profile}__{map_name}__seed_{seed}",
                         )
                     sim.train(
                         budget.episodes,

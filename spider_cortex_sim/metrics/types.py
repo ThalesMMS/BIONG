@@ -162,7 +162,17 @@ class EpisodeStats:
     mean_module_credit_weights: Dict[str, float] = field(default_factory=dict)
     module_gradient_norm_means: Dict[str, float] = field(default_factory=dict)
     mean_counterfactual_credit_weights: Dict[str, float] = field(default_factory=dict)
+    route_active_modules: Dict[str, float] = field(default_factory=dict)
+    route_credit_weights: Dict[str, float] = field(default_factory=dict)
+    router_health: Dict[str, float] = field(default_factory=dict)
     motor_slip_rate: float = 0.0
     mean_orientation_alignment: float = 0.0
     mean_terrain_difficulty: float = 0.0
     terrain_slip_rates: Dict[str, float] = field(default_factory=dict)
+    gate_entropy: float = 0.0
+    dominance_rate: float = 0.0
+    effective_proposer_count: float = 0.0
+    expected_owner_modules: List[str] = field(default_factory=list)
+    owner_alignment: float = 0.0
+    owner_rank: int = 0
+    owner_suppressed_rate: float = 0.0

@@ -4,6 +4,7 @@ import unittest
 
 from spider_cortex_sim.comparison_capacity import (
     CAPACITY_SWEEP_VARIANT_NAMES,
+    compare_capacity_axis_sweep,
     compare_capacity_sweep,
     compare_capacity_sweeps,
 )
@@ -116,6 +117,40 @@ class CompareCapacitySweepsTest(unittest.TestCase):
                 names=("night_rest",),
                 seeds=(7,),
                 architecture_variants=("modular_full", "modular_full"),
+            )
+
+    def test_capacity_axis_sweep_annotates_axis_and_profiles(self) -> None:
+        payload, rows = compare_capacity_axis_sweep(
+            episodes=0,
+            evaluation_episodes=0,
+            names=("night_rest",),
+            seeds=(7,),
+            capacity_axes=("action_center",),
+            capacity_profiles=("small",),
+            architecture_variants=("modular_full",),
+        )
+
+        self.assertEqual(payload["capacity_axes"], ["action_center"])
+        self.assertIn("action_center", payload["axes"])
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["capacity_axis"], "action_center")
+            self.assertEqual(row["capacity_profile"], "action_center_small_from_current")
+        profile = payload["axes"]["action_center"]["capacity_profiles"][0]
+        self.assertEqual(profile["profile"], "action_center_small_from_current")
+        self.assertEqual(profile["action_center_hidden_dim"], 20)
+        self.assertEqual(profile["arbitration_hidden_dim"], 32)
+        self.assertEqual(profile["motor_hidden_dim"], 32)
+        self.assertEqual(profile["scale_factor"], 1.0)
+
+    def test_capacity_axis_sweep_rejects_duplicate_axes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unique capacity axes"):
+            compare_capacity_axis_sweep(
+                episodes=0,
+                evaluation_episodes=0,
+                names=("night_rest",),
+                seeds=(7,),
+                capacity_axes=("motor", "motor"),
             )
 
 

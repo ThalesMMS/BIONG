@@ -435,20 +435,28 @@ def _variant_with_minimal_reflex_support(
     
     Parameters:
         payload (Mapping[str, object]): An ablation variant payload, optionally containing a
-            `without_reflex_support` mapping with alternative `summary`, `suite`, or
-            `legacy_scenarios` entries.
+            `without_reflex_support` mapping with alternative `config`, `summary`,
+            `suite`, or `legacy_scenarios` entries.
     
     Returns:
         dict[str, object]: A shallow copy of `payload` modified so that `eval_reflex_scale`
         is set to `0.0`, `primary_evaluation` is `"without_reflex_support"`, and when
-        `without_reflex_support` provides `summary`, `suite`, or `legacy_scenarios` those
-        entries are promoted into the returned mapping.
+        `without_reflex_support` provides `config`, `summary`, `suite`,
+        `legacy_scenarios`, `seed_level`, or `uncertainty`, those entries are promoted
+        into the returned mapping.
     """
     result = dict(payload)
     without_reflex = payload.get("without_reflex_support")
     if not isinstance(without_reflex, Mapping):
         return result
-    for key in ("summary", "suite", "legacy_scenarios", "seed_level", "uncertainty"):
+    for key in (
+        "config",
+        "summary",
+        "suite",
+        "legacy_scenarios",
+        "seed_level",
+        "uncertainty",
+    ):
         if key in without_reflex:
             value = without_reflex[key]
             result[key] = dict(value) if isinstance(value, Mapping) else value

@@ -155,6 +155,7 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         map_template="central_burrow",
         setup=_night_rest,
         score_episode=_score_night_rest,
+        expected_owner_modules=("sleep_center",),
     ),
     "predator_edge": ScenarioSpec(
         name="predator_edge",
@@ -202,6 +203,7 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         setup=_open_field_foraging,
         score_episode=_score_open_field_foraging,
         probe_type=ProbeType.CAPABILITY_PROBE.value,
+        expected_owner_modules=("hunger_center",),
         target_skill="food_vector_acquisition_exposed",
         geometry_assumptions=(
             "Food spawn is selected to provide a positive initial food signal from shelter "
@@ -341,6 +343,7 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         setup=_food_deprivation,
         score_episode=_score_food_deprivation,
         probe_type=ProbeType.CAPABILITY_PROBE.value,
+        expected_owner_modules=("hunger_center",),
         target_skill="hunger_driven_commitment",
         geometry_assumptions="Food at calibrated 4-6 Manhattan distance; homeostatic death timer ~12-15 ticks at hunger 0.96; tests timing not just direction",
         benchmark_tier=BenchmarkTier.CAPABILITY.value,
@@ -376,6 +379,7 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         map_template="entrance_funnel",
         setup=_olfactory_ambush,
         score_episode=_score_olfactory_ambush,
+        expected_owner_modules=("sensory_cortex", "alert_center"),
     ),
     "visual_hunter_open_field": ScenarioSpec(
         name="visual_hunter_open_field",
@@ -390,6 +394,7 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         map_template="exposed_feeding_ground",
         setup=_visual_hunter_open_field,
         score_episode=_score_visual_hunter_open_field,
+        expected_owner_modules=("visual_cortex", "alert_center"),
     ),
     "food_vs_predator_conflict": ScenarioSpec(
         name="food_vs_predator_conflict",
@@ -418,6 +423,7 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         map_template="central_burrow",
         setup=_sleep_vs_exploration_conflict,
         score_episode=_score_sleep_vs_exploration_conflict,
+        expected_owner_modules=("sleep_center",),
     ),
 }
 

@@ -7,6 +7,12 @@ Read the ladder and this workflow together:
 - `docs/architectural_ladder.md` is the diagnostic framework for interpreting where an ablation regression likely comes from as modularity increases
 - `docs/ablation_workflow.md` is the detailed execution and reporting guide for canonical variants, competence gap, shaping gap, and benchmark-of-record procedures
 
+## Prerequisites
+
+Python 3.10+ is required for the simulator CLI. Command examples use
+`python3.10` explicitly; if your supported interpreter is newer, substitute its
+versioned command, such as `python3.11`.
+
 ## Canonical Variants
 
 | Variant | Purpose |
@@ -176,7 +182,7 @@ Frozen module status is recorded in simulation summaries under the top-level `"f
 Run the publication-grade architecture suite and export `summary` plus CSV:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --checkpoint-selection best \
   --ablation-suite \
@@ -188,7 +194,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Run a fast iterative-development pass when you want quick local feedback rather than the benchmark of record:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile dev \
   --ablation-suite \
   --full-summary
@@ -197,7 +203,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Run only the direct A0 baseline:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --ablation-variant true_monolithic_policy \
   --full-summary
 ```
@@ -207,7 +213,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Run a single variant against the modular no-reflex reference in one specific scenario for architecture discussion:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --checkpoint-selection best \
   --ablation-variant monolithic_policy \
@@ -218,7 +224,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Run a custom reflex schedule and record the post-training comparison with `eval_reflex_scale=0.0` during iterative development:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile dev \
   --episodes 12 \
   --eval-episodes 2 \
@@ -243,7 +249,7 @@ Training regimes package the reflex schedule, optional no-reflex fine-tuning pha
 Named-regime CLI example:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile dev \
   --training-regime reflex_annealed \
   --behavior-suite \
@@ -255,7 +261,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Experiment-of-record shortcut:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --experiment-of-record \
   --behavior-suite \
@@ -292,7 +298,7 @@ Teacher-student flow:
 Teacher example:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile dev \
   --ablation-variant true_monolithic_policy \
   --checkpoint-selection best \
@@ -303,7 +309,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Student example:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile dev \
   --training-regime distillation \
   --distillation-teacher-checkpoint checkpoints/a0_teacher/best \
@@ -345,7 +351,7 @@ Use `direct` mode when selecting checkpoints for no-reflex claims, especially wi
 Direct-penalty CLI example:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --checkpoint-selection best \
   --checkpoint-penalty-mode direct \
@@ -362,7 +368,7 @@ The repository also exposes a separate workflow for testing whether a trained ch
 Smoke command:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile smoke \
   --learning-evidence \
   --behavior-scenario night_rest \
@@ -372,7 +378,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Canonical short-vs-long command:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile smoke \
   --learning-evidence \
   --learning-evidence-long-budget-profile report \
@@ -385,7 +391,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Experiment-of-record no-reflex benchmark:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --experiment-of-record \
   --behavior-suite \
@@ -429,7 +435,7 @@ The claim-test suite is the top-level experimental gate for the repository. Abla
 CLI entry point:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --claim-test-suite \
   --summary results.json
 ```
@@ -463,7 +469,7 @@ Purpose:
 CLI entry point:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile smoke \
   --noise-robustness \
   --behavior-scenario night_rest \
@@ -496,7 +502,7 @@ Beyond structural ablations, the repository treats reward shaping as a first-cla
 Smoke command:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --episodes 0 \
   --eval-episodes 0 \
   --scenario-episodes 1 \
@@ -554,7 +560,7 @@ After generating `summary`, `trace`, and `behavior_csv`, the offline runner can 
 Example:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile dev \
   --ablation-suite \
   --summary spider_ablation_summary.json \
@@ -563,7 +569,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
   --behavior-csv spider_ablation_rows.csv \
   --full-summary
 
-PYTHONPATH=. python3 -m spider_cortex_sim.offline_analysis \
+PYTHONPATH=. python3.10 -m spider_cortex_sim.offline_analysis \
   --summary spider_ablation_summary.json \
   --trace spider_ablation_trace.jsonl \
   --behavior-csv spider_ablation_rows.csv \
@@ -573,7 +579,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim.offline_analysis \
 For the benchmark-of-record path, write the package during the simulation run:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --checkpoint-selection best \
   --ablation-suite \
@@ -699,7 +705,7 @@ The main runner accepts `--curriculum-profile ecological_v1` or `--curriculum-pr
 Short example:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile smoke \
   --curriculum-profile ecological_v2 \
   --behavior-csv spider_curriculum_rows.csv \
@@ -739,27 +745,27 @@ Canonical commands:
 
 ```bash
 # sanity / CI
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile smoke \
   --ablation-variant monolithic_policy \
   --behavior-scenario night_rest \
   --full-summary
 
 # fast local iteration (not the benchmark of record)
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile dev \
   --ablation-suite \
   --full-summary
 
 # publication-grade / architecture claims benchmark of record
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --checkpoint-selection best \
   --ablation-suite \
   --full-summary
 
 # publication-grade / no-reflex learning experiment of record
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --experiment-of-record \
   --behavior-suite \
@@ -773,7 +779,7 @@ The primary benchmark is always the self-sufficient result: JSON blocks under `e
 For no-reflex learning claims, use the experiment-of-record workflow:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --experiment-of-record \
   --behavior-suite \
@@ -795,7 +801,7 @@ For no-reflex learning claims, the experiment-of-record workflow is `--experimen
 Canonical benchmark-of-record command:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile paper \
   --checkpoint-selection best \
   --ablation-suite \
@@ -824,7 +830,7 @@ This section remains useful for iterative development and quick local check-ins.
 Command used to generate the table below:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+PYTHONPATH=. python3.10 -m spider_cortex_sim \
   --budget-profile dev \
   --ablation-suite \
   --full-summary

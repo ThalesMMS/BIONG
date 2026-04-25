@@ -194,6 +194,17 @@ class SimulationSummaryMixin:
             "mean_counterfactual_credit_weights": {
                 name: 0.0 for name in PROPOSAL_SOURCE_NAMES
             },
+            "route_active_modules": {
+                name: 0.0 for name in PROPOSAL_SOURCE_NAMES
+            },
+            "route_credit_weights": {
+                name: 0.0 for name in PROPOSAL_SOURCE_NAMES
+            },
+            "router_health": {
+                "gate_entropy": 0.0,
+                "dominance_rate": 0.0,
+                "effective_proposer_count": 0.0,
+            },
             "mean_motor_slip_rate": 0.0,
             "mean_orientation_alignment": 0.0,
             "mean_terrain_difficulty": 0.0,
@@ -204,6 +215,13 @@ class SimulationSummaryMixin:
             },
             "mean_dominant_module_share": 0.0,
             "mean_effective_module_count": 0.0,
+            "mean_gate_entropy": 0.0,
+            "mean_dominance_rate": 0.0,
+            "mean_effective_proposer_count": 0.0,
+            "expected_owner_modules": [],
+            "owner_alignment": 0.0,
+            "owner_rank": 0.0,
+            "owner_suppressed_rate": 0.0,
             "mean_module_agreement_rate": 0.0,
             "mean_module_disagreement_rate": 0.0,
             "episodes_detail": [],
@@ -301,13 +319,22 @@ class SimulationSummaryMixin:
                     # Intentionally reflect the realized runtime config, which can
                     # diverge from the preset defaults after resolution/overrides.
                     "module_hidden_dims": dict(self.brain.config.module_hidden_dims),
+                    "action_center_hidden_dim": int(
+                        self.brain.config.action_center_hidden_dim or 0
+                    ),
+                    "arbitration_hidden_dim": int(
+                        self.brain.config.arbitration_hidden_dim or 0
+                    ),
+                    "motor_hidden_dim": int(
+                        self.brain.config.motor_hidden_dim or 0
+                    ),
                     "integration_hidden_dim": int(
                         self.brain.config.integration_hidden_dim or 0
                     ),
                 },
                 "world": {
                     "width": self.world.width,
-                    "height": self.world.height,
+
                     "food_count": self.world.food_count,
                     "day_length": self.world.day_length,
                     "night_length": self.world.night_length,

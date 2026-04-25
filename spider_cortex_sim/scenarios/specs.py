@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+import re
 from typing import Callable, Dict, Sequence
 
 from ..metrics import BehaviorCheckSpec, BehavioralEpisodeScore, EpisodeStats
@@ -22,6 +23,7 @@ FAST_VISUAL_HUNTER_PROFILE = replace(
 NIGHT_REST_INITIAL_SLEEP_DEBT = 0.60
 FOOD_DEPRIVATION_INITIAL_HUNGER = 0.96
 SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT = 0.92
+MODULE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
 
 class ProbeType(str, Enum):
@@ -55,12 +57,24 @@ class ScenarioSpec:
     geometry_assumptions: str | None = None
     benchmark_tier: str | BenchmarkTier = BenchmarkTier.PRIMARY.value
     acceptable_partial_progress: str | None = None
+    expected_owner_modules: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         """
-        Normalize and validate `probe_type` and `benchmark_tier` on initialization.
+        Normalize and validate probe and benchmark fields after dataclass initialization.
         
-        Converts enum instances for `probe_type` and `benchmark_tier` to their string values, verifies each is one of the allowed enum values, and for capability probes enforces that `target_skill`, `geometry_assumptions`, and `acceptable_partial_progress` are present and non-empty and that `benchmark_tier` equals "capability". Raises `ValueError` with a descriptive message if any validation fails.
+        Converts `probe_type` and `benchmark_tier` enum instances to their
+        string values, verifies each is one of the allowed enum values, enforces
+        that capability probes provide non-empty `target_skill`,
+        `geometry_assumptions`, and `acceptable_partial_progress` and that
+        `benchmark_tier` equals "capability", and validates and normalizes
+        `expected_owner_modules` to an immutable tuple of strings.
+        
+        Raises:
+            ValueError: If `probe_type` or `benchmark_tier` is not an allowed
+                value, if a capability probe is missing required metadata or has
+                an incorrect `benchmark_tier`, or if `expected_owner_modules`
+                is malformed or contains non-string entries.
         """
         probe_type = (
             self.probe_type.value
@@ -112,6 +126,51 @@ class ScenarioSpec:
                 )
         object.__setattr__(self, "probe_type", probe_type)
         object.__setattr__(self, "benchmark_tier", benchmark_tier)
+        expected_owner_modules = self.expected_owner_modules
+        if expected_owner_modules is None:
+            raise ValueError(
+                "expected_owner_modules must be a sequence of module names."
+            )
+        if isinstance(expected_owner_modules, str):
+            raise ValueError(
+                "expected_owner_modules must be a sequence of module names, "
+                "not a string."
+            )
+        if isinstance(expected_owner_modules, bytes):
+            raise ValueError(
+                "expected_owner_modules must be a sequence of module names, "
+                "not bytes."
+            )
+        try:
+            expected_owner_iter = iter(expected_owner_modules)
+        except TypeError as exc:
+            raise ValueError(
+                "expected_owner_modules must be an iterable sequence of module names."
+            ) from exc
+        normalized_expected_owner_modules: list[str] = []
+        seen_expected_owner_modules: set[str] = set()
+        for name in expected_owner_iter:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(
+                    "expected_owner_modules entries must be non-empty strings."
+                )
+            module_name = name.strip()
+            if MODULE_NAME_PATTERN.fullmatch(module_name) is None:
+                raise ValueError(
+                    "expected_owner_modules entries must start with a letter or "
+                    "underscore and contain only letters, digits, '.', or '_'."
+                )
+            if module_name in seen_expected_owner_modules:
+                raise ValueError(
+                    f"expected_owner_modules contains duplicate module {module_name!r}."
+                )
+            seen_expected_owner_modules.add(module_name)
+            normalized_expected_owner_modules.append(module_name)
+        object.__setattr__(
+            self,
+            "expected_owner_modules",
+            tuple(normalized_expected_owner_modules),
+        )
 
 __all__ = [
     'FAST_VISUAL_HUNTER_PROFILE',

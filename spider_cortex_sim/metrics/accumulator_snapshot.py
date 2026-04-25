@@ -9,6 +9,7 @@ from statistics import mean
 from typing import Dict, List, Sequence
 
 from ..ablations import PROPOSAL_SOURCE_NAMES, REFLEX_MODULE_NAMES
+from ..owner_metadata import owner_alignment_metrics
 from .types import (
     EpisodeStats,
     PREDATOR_RESPONSE_END_THRESHOLD,
@@ -22,7 +23,7 @@ from .accumulator_math import _clamp_unit_interval, _softmax_probabilities, jens
 
 
 class AccumulatorSnapshotMixin:
-    def snapshot(self) -> Dict[str, object]:
+    def snapshot(self, scenario: str | None = None) -> Dict[str, object]:
         """
         Compute a comprehensive snapshot of derived episode metrics and aggregated counters.
         
@@ -78,6 +79,14 @@ class AccumulatorSnapshotMixin:
         mean_counterfactual_credit_weights = {
             name: float(self.counterfactual_credit_weight_sums[name] / learning_total)
             for name in self.counterfactual_credit_weight_sums
+        }
+        route_active_modules = {
+            name: float(self.route_active_module_sums[name] / learning_total)
+            for name in self.route_active_module_sums
+        }
+        route_credit_weights = {
+            name: float(self.route_credit_weight_sums[name] / learning_total)
+            for name in self.route_credit_weight_sums
         }
         dominant_module_distribution = {
             name: float(self.dominant_module_counts[name] / decision_total)
@@ -211,6 +220,18 @@ class AccumulatorSnapshotMixin:
             if proposer_divergence_by_module
             else 0.0
         )
+        owner_alignment = owner_alignment_metrics(
+            scenario,
+            dominant_module_distribution=dominant_module_distribution,
+            module_contribution_share=module_contribution_share,
+        )
+        router_health = {
+            "gate_entropy": float(self.gate_entropy_sum / decision_total),
+            "dominance_rate": float(self.dominance_rate_sum / decision_total),
+            "effective_proposer_count": float(
+                self.effective_proposer_count_sum / decision_total
+            ),
+        }
         return {
             "night_ticks": int(self.night_ticks),
             "night_shelter_ticks": int(self.night_shelter_ticks),
@@ -275,6 +296,9 @@ class AccumulatorSnapshotMixin:
             "mean_module_credit_weights": mean_module_credit_weights,
             "module_gradient_norm_means": module_gradient_norm_means,
             "mean_counterfactual_credit_weights": mean_counterfactual_credit_weights,
+            "route_active_modules": route_active_modules,
+            "route_credit_weights": route_credit_weights,
+            "router_health": router_health,
             "motor_slip_rate": float(
                 self.motor_slip_steps / self.motor_execution_steps
                 if self.motor_execution_steps
@@ -299,6 +323,13 @@ class AccumulatorSnapshotMixin:
             "effective_module_count": float(
                 self.effective_module_count_sum / decision_total
             ),
+            "gate_entropy": router_health["gate_entropy"],
+            "dominance_rate": router_health["dominance_rate"],
+            "effective_proposer_count": router_health["effective_proposer_count"],
+            "expected_owner_modules": list(owner_alignment["expected_owner_modules"]),
+            "owner_alignment": float(owner_alignment["owner_alignment"]),
+            "owner_rank": int(owner_alignment["owner_rank"]),
+            "owner_suppressed_rate": float(owner_alignment["owner_suppressed_rate"]),
             "module_agreement_rate": float(
                 self.module_agreement_rate_sum / decision_total
             ),
@@ -318,23 +349,27 @@ class AccumulatorSnapshotMixin:
         state: object,
     ) -> EpisodeStats:
         """
-        Create an EpisodeStats containing consolidated metrics and final-state fields for an episode.
+        Builds an EpisodeStats summary combining final state fields and derived snapshot metrics for an episode.
         
         Parameters:
             episode (int): Episode index.
             seed (int): Random seed used for the episode.
             training (bool): Whether the episode was collected in training mode.
-            scenario (str | None): Optional scenario identifier.
+            scenario (str | None): Optional scenario identifier; used for scenario-conditioned alignment metrics.
             total_reward (float): Cumulative reward for the episode.
-            state (object): Final environment state exposing numeric attributes used for summary:
-                steps_alive, food_eaten, sleep_events, shelter_entries,
-                alert_events, predator_contacts, predator_sightings, predator_escapes,
-                hunger, fatigue, sleep_debt, and health.
+            state (object): Final environment state exposing numeric attributes used for the summary:
+                steps_alive, food_eaten, sleep_events, shelter_entries, alert_events,
+                predator_contacts, predator_sightings, predator_escapes,
+                hunger, fatigue, sleep_debt, health.
         
         Returns:
-            EpisodeStats: Consolidated episode summary including episode metadata (episode, seed, training, scenario, total_reward), event counters (steps, food/sleep/shelter/predator counts, alert events), night summaries (ticks, per-role ticks and distribution, shelter occupancy and stillness rates), predator statistics (state tick counts, mode transition count, dominant state, per-type contacts/escapes, response event counts and mean latencies, module-response-by-predator-type distributions), distance deltas, mean sleep debt, reward component totals, reflex and per-module metrics (usage, override, dominance, contribution shares, learning/gradient summaries), motor/terrain slip metrics, dominant module statistics, final physiological metrics (hunger, fatigue, sleep_debt, health) and an alive flag.
+            EpisodeStats: Consolidated episode summary containing metadata, final environment/state fields,
+            and derived snapshot metrics including night summaries, predator statistics, proposer/representation
+            diagnostics, reflex/module usage and learning aggregates, router health and route diagnostics,
+            motor/terrain metrics, dominant-module statistics, reward component totals, and owner-alignment
+            metrics.
         """
-        snapshot = self.snapshot()
+        snapshot = self.snapshot(scenario=scenario)
         night_ticks = max(0, int(snapshot["night_ticks"]))
         night_shelter_occupancy_rate = (
             self.night_shelter_ticks / night_ticks if night_ticks else 0.0
@@ -477,6 +512,18 @@ class AccumulatorSnapshotMixin:
                     "mean_counterfactual_credit_weights"
                 ].items()
             },
+            route_active_modules={
+                name: float(value)
+                for name, value in snapshot["route_active_modules"].items()
+            },
+            route_credit_weights={
+                name: float(value)
+                for name, value in snapshot["route_credit_weights"].items()
+            },
+            router_health={
+                str(name): float(value)
+                for name, value in snapshot["router_health"].items()
+            },
             motor_slip_rate=float(snapshot["motor_slip_rate"]),
             mean_orientation_alignment=float(snapshot["mean_orientation_alignment"]),
             mean_terrain_difficulty=float(snapshot["mean_terrain_difficulty"]),
@@ -487,6 +534,13 @@ class AccumulatorSnapshotMixin:
             dominant_module=str(snapshot["dominant_module"]),
             dominant_module_share=float(snapshot["dominant_module_share"]),
             effective_module_count=float(snapshot["effective_module_count"]),
+            gate_entropy=float(snapshot["gate_entropy"]),
+            dominance_rate=float(snapshot["dominance_rate"]),
+            effective_proposer_count=float(snapshot["effective_proposer_count"]),
+            expected_owner_modules=list(snapshot["expected_owner_modules"]),
+            owner_alignment=float(snapshot["owner_alignment"]),
+            owner_rank=int(snapshot["owner_rank"]),
+            owner_suppressed_rate=float(snapshot["owner_suppressed_rate"]),
             module_agreement_rate=float(snapshot["module_agreement_rate"]),
             module_disagreement_rate=float(snapshot["module_disagreement_rate"]),
         )

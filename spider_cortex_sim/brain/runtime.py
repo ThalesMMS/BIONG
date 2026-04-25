@@ -159,6 +159,10 @@ class BrainRuntimeMixin:
             dominant_module=module_name,
             dominant_module_share=1.0,
             effective_module_count=1.0,
+            gate_entropy=0.0,
+            dominance_rate=1.0,
+            effective_proposer_count=1.0,
+            module_counts={module_name: 1},
             module_agreement_rate=1.0,
             module_disagreement_rate=0.0,
         )
@@ -185,6 +189,68 @@ class BrainRuntimeMixin:
         if not math.isfinite(value):
             raise ValueError("non-finite reflex scale")
         self.current_reflex_scale = max(0.0, value)
+
+    def _act_with_training(
+        self,
+        observation: Dict[str, np.ndarray],
+        bus: MessageBus | None,
+        *,
+        sample: bool,
+        policy_mode: str,
+        training: bool,
+    ) -> BrainStep:
+        try:
+            return self.act(
+                observation,
+                bus,
+                sample=sample,
+                policy_mode=policy_mode,
+                training=training,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument 'training'" not in str(exc):
+                raise
+            return self.act(
+                observation,
+                bus,
+                sample=sample,
+                policy_mode=policy_mode,
+            )
+
+    def act_exploration(
+        self,
+        observation: Dict[str, np.ndarray],
+        bus: MessageBus | None = None,
+        *,
+        policy_mode: str = "normal",
+    ) -> BrainStep:
+        return self._act_with_training(
+            observation, bus, sample=True, policy_mode=policy_mode, training=False
+        )
+
+    def act_inference(
+        self,
+        observation: Dict[str, np.ndarray],
+        bus: MessageBus | None = None,
+        *,
+        sample: bool = False,
+        policy_mode: str = "normal",
+    ) -> BrainStep:
+        return self._act_with_training(
+            observation, bus, sample=sample, policy_mode=policy_mode, training=False
+        )
+
+    def act_train(
+        self,
+        observation: Dict[str, np.ndarray],
+        bus: MessageBus | None = None,
+        *,
+        sample: bool = True,
+        policy_mode: str = "normal",
+    ) -> BrainStep:
+        return self._act_with_training(
+            observation, bus, sample=sample, policy_mode=policy_mode, training=True
+        )
 
     def _effective_reflex_scale(self, module_name: str) -> float:
         """
@@ -714,6 +780,7 @@ class BrainRuntimeMixin:
         return architecture_signature(
             proposal_backend=self.config.architecture,
             proposal_order=self._proposal_stage_names(),
+            module_variants=getattr(self.config, "module_variants", None),
             learned_arbitration=(
                 self.config.use_learned_arbitration and self.arbitration_network is not None
             ),
@@ -722,6 +789,8 @@ class BrainRuntimeMixin:
             arbitration_regularization_weight=self.arbitration_regularization_weight,
             capacity_profile_name=self.config.capacity_profile_name,
             module_hidden_dims=self.config.module_hidden_dims,
+            action_center_hidden_dim=self.config.action_center_hidden_dim,
+            motor_hidden_dim=self.config.motor_hidden_dim,
             integration_hidden_dim=self.config.integration_hidden_dim,
             monolithic_hidden_dim=self.config.monolithic_hidden_dim,
             capacity_profile=self.config.capacity_profile.to_summary(),

@@ -15,7 +15,10 @@ from ..budget_profiles import (
     CHECKPOINT_SELECTION_NAMES,
     canonical_budget_profile_names,
 )
-from ..capacity_profiles import canonical_capacity_profile_names
+from ..capacity_profiles import (
+    canonical_capacity_axis_names,
+    canonical_capacity_profile_names,
+)
 from ..checkpointing import CHECKPOINT_PENALTY_MODE_NAMES
 from ..claim_tests import claim_test_names
 from ..curriculum import CURRICULUM_PROFILE_NAMES
@@ -66,12 +69,12 @@ def parse_module_reflex_scales(values: list[str] | None) -> dict[str, float]:
 
 def build_parser() -> argparse.ArgumentParser:
     """
-    Builds the command-line argument parser for the SpiderSimulation CLI.
-
-    Configures options for training/evaluation sizing and budget, world and map configuration, reward/operational/noise profiles, learning hyperparameters and reflex/module overrides, deterministic scenarios and behavioral evaluation (including ablation, comparison, claim-test, and noise-robustness workflows), checkpointing controls, GUI/rendering, model load/save, and summary/trace/CSV persistence and debug flags.
-
+    Builds and returns the command-line ArgumentParser configured for the SpiderSimulation CLI.
+    
+    The parser exposes options for training and evaluation sizing, world and map configuration, reward/operational/noise/capacity profiles, learning and distillation hyperparameters, global and per-module reflex scaling, scenario and behavioral evaluation (including suites, seeds, comparisons, ablations, and claim tests), checkpointing and checkpoint-selection penalties, experiment/benchmark workflows, model persistence, rendering/GUI and output paths (summary, trace, CSV), and miscellaneous debug and reporting flags.
+    
     Returns:
-        argparse.ArgumentParser: A configured ArgumentParser for the SpiderSimulation command-line interface.
+        argparse.ArgumentParser: A fully configured ArgumentParser for the SpiderSimulation command-line interface.
     """
     parser = argparse.ArgumentParser(
         description="Online reward-based training for independent cortical modules in a simulated spider."
@@ -366,6 +369,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--capacity-sweep",
         action="store_true",
         help="Sweep capacity presets across the A0/A1/A2/A3/A4 architecture ladder.",
+    )
+    parser.add_argument(
+        "--capacity-axis-sweep",
+        nargs="*",
+        choices=list(canonical_capacity_axis_names()),
+        default=None,
+        help=(
+            "Sweep capacity by axis across the A0/A1/A2/A3/A4 ladder. "
+            "Available axes: "
+            + " ".join(canonical_capacity_axis_names())
+            + ". Pass the flag with no values to sweep all axes."
+        ),
     )
     parser.add_argument(
         "--ablation-variant",

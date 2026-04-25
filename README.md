@@ -28,11 +28,24 @@ See [RELEASE.md](RELEASE.md) for the checklist and release posture details,
 If you want the shortest trustworthy first run, use the smoke budget from the
 repository root:
 
-Python 3.10+ is required for the full simulator and CLI. The commands below
-assume `python3` resolves to Python 3.10 or newer.
+Python 3.10+ is required for the full simulator and CLI. The command examples
+use `PYTHON_BIN` so the interpreter is selected in one place:
 
 ```bash
-python3 -m spider_cortex_sim --budget-profile smoke --summary spider_summary.json
+export PYTHON_BIN="${PYTHON_BIN:-python3.10}"
+$PYTHON_BIN --version
+```
+
+If that interpreter is unavailable, install Python 3.10+ or set `PYTHON_BIN` to
+your available versioned interpreter, such as `python3.11`.
+
+The README command examples assume you run them from the repository root. From
+there, Python can import `spider_cortex_sim` without a `PYTHONPATH=.` prefix. If
+you run commands from another directory, set `PYTHONPATH` to the repository root
+first.
+
+```bash
+$PYTHON_BIN -m spider_cortex_sim --budget-profile smoke --summary spider_summary.json
 ```
 
 This runs a short training-plus-evaluation cycle and writes
@@ -58,7 +71,21 @@ deeper inspection.
 - Run claim tests: see [Claim Test Suite](#claim-test-suite)
 - Run ablations or learning-evidence workflows: see [Ablations And Learning Evidence](#ablations-and-learning-evidence) and [docs/ablation_workflow.md](docs/ablation_workflow.md)
 - Diagnose progressive modularity before adding new centers: see [docs/architectural_ladder.md](docs/architectural_ladder.md)
-- Generate an offline analysis bundle: `python3 -m spider_cortex_sim.offline_analysis --summary spider_summary.json --output-dir ./report/`; see [Offline Analysis](#offline-analysis)
+- Generate an offline analysis bundle: `$PYTHON_BIN -m spider_cortex_sim.offline_analysis --summary spider_summary.json --output-dir ./report/`; see [Offline Analysis](#offline-analysis)
+
+### Support And Reporting
+
+- Usage or interpretation questions: open a GitHub issue with a `[Question]`
+  prefix; see [SUPPORT.md](SUPPORT.md).
+- Bugs: use the bug report issue template and include reproduction steps,
+  environment details, and relevant output.
+- Feature requests or research ideas: use the feature request / research idea
+  issue template and explain the motivation and validation path.
+- Security-sensitive findings: do not open a public issue; report privately
+  through GitHub Security or contact `ThalesMMS` through GitHub. See
+  [SECURITY.md](SECURITY.md).
+- Contributions: read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull
+  request.
 
 The current version centers on three structural changes:
 
@@ -235,8 +262,18 @@ Scenario setup code can also assign explicit `LizardState(profile=...)` instance
 Create and activate a virtual environment:
 
 ```bash
-python3 -m venv venv
+export PYTHON_BIN="${PYTHON_BIN:-python3.10}"
+$PYTHON_BIN --version
+$PYTHON_BIN -m venv venv
 source venv/bin/activate
+```
+
+On Windows, use the Python launcher:
+
+```cmd
+py -3.10 --version
+py -3.10 -m venv venv
+venv\Scripts\activate
 ```
 
 Install dependencies:
@@ -248,6 +285,8 @@ pip install -r requirements.txt
 Notes:
 
 - Python 3.10+ is required for the simulator and CLI entrypoints
+- If your supported interpreter is newer, substitute its versioned command
+  such as `python3.11`
 - `numpy` is required
 - `pygame-ce` is optional and only needed for the graphical interface (`--gui`)
 
@@ -257,13 +296,13 @@ Budget profiles are the recommended way to run reproducible experiments. Start
 with the smoke profile for a first local run:
 
 ```bash
-python3 -m spider_cortex_sim --budget-profile smoke
+$PYTHON_BIN -m spider_cortex_sim --budget-profile smoke
 ```
 
 Save a summary and trace:
 
 ```bash
-python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile smoke \
   --summary spider_summary.json \
   --trace spider_trace.jsonl
@@ -272,21 +311,21 @@ python3 -m spider_cortex_sim \
 Render the final evaluation episode in ASCII:
 
 ```bash
-python3 -m spider_cortex_sim --budget-profile smoke --render-eval
+$PYTHON_BIN -m spider_cortex_sim --budget-profile smoke --render-eval
 ```
 
 Move to the `dev` budget when you want a slightly stronger reproducible local
 benchmark:
 
 ```bash
-python3 -m spider_cortex_sim --budget-profile dev --summary spider_summary.json
+$PYTHON_BIN -m spider_cortex_sim --budget-profile dev --summary spider_summary.json
 ```
 
 Use explicit episode and step flags only when you want a custom non-profiled
 run:
 
 ```bash
-python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --episodes 120 \
   --eval-episodes 3 \
   --max-steps 90
@@ -297,7 +336,7 @@ python3 -m spider_cortex_sim \
 Train with the ecological profile and an alternate map:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --episodes 120 \
   --eval-episodes 3 \
   --max-steps 90 \
@@ -432,7 +471,7 @@ should treat the relevant rest or sleep terms as reduction risks.
 Run a single scenario:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --episodes 0 \
   --eval-episodes 0 \
   --scenario night_rest
@@ -441,7 +480,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Run the full scenario suite:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --episodes 0 \
   --eval-episodes 0 \
   --scenario-suite
@@ -485,7 +524,7 @@ Multi-predator scenario intent:
 Run the full behavioral suite with explicit scorecards:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --episodes 0 \
   --eval-episodes 0 \
   --behavior-suite \
@@ -495,7 +534,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Run one behavioral scenario and export flat CSV:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --episodes 0 \
   --eval-episodes 0 \
   --behavior-scenario night_rest \
@@ -567,7 +606,7 @@ Those workflows provide the raw evidence. The claim test suite is the formal gat
 Run the canonical claim suite and write the full experiment record to JSON:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --claim-test-suite \
   --summary results.json
 ```
@@ -604,7 +643,7 @@ Generic benchmarks such as the ablation suite and the noise matrix still provide
 ## Graphical Interface (Pygame)
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --gui \
   --episodes 120 \
   --eval-episodes 3 \
@@ -633,7 +672,7 @@ Useful shortcuts:
 Train and save:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --episodes 120 --eval-episodes 3 --max-steps 90 \
   --save-brain spider_brain
 ```
@@ -641,7 +680,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Load and continue training:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --episodes 60 --eval-episodes 3 --max-steps 90 \
   --load-brain spider_brain \
   --save-brain spider_brain
@@ -650,7 +689,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Load only selected modules:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --episodes 60 --eval-episodes 3 --max-steps 90 \
   --load-brain spider_brain \
   --load-modules visual_cortex hunger_center
@@ -670,7 +709,7 @@ Because interface descriptions are part of the current fingerprinted metadata, t
 Run the full suite:
 
 ```bash
-PYTHONPATH=. python3 -m unittest discover -s tests -v
+$PYTHON_BIN -m unittest discover -s tests -v
 ```
 
 The tests cover:
@@ -743,17 +782,17 @@ Canonical commands:
 
 ```bash
 # smoke: sanity / CI
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile smoke \
   --behavior-suite --full-summary
 
 # dev: fast local benchmark
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile dev \
   --ablation-suite --full-summary
 
 # report: stronger benchmark + automatic checkpoint selection
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile report \
   --checkpoint-selection best \
   --ablation-suite --full-summary
@@ -766,7 +805,7 @@ Without `--budget-profile`, the run still works in `custom` mode and records the
 Use the `paper` budget with best-checkpoint selection for publication-facing architecture claims. Add `--benchmark-package` to write a reproducible package containing the manifest, resolved configuration, seed-level rows, uncertainty-aware aggregate tables, claim-test tables, effect-size tables, reports, plots, supporting CSVs, and limitations.
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile paper \
   --checkpoint-selection best \
   --ablation-suite \
@@ -785,7 +824,7 @@ Uncertainty reporting is seed-level. Confidence intervals are percentile bootstr
 Compare reward profiles on the current map:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile dev \
   --compare-profiles --full-summary
 ```
@@ -793,7 +832,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Compare maps under the current reward profile:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile dev \
   --reward-profile ecological \
   --compare-maps --full-summary
@@ -802,7 +841,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Compare the behavioral suite across profiles:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile dev \
   --behavior-compare-profiles --full-summary
 ```
@@ -810,7 +849,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Compare the behavioral suite across maps and export CSV:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile dev \
   --reward-profile ecological \
   --behavior-compare-maps \
@@ -825,7 +864,7 @@ The shaping audit uses `austere` as the minimal baseline and records deltas agai
 The project includes a separate runner that transforms `summary.json`, `trace.jsonl`, and `behavior_csv` into an offline analysis bundle:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim.offline_analysis \
+$PYTHON_BIN -m spider_cortex_sim.offline_analysis \
   --summary spider_summary_compare.json \
   --trace spider_trace_debug.jsonl \
   --behavior-csv spider_behavior_compare.csv \
@@ -844,7 +883,7 @@ Rules:
 Compare the modular reference against the canonical ablation suite:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile dev \
   --ablation-suite \
   --behavior-csv spider_ablation_rows.csv \
@@ -854,7 +893,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Run the `learning_evidence` suite under the smoke budget:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile smoke \
   --learning-evidence \
   --behavior-scenario night_rest \
@@ -865,7 +904,7 @@ PYTHONPATH=. python3 -m spider_cortex_sim \
 Run the canonical short-vs-long learning-evidence comparison:
 
 ```bash
-PYTHONPATH=. python3 -m spider_cortex_sim \
+$PYTHON_BIN -m spider_cortex_sim \
   --budget-profile smoke \
   --learning-evidence \
   --learning-evidence-long-budget-profile report \

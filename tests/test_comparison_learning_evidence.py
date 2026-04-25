@@ -431,6 +431,25 @@ class LearningEvidenceComparisonHelpersTest(unittest.TestCase):
             self.assertIn("trained_vs_reflex_only", result)
             self.assertIn("scenario_success_rate_delta", result["trained_vs_random_init"])
 
+    def test_build_learning_evidence_summary_marks_fallback_delta_unavailable(self) -> None:
+            conditions = {
+                "trained_without_reflex_support": {
+                    "summary": {"scenario_success_rate": 0.7, "episode_success_rate": 0.6, "mean_reward": 10.0},
+                },
+                "random_init": {"policy_mode": "normal"},
+                "reflex_only": {
+                    "summary": {"scenario_success_rate": 0.4, "episode_success_rate": 0.3, "mean_reward": 3.0},
+                },
+            }
+            result = build_learning_evidence_summary(
+                conditions, reference_condition="trained_without_reflex_support"
+            )
+            self.assertEqual(result["trained_vs_random_init"], {"unavailable": True})
+            self.assertEqual(
+                result["uncertainty"]["trained_vs_random_init"],
+                {"unavailable": True},
+            )
+
     def test_build_learning_evidence_summary_reports_uncertainty(self) -> None:
             conditions = {
                 "trained_without_reflex_support": {

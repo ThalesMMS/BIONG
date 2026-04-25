@@ -10,6 +10,7 @@ import numpy as np
 
 from spider_cortex_sim.ablations import (
     BrainAblationConfig,
+    COARSE_ROLLUP_MODULES,
     MODULE_NAMES,
     MULTI_PREDATOR_SCENARIOS,
     MULTI_PREDATOR_SCENARIO_GROUPS,
@@ -246,6 +247,7 @@ class BrainAblationBehaviorTest(unittest.TestCase):
             name="manual_fixed_arbitration",
             module_dropout=0.0,
             use_learned_arbitration=False,
+            disabled_modules=COARSE_ROLLUP_MODULES,
         )
         observation = _build_observation(
             action_context={
@@ -506,7 +508,15 @@ class CorticalModuleBankRecurrentModulesTest(unittest.TestCase):
         )
 
     def test_spider_brain_estimate_value_does_not_commit_hidden_state(self) -> None:
-        brain = SpiderBrain(seed=5, module_dropout=0.0)
+        brain = SpiderBrain(
+            seed=5,
+            module_dropout=0.0,
+            config=BrainAblationConfig(
+                name="full_modular_recurrent_test",
+                module_dropout=0.0,
+                disabled_modules=(),
+            ),
+        )
         brain.module_bank = self._make_bank(("alert_center",))
         recurrent = brain.module_bank.modules["alert_center"]
         self.assertIsInstance(recurrent, RecurrentProposalNetwork)
@@ -705,6 +715,14 @@ class SpiderSimulationBrainConfigTest(unittest.TestCase):
         self.assertEqual(sim.module_dropout, 0.0)
 
     def test_training_td_update_publishes_credit_diagnostics(self) -> None:
+        """
+        Runs a short training episode and asserts that temporal-difference update diagnostics containing module credit information are published to the simulation bus.
+        
+        Verifies at least one "td_update" message is present and that its payload includes:
+        - "module_credit_weights" and "module_gradient_norms" keys,
+        - "credit_strategy" equal to "route_mask",
+        - "route_mask_enabled" set to True.
+        """
         sim = SpiderSimulation(seed=7, max_steps=2)
 
         sim.run_episode(
@@ -722,7 +740,8 @@ class SpiderSimulationBrainConfigTest(unittest.TestCase):
         payload = td_updates[0]
         self.assertIn("module_credit_weights", payload)
         self.assertIn("module_gradient_norms", payload)
-        self.assertEqual(payload["credit_strategy"], "broadcast")
+        self.assertEqual(payload["credit_strategy"], "route_mask")
+        self.assertTrue(payload["route_mask_enabled"])
 
     def test_brain_config_propagated_to_brain(self) -> None:
         config = BrainAblationConfig(

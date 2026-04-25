@@ -24,15 +24,25 @@ from .accumulator_math import _clamp_unit_interval, _softmax_probabilities, jens
 class AccumulatorRecordingMixin:
     def __post_init__(self) -> None:
         """
-        Initialize missing accumulator maps with zeroed defaults.
+        Ensure accumulator maps and per-type/per-module counters exist and initialize them to zeroed defaults based on configured names.
         
-        Ensure maps contain keys taken from the corresponding configuration attributes and zero values:
-        - `reward_component_totals` ← keys from `reward_component_names` with `0.0`
-        - `predator_state_ticks` ← keys from `predator_states` with `0`
-        - `night_role_ticks` ← keys from `SHELTER_ROLES` with `0`
-        - `module_reflex_usage_steps` ← keys from `REFLEX_MODULE_NAMES` with `0`
-        - `module_reflex_override_steps` ← keys from `REFLEX_MODULE_NAMES` with `0`
-        - `module_reflex_dominance_sums` ← keys from `REFLEX_MODULE_NAMES` with `0.0`
+        This populates missing keys using the class's configuration lists so subsequent recording methods can safely assume their presence. Specifically, it ensures:
+        - reward component totals for each name in `reward_component_names` (`0.0`)
+        - predator state tick counters for each name in `predator_states` (`0`)
+        - night role tick counters for each role in `SHELTER_ROLES` (`0`)
+        - per-predator-type aggregates for each name in `PREDATOR_TYPE_NAMES`:
+          - contact and escape counters (`0`)
+          - response latency lists (`[]`)
+          - proposer logits/probs/step maps (`{}`)
+          - module response counts, action-center gate/contribution sums and counts keyed by `PROPOSAL_SOURCE_NAMES`
+        - per-reflex-module counters for each name in `REFLEX_MODULE_NAMES`:
+          - reflex usage steps (`0`)
+          - reflex override steps (`0`)
+          - reflex dominance sums (`0.0`)
+        - per-proposal-source accumulators for each name in `PROPOSAL_SOURCE_NAMES`:
+          - contribution share, credit weight, gradient norm, counterfactual credit weight, route-active-module sums, and route credit weight sums (all `0.0`)
+          - dominant module counts (`0`)
+        Additionally, for each predator type and proposal source, ensure nested per-type/per-source keys exist for module response counts, proposer step counts, and action-center gate/contribution aggregates.
         """
         for name in self.reward_component_names:
             self.reward_component_totals.setdefault(name, 0.0)
@@ -77,6 +87,8 @@ class AccumulatorRecordingMixin:
             self.module_credit_weight_sums.setdefault(name, 0.0)
             self.module_gradient_norm_sums.setdefault(name, 0.0)
             self.counterfactual_credit_weight_sums.setdefault(name, 0.0)
+            self.route_active_module_sums.setdefault(name, 0.0)
+            self.route_credit_weight_sums.setdefault(name, 0.0)
             for predator_type in PREDATOR_TYPE_NAMES:
                 self.module_response_by_predator_type_counts[predator_type].setdefault(
                     name,
@@ -306,6 +318,15 @@ class AccumulatorRecordingMixin:
         self.effective_module_count_sum += float(
             getattr(arbitration, "effective_module_count", 0.0)
         )
+        self.gate_entropy_sum += float(
+            getattr(arbitration, "gate_entropy", 0.0)
+        )
+        self.dominance_rate_sum += float(
+            getattr(arbitration, "dominance_rate", 0.0)
+        )
+        self.effective_proposer_count_sum += float(
+            getattr(arbitration, "effective_proposer_count", 0.0)
+        )
         self.module_agreement_rate_sum += float(
             getattr(arbitration, "module_agreement_rate", 0.0)
         )
@@ -315,24 +336,25 @@ class AccumulatorRecordingMixin:
 
     def record_learning(self, learn_stats: Mapping[str, object]) -> None:
         """
-        Accumulate per-module learning diagnostics for the current episode.
+        Accumulate learning diagnostics into per-module running totals for the current episode.
         
-        Reads optional mappings `module_credit_weights`, `module_gradient_norms`, and
-        `counterfactual_credit_weights` from `learn_stats` and adds their numeric
-        values into the accumulator's running sums; missing module entries are treated
-        as zero (i.e., absent names are created with an initial value of 0.0).
+        Increments the mixin's learning step counter and, for each of these optional mappings in `learn_stats`—
+        `module_credit_weights`, `module_gradient_norms`, `counterfactual_credit_weights`, and `route_credit_weights`—
+        adds each numeric value to the corresponding accumulator (creating missing module keys with an initial 0.0).
+        If `learn_stats["route_active_modules"]` is a sequence or set, increments `route_active_module_sums` by 1.0
+        for each listed module name.
         
         Parameters:
-            learn_stats (Mapping[str, object]): A mapping that may contain
-                `module_credit_weights`, `module_gradient_norms`, and/or
-                `counterfactual_credit_weights`, each itself a mapping from module
-                name to a numeric value.
+            learn_stats (Mapping[str, object]): Mapping that may contain per-module numeric mappings under the
+                keys `module_credit_weights`, `module_gradient_norms`, `counterfactual_credit_weights`,
+                `route_credit_weights`, and an iterable `route_active_modules` of active module names.
         """
         self.learning_steps += 1
         for stats_key, target in [
             ("module_credit_weights", self.module_credit_weight_sums),
             ("module_gradient_norms", self.module_gradient_norm_sums),
             ("counterfactual_credit_weights", self.counterfactual_credit_weight_sums),
+            ("route_credit_weights", self.route_credit_weight_sums),
         ]:
             values = learn_stats.get(stats_key, {})
             if isinstance(values, Mapping):
@@ -340,6 +362,12 @@ class AccumulatorRecordingMixin:
                     module_name = str(name)
                     target.setdefault(module_name, 0.0)
                     target[module_name] += float(value)
+        route_active_modules = learn_stats.get("route_active_modules", [])
+        if isinstance(route_active_modules, (list, tuple, set)):
+            for name in route_active_modules:
+                module_name = str(name)
+                self.route_active_module_sums.setdefault(module_name, 0.0)
+                self.route_active_module_sums[module_name] += 1.0
 
     def record_transition(
         self,
@@ -353,21 +381,18 @@ class AccumulatorRecordingMixin:
         predator_state: str,
     ) -> None:
         """
-        Accumulate episode metrics observed during a single environment transition.
+        Accumulates episode-level diagnostics and counters for a single environment transition.
         
-        Updates reward-component totals; motor execution and slip samples and terrain counts; initial and final food and shelter distances; representation readouts attribution for a dominant predator type; per-type counts of module responses when a dominant module is present; predator mode transition and per-mode occupancy ticks; sleep-debt samples; night-related ticks (total, per-role, on-shelter, and stillness); global and per-predator-type predator-response windowing and recorded latencies; predator contacts and escapes counted per predator type; and clears per-step cached representation readouts.
+        Updates reward-component totals, motor execution and slip statistics (including terrain and orientation samples), initial/final food and shelter distances, representation attribution and per-predator-type proposer/action-center readout recording, module response counts for dominant predator events, predator mode transition and per-mode occupancy ticks, sleep-debt samples, night-related ticks (total, per-role, on-shelter, and stillness), global and per-predator-type predator-response windowing and recorded latencies, predator contact and escape counts by predator type, and clears per-step cached representation readouts.
         
         Parameters:
             step (int): Transition index within the episode.
-            observation_meta (Dict[str, object]): Metadata for the current observation (e.g., "food_dist", "shelter_dist", "predator_visible", diagnostic fields may be present).
-            next_meta (Dict[str, object]): Metadata for the next observation (e.g., "food_dist", "shelter_dist", "predator_visible", "diagnostic", "night", "shelter_role", "on_shelter").
-            info (Dict[str, object]): Transition info (e.g., "reward_components", "predator_contact", "motor_slip", "motor_noise_applied", "predator_escape", "motor_execution_components").
-            state (object): Agent state containing at least the attribute `sleep_debt` and optionally `last_move_dx`, `last_move_dy`.
+            observation_meta (Dict[str, object]): Metadata for the current observation (diagnostic fields such as "food_dist", "shelter_dist", "predator_visible" may be present).
+            next_meta (Dict[str, object]): Metadata for the next observation (fields such as "food_dist", "shelter_dist", "predator_visible", "night", "shelter_role", "on_shelter", and diagnostics may be present).
+            info (Dict[str, object]): Transition info (e.g., "reward_components", "predator_contact", "predator_escape", "motor_slip", "motor_noise_applied", "motor_execution_components").
+            state (object): Agent state with at least `sleep_debt`; may provide `last_move_dx` and `last_move_dy`.
             predator_state_before (str): Predator mode label before the transition.
             predator_state (str): Predator mode label after the transition.
-        
-        Raises:
-            ValueError: If a predator-response window must read diagnostic distance but `next_meta["diagnostic"]` exists and is not a mapping.
         """
         reward_components = info["reward_components"]
         for name, value in reward_components.items():

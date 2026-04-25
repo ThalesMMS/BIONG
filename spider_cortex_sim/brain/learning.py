@@ -540,6 +540,78 @@ class BrainLearningMixin:
         pool_names = {r.name for r in pool}
         return {r.name: (uniform if r.name in pool_names else 0.0) for r in module_results}
 
+    def _compute_route_mask_credit(
+        self,
+        module_results: List[ModuleResult],
+        *,
+        threshold: float,
+        dominant_module: str = "",
+    ) -> tuple[list[str], Dict[str, float]]:
+        """
+        Selects proposer modules that meet a route-mask causal threshold and computes normalized route-credit weights.
+        
+        If no modules are provided, returns ([], {}). If no modules are active, returns an empty selection and a weight map with 0.0 for each module. When one or more active modules meet or exceed `threshold`, those modules are returned as the selected route owners and their nonnegative weights are normalized to sum to 1. If no active module meets `threshold`, `dominant_module` is used when present among active modules; otherwise the single best active module is selected. If the selected modules' raw scores sum to a value too small for stable normalization, weights are distributed uniformly across the selected modules.
+        
+        Parameters:
+            module_results (List[ModuleResult]): List of proposer module results to evaluate; each result must expose `name`, `active`, `gate_weight`, and `contribution_share`.
+            threshold (float): Minimum raw route score (gate_weight * contribution_share) required to include a module as a route owner.
+            dominant_module (str): Optional module name to prefer as the sole route owner when no module meets `threshold`.
+        
+        Returns:
+            tuple[list[str], Dict[str, float]]: A pair consisting of the list of selected module names and a mapping from every module name to its route-credit weight (selected modules have positive weights that sum to 1, others map to 0.0).
+        """
+        if not module_results:
+            return [], {}
+        active_results = [result for result in module_results if result.active]
+        if not active_results:
+            return [], {result.name: 0.0 for result in module_results}
+        raw_scores = {
+            result.name: (
+                max(0.0, float(result.gate_weight))
+                * max(0.0, float(result.contribution_share))
+                if result.active
+                else 0.0
+            )
+            for result in module_results
+        }
+        active_names = [
+            result.name
+            for result in module_results
+            if result.active and raw_scores.get(result.name, 0.0) >= threshold
+        ]
+        if not active_names:
+            active_result_names = {result.name for result in active_results}
+            if dominant_module in active_result_names:
+                active_names = [dominant_module]
+            else:
+                best_result = max(
+                    active_results,
+                    key=lambda result: (
+                        raw_scores.get(result.name, 0.0),
+                        float(result.contribution_share),
+                        -module_results.index(result),
+                    ),
+                )
+                active_names = [best_result.name]
+        active_name_set = set(active_names)
+        active_total = sum(raw_scores.get(name, 0.0) for name in active_names)
+        if active_total > 1e-8:
+            route_credit_weights = {
+                result.name: (
+                    float(raw_scores.get(result.name, 0.0) / active_total)
+                    if result.name in active_name_set
+                    else 0.0
+                )
+                for result in module_results
+            }
+        else:
+            uniform = 1.0 / float(len(active_names)) if active_names else 0.0
+            route_credit_weights = {
+                result.name: (uniform if result.name in active_name_set else 0.0)
+                for result in module_results
+            }
+        return active_names, route_credit_weights
+
     def _auxiliary_module_gradients(self, module_results: List[ModuleResult]) -> Dict[str, np.ndarray]:
         """
         Compute auxiliary gradient targets for proposal modules based on reflex decisions.
@@ -606,8 +678,9 @@ class BrainLearningMixin:
         effective_credit_strategy = self.config.credit_strategy
         uses_counterfactual_credit = self.config.uses_counterfactual_credit
         uses_local_credit_only = self.config.uses_local_credit_only
+        uses_route_mask_credit = self.config.uses_route_mask_credit
         if self.config.is_true_monolithic and (
-            uses_counterfactual_credit or uses_local_credit_only
+            uses_counterfactual_credit or uses_local_credit_only or uses_route_mask_credit
         ):
             # A direct policy has no downstream proposal path, so all non-broadcast
             # credit modes collapse to the applied broadcast update before any
@@ -615,19 +688,27 @@ class BrainLearningMixin:
             effective_credit_strategy = "broadcast"
             uses_counterfactual_credit = False
             uses_local_credit_only = False
+            uses_route_mask_credit = False
         elif self.config.is_monolithic and (
-            uses_counterfactual_credit or uses_local_credit_only
+            uses_counterfactual_credit or uses_local_credit_only or uses_route_mask_credit
         ):
             # A monolithic proposer has no per-module proposal path, so diagnostics
             # follow the broadcast-style update that is actually applied below.
             effective_credit_strategy = "broadcast"
             uses_counterfactual_credit = False
             uses_local_credit_only = False
+            uses_route_mask_credit = False
         module_credit_weights = {
             result.name: (1.0 if result.active else 0.0)
             for result in decision.module_results
         }
         counterfactual_credit_weights: Dict[str, float] = {}
+        route_mask_threshold = float(self.config.route_mask_threshold)
+        route_mask_enabled = bool(uses_route_mask_credit and self.config.is_modular)
+        route_active_modules: list[str] = []
+        route_credit_weights: Dict[str, float] = {
+            result.name: 0.0 for result in decision.module_results
+        }
         if uses_counterfactual_credit:
             if not decision.observation:
                 raise ValueError(
@@ -642,6 +723,25 @@ class BrainLearningMixin:
         elif uses_local_credit_only:
             module_credit_weights = {
                 result.name: 0.0
+                for result in decision.module_results
+            }
+        elif uses_route_mask_credit:
+            route_active_modules, route_credit_weights = self._compute_route_mask_credit(
+                decision.module_results,
+                threshold=route_mask_threshold,
+                dominant_module=(
+                    ""
+                    if decision.arbitration_decision is None
+                    else str(decision.arbitration_decision.dominant_module)
+                ),
+            )
+            active_name_set = set(route_active_modules)
+            module_credit_weights = {
+                result.name: (
+                    1.0
+                    if result.active and result.name in active_name_set
+                    else 0.0
+                )
                 for result in decision.module_results
             }
         reflex_aux_grads = {
@@ -700,6 +800,10 @@ class BrainLearningMixin:
                 },
                 "module_gradient_norms": module_gradient_norms,
                 "counterfactual_credit_weights": {},
+                "route_mask_enabled": False,
+                "route_mask_threshold": route_mask_threshold,
+                "route_active_modules": [],
+                "route_credit_weights": {},
             }
         action_center_value_grad = decision.value - td_target
         if self.action_center is None:
@@ -863,12 +967,16 @@ class BrainLearningMixin:
             if self.module_bank is None:
                 raise RuntimeError("Module bank unavailable for modular architecture.")
             trainable_module_names: list[str] = []
+            route_active_name_set = set(route_active_modules)
             for result, extra_grad in zip(
                 decision.module_results,
                 per_result_input_grads,
                 strict=True,
             ):
                 if not result.active:
+                    continue
+                if uses_route_mask_credit and result.name not in route_active_name_set:
+                    module_gradient_norms[result.name] = 0.0
                     continue
                 if result.name in self._frozen_modules:
                     module_gradient_norms[result.name] = 0.0
@@ -949,5 +1057,12 @@ class BrainLearningMixin:
             "counterfactual_credit_weights": {
                 name: float(value)
                 for name, value in sorted(counterfactual_credit_weights.items())
+            },
+            "route_mask_enabled": bool(route_mask_enabled),
+            "route_mask_threshold": float(route_mask_threshold),
+            "route_active_modules": list(route_active_modules),
+            "route_credit_weights": {
+                name: float(value)
+                for name, value in sorted(route_credit_weights.items())
             },
         }

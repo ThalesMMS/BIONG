@@ -126,7 +126,7 @@ class ComputeArbitrationTest(unittest.TestCase):
 
     def test_module_gates_contains_all_active_modules(self) -> None:
         arb = self._get_arbitration()
-        for iface in MODULE_INTERFACES:
+        for iface in self.brain.module_bank.enabled_specs:
             self.assertIn(iface.name, arb.module_gates)
 
     def test_module_gate_values_in_unit_range(self) -> None:

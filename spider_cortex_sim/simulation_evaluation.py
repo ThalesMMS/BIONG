@@ -474,24 +474,16 @@ class SimulationEvaluationMixin:
         extra_metadata: Dict[str, object] | None = None,
     ) -> List[Dict[str, object]]:
         """
-        Annotates flattened behavior rows with simulation and configuration metadata.
+        Annotates flattened behavior rows with runtime simulation, model configuration, noise, reflex, probe, and curriculum metadata.
         
         Parameters:
-            rows (List[Dict[str, object]]): Flattened behavior rows to annotate.
-            eval_reflex_scale (float | None): Reflex runtime scale to record for these rows; when None the simulation's effective runtime reflex scale is used.
-            train_noise_profile (str | NoiseConfig | None): Optional training-time noise profile to record alongside evaluation noise metadata.
-            extra_metadata (Dict[str, object] | None): Additional key/value pairs merged into each annotated row after the standard fields.
+            rows (List[Dict[str, object]]): Flattened per-episode behavior rows to augment.
+            eval_reflex_scale (float | None): Explicit evaluation reflex scale to record; when None, the simulation's effective runtime reflex scale is used.
+            train_noise_profile (str | NoiseConfig | None): Optional training-time noise profile to include alongside the evaluation noise profile.
+            extra_metadata (Dict[str, object] | None): Additional key/value pairs to merge into each annotated row (applied last, overriding existing keys).
         
         Returns:
-            List[Dict[str, object]]: Shallow copies of the input rows augmented with simulation/configuration fields such as:
-                ablation_variant, ablation_architecture, budget_profile, benchmark_strength,
-                architecture_version, architecture_fingerprint, operational_profile,
-                operational_profile_version, train_noise_profile and its config string,
-                eval_noise_profile and its config string, checkpoint_source,
-                reflex_scale, reflex_anneal_final_scale, eval_reflex_scale,
-                competence_type, is_primary_benchmark, is_capability_probe, probe
-                metadata, plus
-                training-regime/curriculum metadata and any keys from `extra_metadata`.
+            List[Dict[str, object]]: Shallow-copied rows augmented with standardized fields such as architecture/ablation identifiers and dimensions, capacity and budget summaries, training/evaluation noise profile names and CSV configs, checkpoint source, reflex fields (`reflex_scale`, `reflex_anneal_final_scale`, `eval_reflex_scale`, `competence_type`, `is_primary_benchmark`), probe metadata (`is_capability_probe` and probe details), training-regime and curriculum metadata, and any keys from `extra_metadata`.
         """
         from .comparison import noise_profile_csv_value
 
@@ -527,8 +519,24 @@ class SimulationEvaluationMixin:
             item["integration_hidden_dim"] = int(
                 summary.get("integration_hidden_dim") or 0
             )
+            item["action_center_hidden_dim"] = int(
+                summary.get("action_center_hidden_dim") or 0
+            )
+            item["arbitration_hidden_dim"] = int(
+                summary.get("arbitration_hidden_dim") or 0
+            )
+            item["motor_hidden_dim"] = int(
+                summary.get("motor_hidden_dim") or 0
+            )
             item["monolithic_hidden_dim"] = int(
                 summary.get("monolithic_hidden_dim") or 0
+            )
+            item["credit_strategy"] = str(summary.get("credit_strategy") or "")
+            item["route_mask_enabled"] = (
+                str(summary.get("credit_strategy") or "") == "route_mask"
+            )
+            item["route_mask_threshold"] = float(
+                summary.get("route_mask_threshold") or 0.0
             )
             item["budget_profile"] = self.budget_profile_name
             item["benchmark_strength"] = self.benchmark_strength

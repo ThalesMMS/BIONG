@@ -65,10 +65,13 @@ class ComparisonWorkflowTest(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(report["answer"], "yes")
-            self.assertEqual(report["best_student_condition"], "modular_distilled")
+            self.assertEqual(report["answer"], "yes_after_rl_finetuning")
+            self.assertEqual(
+                report["best_student_condition"],
+                "modular_distilled_plus_rl_finetuning",
+            )
 
-    def test_distillation_report_without_baseline_keeps_distilled_selected(self) -> None:
+    def test_distillation_report_without_baseline_selects_better_student(self) -> None:
             report = build_distillation_comparison_report(
                 teacher={
                     "scenario_success_rate": 0.8,
@@ -88,10 +91,13 @@ class ComparisonWorkflowTest(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(report["answer"], "yes")
-            self.assertEqual(report["best_student_condition"], "modular_distilled")
+            self.assertEqual(report["answer"], "yes_after_rl_finetuning")
+            self.assertEqual(
+                report["best_student_condition"],
+                "modular_distilled_plus_rl_finetuning",
+            )
 
-    def test_distillation_report_prefers_distilled_when_it_already_beats_baseline(self) -> None:
+    def test_distillation_report_selects_better_student_when_both_beat_baseline(self) -> None:
             report = build_distillation_comparison_report(
                 teacher={
                     "scenario_success_rate": 0.8,
@@ -115,8 +121,11 @@ class ComparisonWorkflowTest(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(report["answer"], "yes")
-            self.assertEqual(report["best_student_condition"], "modular_distilled")
+            self.assertEqual(report["answer"], "yes_after_rl_finetuning")
+            self.assertEqual(
+                report["best_student_condition"],
+                "modular_distilled_plus_rl_finetuning",
+            )
 
     def test_behavior_comparison_reports_profiles_maps_and_matrix(self) -> None:
             comparisons, rows = compare_behavior_suite(

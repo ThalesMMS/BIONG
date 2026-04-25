@@ -73,7 +73,12 @@ from .comparison_learning import (
     build_learning_evidence_deltas,
 )
 from .comparison_noise import with_noise_profile_metadata
-from .comparison_utils import noise_profile_metadata
+from .comparison_utils import (
+    build_checkpoint_path,
+    build_run_budget_summary,
+    create_comparison_simulation,
+    noise_profile_metadata,
+)
 
 def _compare_named_training_regimes(
     *,
@@ -187,11 +192,13 @@ def _compare_named_training_regimes(
         exemplar_sim: SpiderSimulation | None = None
 
         for seed in seed_values:
-            sim_budget = budget.to_summary()
-            sim_budget["resolved"]["scenario_episodes"] = run_count
-            sim_budget["resolved"]["behavior_seeds"] = list(seed_values)
-            sim_budget["resolved"]["ablation_seeds"] = list(seed_values)
-            sim = SpiderSimulation(
+            sim_budget = build_run_budget_summary(
+                budget,
+                scenario_episodes=run_count,
+                behavior_seeds=seed_values,
+                ablation_seeds=seed_values,
+            )
+            sim = create_comparison_simulation(
                 width=width,
                 height=height,
                 food_count=food_count,
@@ -214,10 +221,10 @@ def _compare_named_training_regimes(
             exemplar_sim = sim
             run_checkpoint_dir = None
             if checkpoint_dir is not None:
-                run_checkpoint_dir = (
-                    Path(checkpoint_dir)
-                    / "training_regime_compare"
-                    / f"{regime_name}__seed_{seed}"
+                run_checkpoint_dir = build_checkpoint_path(
+                    checkpoint_dir,
+                    "training_regime_compare",
+                    f"{regime_name}__seed_{seed}",
                 )
             training_summary, _ = sim.train(
                 budget.episodes,
@@ -661,14 +668,16 @@ def compare_training_regimes(
         regime: [] for regime in regimes
     }
     rows: List[Dict[str, object]] = []
-    sim_budget = budget.to_summary()
-    sim_budget["resolved"]["scenario_episodes"] = run_count
-    sim_budget["resolved"]["behavior_seeds"] = list(seed_values)
-    sim_budget["resolved"]["ablation_seeds"] = list(budget.ablation_seeds)
+    sim_budget = build_run_budget_summary(
+        budget,
+        scenario_episodes=run_count,
+        behavior_seeds=seed_values,
+        ablation_seeds=budget.ablation_seeds,
+    )
 
     for regime in regimes:
         for seed in seed_values:
-            sim = SpiderSimulation(
+            sim = create_comparison_simulation(
                 width=width,
                 height=height,
                 food_count=food_count,
@@ -709,10 +718,10 @@ def compare_training_regimes(
             ):
                 run_checkpoint_dir = None
                 if checkpoint_dir is not None:
-                    run_checkpoint_dir = (
-                        Path(checkpoint_dir)
-                        / "curriculum_compare"
-                        / f"{regime}__seed_{seed}"
+                    run_checkpoint_dir = build_checkpoint_path(
+                        checkpoint_dir,
+                        "curriculum_compare",
+                        f"{regime}__seed_{seed}",
                     )
                 sim.train(
                     budget.episodes,

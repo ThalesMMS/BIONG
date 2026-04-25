@@ -161,21 +161,23 @@ class SpiderSimulation(SimulationEpisodeMixin, SimulationCheckpointMixin, Simula
         budget_summary: Dict[str, object] | None = None,
     ) -> None:
         """
-        Create a SpiderSimulation and configure its world, brain, messaging bus, and runtime budget defaults.
+        Initialize the SpiderSimulation with a configured world, brain, message bus, and runtime budget defaults.
         
-        When `brain_config` is omitted, a default ablation-aware brain configuration is created using `module_dropout`. Provided `operational_profile` and `noise_profile` values are resolved (by name or passed-through object); invalid profile names raise ValueError during resolution. If `budget_summary` is omitted, a default resolved budget structure is populated and stored.
+        When `brain_config` is omitted, a default ablation-aware brain configuration is created using `module_dropout`. The provided `capacity_profile`, `operational_profile`, and `noise_profile` arguments may be either names or resolved profile objects and will be resolved to concrete profile objects. If `budget_summary` is omitted, a default resolved budget structure is created and stored.
         
         Parameters:
-            brain_config (BrainAblationConfig | None): Optional ablation-aware brain configuration; when None a default is created using `module_dropout`.
-            module_dropout (float): Dropout probability used to construct the default `brain_config` when `brain_config` is not provided.
-            operational_profile (str | OperationalProfile | None): Operational profile name or explicit OperationalProfile; None selects the default operational profile.
-            noise_profile (str | NoiseConfig | None): Noise profile name or explicit NoiseConfig; None selects the default noise profile.
-            map_template (str): Default map template name used for episodes when a scenario-specific template is not supplied.
-            budget_profile_name (str): Logical budget profile identifier stored in the simulation summary and used when building a default `budget_summary`.
-            benchmark_strength (str): Benchmark strength identifier stored in the simulation summary and used when building a default `budget_summary`.
-            budget_summary (Dict[str, object] | None): Optional budget override structure; when omitted the simulation creates and stores a default resolved budget summary.
+            capacity_profile (str | CapacityProfile | None): Capacity profile name or object used to configure hidden-dimension sizes; when None the profile is taken from `brain_config` if present.
+            brain_config (BrainAblationConfig | None): Optional ablation-aware brain configuration; when None a default is constructed using `module_dropout`.
+            module_dropout (float): Dropout probability used when constructing a default `brain_config`.
+            operational_profile (str | OperationalProfile | None): Operational profile name or object to configure agent/world operational parameters; None selects the default.
+            noise_profile (str | NoiseConfig | None): Noise profile name or object to configure environment/observation noise; None selects the default.
+            map_template (str): Default map template name applied to episodes when a scenario-specific template is not supplied.
+            budget_profile_name (str): Logical identifier for the budget profile stored in the simulation summary.
+            benchmark_strength (str): Identifier for benchmark strength stored in the simulation summary.
+            budget_summary (Dict[str, object] | None): Optional budget override structure; when omitted a default resolved budget summary is populated and stored.
         """
         self.seed = seed
+        provided_brain_config = brain_config is not None
         self.brain_config = brain_config if brain_config is not None else default_brain_config(module_dropout=module_dropout)
         resolved_capacity_profile_spec = (
             capacity_profile
@@ -187,11 +189,60 @@ class SpiderSimulation(SimulationEpisodeMixin, SimulationCheckpointMixin, Simula
             )
         )
         self.capacity_profile = resolve_capacity_profile(resolved_capacity_profile_spec)
+        profile_module_hidden_dims = dict(self.capacity_profile.module_hidden_dims)
+        source_capacity_profile = resolve_capacity_profile(
+            self.brain_config.capacity_profile or self.capacity_profile.name
+        )
+        source_module_hidden_dims = dict(source_capacity_profile.module_hidden_dims)
+        config_module_hidden_dims = dict(self.brain_config.module_hidden_dims)
+        explicit_module_hidden_dims = {
+            name: hidden_dim
+            for name, hidden_dim in config_module_hidden_dims.items()
+            if provided_brain_config
+            and source_module_hidden_dims.get(name) != hidden_dim
+        }
+        module_hidden_dims = {
+            **profile_module_hidden_dims,
+            **explicit_module_hidden_dims,
+        }
+
+        def _config_dim_or_profile(
+            field_name: str,
+            source_default: int,
+            profile_default: int,
+        ) -> int:
+            value = getattr(self.brain_config, field_name)
+            if (
+                provided_brain_config
+                and value is not None
+                and int(value) != int(source_default)
+            ):
+                return int(value)
+            return int(profile_default)
+
+        action_center_hidden_dim = _config_dim_or_profile(
+            "action_center_hidden_dim",
+            source_capacity_profile.action_center_hidden_dim,
+            self.capacity_profile.action_center_hidden_dim,
+        )
+        arbitration_hidden_dim = _config_dim_or_profile(
+            "arbitration_hidden_dim",
+            source_capacity_profile.arbitration_hidden_dim,
+            self.capacity_profile.arbitration_hidden_dim,
+        )
+        motor_hidden_dim = _config_dim_or_profile(
+            "motor_hidden_dim",
+            source_capacity_profile.motor_hidden_dim,
+            self.capacity_profile.motor_hidden_dim,
+        )
         replacement_fields = {
             "capacity_profile": self.capacity_profile,
             "capacity_profile_name": self.capacity_profile.name,
-            "module_hidden_dims": dict(self.capacity_profile.module_hidden_dims),
-            "integration_hidden_dim": self.capacity_profile.integration_hidden_dim,
+            "module_hidden_dims": module_hidden_dims,
+            "action_center_hidden_dim": action_center_hidden_dim,
+            "arbitration_hidden_dim": arbitration_hidden_dim,
+            "motor_hidden_dim": motor_hidden_dim,
+            "integration_hidden_dim": action_center_hidden_dim,
         }
         self.brain_config = replace(self.brain_config, **replacement_fields)
         self.module_dropout = self.brain_config.module_dropout

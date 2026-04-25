@@ -8,25 +8,47 @@ from .representation import _normalize_float_map
 from .shaping import _variant_with_minimal_reflex_support
 
 CREDIT_STRATEGY_KEYS: frozenset[str] = frozenset(
-    ("broadcast", "local_only", "counterfactual")
+    ("broadcast", "local_only", "counterfactual", "route_mask")
 )
 
 
 def _credit_payload_from_summary_block(
     payload: Mapping[str, object],
 ) -> dict[str, object] | None:
+    """
+    Extract credit-related fields from a summary block and return a normalized credit payload.
+    
+    Parameters:
+        payload (Mapping[str, object]): A summary-block mapping that may contain any of the following keys:
+            - "mean_module_credit_weights": mapping of module -> numeric credit weight
+            - "module_gradient_norm_means": mapping of module -> numeric gradient-norm mean
+            - "mean_counterfactual_credit_weights": mapping of module -> numeric counterfactual weight
+            - "route_credit_weights": mapping of route/module -> numeric route credit weight
+            - "credit_strategy": optional strategy name
+    
+    Returns:
+        dict[str, object] | None: A mapping with keys:
+            - "strategy" (str): the credit strategy name (empty string if absent)
+            - "weights" (dict[str, float]): normalized module credit weights
+            - "gradient_norms" (dict[str, float]): normalized module gradient norms
+            - "counterfactual_weights" (dict[str, float]): normalized counterfactual weights
+            - "route_credit_weights" (dict[str, float]): normalized route credit weights
+        Returns `None` if none of the credit-related maps are present or non-empty.
+    """
     weights = _normalize_float_map(payload.get("mean_module_credit_weights"))
     gradient_norms = _normalize_float_map(payload.get("module_gradient_norm_means"))
     counterfactual_weights = _normalize_float_map(
         payload.get("mean_counterfactual_credit_weights")
     )
-    if not (weights or gradient_norms or counterfactual_weights):
+    route_credit_weights = _normalize_float_map(payload.get("route_credit_weights"))
+    if not (weights or gradient_norms or counterfactual_weights or route_credit_weights):
         return None
     return {
         "strategy": str(payload.get("credit_strategy") or ""),
         "weights": weights,
         "gradient_norms": gradient_norms,
         "counterfactual_weights": counterfactual_weights,
+        "route_credit_weights": route_credit_weights,
     }
 
 

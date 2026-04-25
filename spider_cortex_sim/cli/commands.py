@@ -9,18 +9,20 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ..ablations import BrainAblationConfig
+from ..ablations import BrainAblationConfig, COARSE_ROLLUP_MODULES
 from ..benchmark_package import (
     BenchmarkManifest,
     assemble_benchmark_package,
     summarize_benchmark_manifest,
 )
 from ..budget_profiles import ResolvedBudget, resolve_budget, resolve_budget_profile
+from ..capacity_profiles import canonical_capacity_axis_names
 from ..checkpointing import CheckpointSelectionConfig, build_checkpointing_summary
 from ..claim_evaluation import run_claim_test_suite
 from ..comparison import (
     compare_ablation_suite,
     compare_behavior_suite,
+    compare_capacity_axis_sweep,
     compare_capacity_sweep,
     compare_configurations,
     compare_ladder_under_profiles,
@@ -41,6 +43,9 @@ from ..training_regimes import resolve_training_regime
 from ..world import REWARD_PROFILES
 from .formatting import format_run_summary
 from .parser import collect_requested_scenarios, parse_module_reflex_scales
+from .output import _build_and_record_benchmark_package
+from .validation import _argument_error
+from .workflow_args import _build_checkpoint_selection_config, _build_compare_training_kwargs
 
 EXPERIMENT_OF_RECORD_CHECKPOINT_OVERRIDE_PENALTY = 1.0
 EXPERIMENT_OF_RECORD_CHECKPOINT_DOMINANCE_PENALTY = 1.0
@@ -51,105 +56,13 @@ _default_checkpointing_summary = build_checkpointing_summary
 _ensure_behavior_evaluation = ensure_behavior_evaluation
 
 
-def _build_and_record_benchmark_package(
-    *,
-    output_dir: Path,
-    summary: dict[str, object],
-    behavior_csv: Path | None,
-    behavior_rows: Sequence[Mapping[str, object]],
-    command_metadata: Mapping[str, object],
-    trace: Sequence[Mapping[str, object]] = (),
-) -> BenchmarkManifest:
-    manifest = assemble_benchmark_package(
-        output_dir,
-        summary,
-        behavior_csv,
-        behavior_rows=behavior_rows,
-        trace=trace,
-        command_metadata=command_metadata,
-    )
-    summary["benchmark_package"] = _benchmark_package_manifest_summary(
-        manifest,
-        output_dir=output_dir,
-    )
-    return manifest
-
-
-def _build_compare_training_kwargs(
-    args: argparse.Namespace,
-    budget: ResolvedBudget,
-    checkpoint_selection_config: CheckpointSelectionConfig,
-) -> dict[str, object]:
-    """
-    Builds a dictionary of shared training and evaluation keyword arguments used for comparing training regimes.
-
-    Parameters:
-        args (argparse.Namespace): Parsed CLI arguments providing world dimensions, learning hyperparameters, profiles, and checkpoint options.
-        budget: Budget-like object with attributes `max_steps`, `episodes`, `eval_episodes`, `behavior_seeds`, `scenario_episodes`, and `checkpoint_interval` describing runtime sizing.
-
-    Returns:
-        dict[str, object]: Mapping of runtime kwargs including world size (`width`, `height`, `food_count`, `day_length`, `night_length`, `max_steps`), training/evaluation sizing (`episodes`, `evaluation_episodes`, `episodes_per_scenario`, `checkpoint_interval`), learning hyperparameters (`gamma`, `module_lr`, `motor_lr`, `module_dropout`), profile selections (`reward_profile`, `map_template`, `operational_profile`, `noise_profile`, `budget_profile`, `curriculum_profile`), checkpoint controls (`checkpoint_selection`, `checkpoint_selection_config`, `checkpoint_dir`), and `seeds` as a tuple of behavior seeds.
-    """
-    return {
-        "width": args.width,
-        "height": args.height,
-        "food_count": args.food_count,
-        "day_length": args.day_length,
-        "night_length": args.night_length,
-        "max_steps": budget.max_steps,
-        "episodes": budget.episodes,
-        "evaluation_episodes": budget.eval_episodes,
-        "gamma": args.gamma,
-        "module_lr": args.module_lr,
-        "motor_lr": args.motor_lr,
-        "module_dropout": args.module_dropout,
-        "reward_profile": args.reward_profile,
-        "map_template": args.map_template,
-        "operational_profile": args.operational_profile,
-        "noise_profile": args.noise_profile,
-        "budget_profile": args.budget_profile,
-        "seeds": tuple(budget.behavior_seeds),
-        "episodes_per_scenario": budget.scenario_episodes,
-        "checkpoint_selection": args.checkpoint_selection,
-        "checkpoint_selection_config": checkpoint_selection_config,
-        "checkpoint_interval": budget.checkpoint_interval,
-        "checkpoint_dir": args.checkpoint_dir,
-        "curriculum_profile": args.curriculum_profile,
-    }
-
-
-def _build_checkpoint_selection_config(
-    args: argparse.Namespace,
-) -> CheckpointSelectionConfig:
-    try:
-        return CheckpointSelectionConfig(
-            metric=args.checkpoint_metric,
-            override_penalty_weight=args.checkpoint_override_penalty,
-            dominance_penalty_weight=args.checkpoint_dominance_penalty,
-            penalty_mode=args.checkpoint_penalty_mode,
-        )
-    except ValueError as exc:
-        _argument_error(args, str(exc))
-        raise AssertionError("unreachable") from exc
-
-
-def _argument_error(args: argparse.Namespace, message: str) -> None:
-    parser = getattr(args, "_parser", None)
-    if parser is not None:
-        parser.error(message)
-    print(f"error: {message}", file=sys.stderr)
-    raise SystemExit(2)
 
 
 def run_cli(args: argparse.Namespace) -> None:
     """
-    Execute the requested SpiderSimulation workflows for parsed CLI arguments.
-
-    Validates the runtime budget and brain configuration, then either launches
-    the GUI or runs headless workflows including training/evaluation,
-    deterministic scenario evaluations, behavior and configuration comparisons,
-    ablation analyses, learning-evidence comparisons, claim-test suites,
-    curriculum comparisons, and noise-robustness studies.
+    Dispatch CLI workflows to run SpiderSimulation or launch the GUI.
+    
+    Validate CLI arguments, budget, and brain configuration, then execute the selected workflow(s)—GUI, headless training/evaluation, deterministic scenario evaluations, behavior and configuration comparisons, ablation analyses, ladder/capacity sweeps, learning-evidence comparisons, claim-test suites, curriculum comparisons, and noise-robustness studies. Optionally produce benchmark packages, summaries, traces, CSVs, and saved brains, and emit a consolidated JSON run summary to stdout.
     """
     if args.claim_test and not args.claim_test_suite:
         args.claim_test_suite = True
@@ -272,6 +185,8 @@ def run_cli(args: argparse.Namespace) -> None:
         unsupported_reflex_workflows.append("--ladder-reward-profiles")
     if args.capacity_sweep:
         unsupported_reflex_workflows.append("--capacity-sweep")
+    if args.capacity_axis_sweep is not None:
+        unsupported_reflex_workflows.append("--capacity-axis-sweep")
     if args.claim_test_suite:
         unsupported_reflex_workflows.append("--claim-test-suite")
     if unsupported_reflex_workflows and (
@@ -294,7 +209,9 @@ def run_cli(args: argparse.Namespace) -> None:
             module_dropout=args.module_dropout,
             enable_reflexes=True,
             enable_auxiliary_targets=True,
-            disabled_modules=(),
+            credit_strategy="route_mask",
+            disabled_modules=COARSE_ROLLUP_MODULES,
+            recurrent_modules=(),
             reflex_scale=args.reflex_scale,
             module_reflex_scales=module_reflex_scales,
             capacity_profile=args.capacity_profile,
@@ -464,13 +381,21 @@ def run_cli(args: argparse.Namespace) -> None:
         )
         return
 
-    if args.capacity_sweep:
+    if args.capacity_sweep and args.capacity_axis_sweep is not None:
+        _argument_error(args, "--capacity-sweep cannot be combined with --capacity-axis-sweep.")
+
+    if args.capacity_sweep or args.capacity_axis_sweep is not None:
+        capacity_flag = (
+            "--capacity-axis-sweep"
+            if args.capacity_axis_sweep is not None
+            else "--capacity-sweep"
+        )
         if args.trace is not None:
-            _argument_error(args, "--trace is not supported with --capacity-sweep.")
+            _argument_error(args, f"--trace is not supported with {capacity_flag}.")
         if args.render_eval:
-            _argument_error(args, "--render-eval is not supported with --capacity-sweep.")
+            _argument_error(args, f"--render-eval is not supported with {capacity_flag}.")
         if args.debug_trace:
-            _argument_error(args, "--debug-trace is not supported with --capacity-sweep.")
+            _argument_error(args, f"--debug-trace is not supported with {capacity_flag}.")
         for enabled, flag_name in (
             (args.compare_profiles, "--compare-profiles"),
             (args.compare_maps, "--compare-maps"),
@@ -486,7 +411,7 @@ def run_cli(args: argparse.Namespace) -> None:
             if enabled:
                 _argument_error(
                     args,
-                    f"{flag_name} is not supported with --capacity-sweep."
+                    f"{flag_name} is not supported with {capacity_flag}."
                 )
         capacity_scenarios: list[str] = []
         for name in args.behavior_scenario or []:
@@ -496,31 +421,47 @@ def run_cli(args: argparse.Namespace) -> None:
             for name in SCENARIO_NAMES:
                 if name not in capacity_scenarios:
                     capacity_scenarios.append(name)
-        capacity_payload, capacity_rows = compare_capacity_sweep(
-            width=args.width,
-            height=args.height,
-            food_count=args.food_count,
-            day_length=args.day_length,
-            night_length=args.night_length,
-            max_steps=budget.max_steps,
-            episodes=budget.episodes,
-            evaluation_episodes=budget.eval_episodes,
-            gamma=args.gamma,
-            module_lr=args.module_lr,
-            motor_lr=args.motor_lr,
-            module_dropout=args.module_dropout,
-            reward_profile=args.reward_profile,
-            map_template=args.map_template,
-            operational_profile=args.operational_profile,
-            noise_profile=args.noise_profile,
-            budget_profile=args.budget_profile,
-            seeds=tuple(budget.ablation_seeds),
-            names=capacity_scenarios or None,
-            checkpoint_selection=args.checkpoint_selection,
-            checkpoint_selection_config=checkpoint_selection_config,
-            checkpoint_interval=budget.checkpoint_interval,
-            checkpoint_dir=args.checkpoint_dir,
+        capacity_runner = (
+            compare_capacity_axis_sweep
+            if args.capacity_axis_sweep is not None
+            else compare_capacity_sweep
         )
+        capacity_kwargs = {}
+        if args.capacity_axis_sweep is not None:
+            capacity_kwargs["capacity_axes"] = (
+                tuple(args.capacity_axis_sweep)
+                if args.capacity_axis_sweep
+                else tuple(canonical_capacity_axis_names())
+            )
+        try:
+            capacity_payload, capacity_rows = capacity_runner(
+                width=args.width,
+                height=args.height,
+                food_count=args.food_count,
+                day_length=args.day_length,
+                night_length=args.night_length,
+                max_steps=budget.max_steps,
+                episodes=budget.episodes,
+                evaluation_episodes=budget.eval_episodes,
+                gamma=args.gamma,
+                module_lr=args.module_lr,
+                motor_lr=args.motor_lr,
+                module_dropout=args.module_dropout,
+                reward_profile=args.reward_profile,
+                map_template=args.map_template,
+                operational_profile=args.operational_profile,
+                noise_profile=args.noise_profile,
+                budget_profile=args.budget_profile,
+                seeds=tuple(budget.ablation_seeds),
+                names=capacity_scenarios or None,
+                checkpoint_selection=args.checkpoint_selection,
+                checkpoint_selection_config=checkpoint_selection_config,
+                checkpoint_interval=budget.checkpoint_interval,
+                checkpoint_dir=args.checkpoint_dir,
+                **capacity_kwargs,
+            )
+        except ValueError as exc:
+            _argument_error(args, str(exc))
         summary = {
             "config": {
                 "brain": base_brain_config.to_summary(),
@@ -535,7 +476,13 @@ def run_cli(args: argparse.Namespace) -> None:
                     "map_template": args.map_template,
                 },
                 "budget": budget.to_summary(),
-                "training_regime": {"name": "capacity_sweep"},
+                "training_regime": {
+                    "name": (
+                        "capacity_axis_sweep"
+                        if args.capacity_axis_sweep is not None
+                        else "capacity_sweep"
+                    ),
+                },
                 "operational_profile": {"name": args.operational_profile},
                 "noise_profile": {"name": args.noise_profile},
             },

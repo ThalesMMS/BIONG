@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
-import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from spider_cortex_sim.ablations import PROPOSAL_SOURCE_NAMES
+from spider_cortex_sim.capacity_profiles import canonical_capacity_axis_names
 from spider_cortex_sim.maps import (
     CLUTTER,
     NARROW,
@@ -181,6 +181,66 @@ class CLIBehaviorArgumentsTest(unittest.TestCase):
     def test_behavior_suite_default_false(self) -> None:
         args = self.parser.parse_args([])
         self.assertFalse(args.behavior_suite)
+
+    def test_capacity_axis_sweep_accepts_axes(self) -> None:
+        args = self.parser.parse_args([
+            "--capacity-axis-sweep",
+            "proposers",
+            "motor",
+        ])
+        self.assertEqual(args.capacity_axis_sweep, ["proposers", "motor"])
+
+    def test_capacity_axis_sweep_without_axes_uses_all(self) -> None:
+        args = self.parser.parse_args(["--capacity-axis-sweep"])
+        self.assertEqual(args.capacity_axis_sweep, [])
+
+    def test_capacity_axis_sweep_without_axes_expands_in_command_layer(self) -> None:
+        from spider_cortex_sim.cli import commands
+
+        args = self.parser.parse_args([
+            "--budget-profile",
+            "smoke",
+            "--capacity-axis-sweep",
+            "--behavior-scenario",
+            "night_rest",
+        ])
+        args.summary = "summary.json"
+        with (
+            patch.object(commands.SpiderSimulation, "save_summary") as save_summary,
+            patch.object(
+                commands,
+                "compare_capacity_axis_sweep",
+                return_value=({"budget_profile": "smoke"}, []),
+            ) as runner,
+        ):
+            commands.run_cli(args)
+        summary = save_summary.call_args.args[0]
+
+        self.assertEqual(
+            runner.call_args.kwargs["capacity_axes"],
+            tuple(canonical_capacity_axis_names()),
+        )
+        self.assertIn("capacity_sweeps", summary["behavior_evaluation"])
+        self.assertNotIn("capacity_axis_sweeps", summary["behavior_evaluation"])
+
+    def test_capacity_axis_sweep_validation_errors_use_argument_error(self) -> None:
+        from spider_cortex_sim.cli import commands
+
+        args = self.parser.parse_args([
+            "--budget-profile",
+            "smoke",
+            "--capacity-axis-sweep",
+            "proposers",
+            "proposers",
+        ])
+        args._parser = self.parser
+
+        with patch.object(self.parser, "error", side_effect=SystemExit(2)) as error:
+            with self.assertRaises(SystemExit) as exc:
+                commands.run_cli(args)
+
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("requires unique capacity axes", error.call_args.args[0])
 
     def test_behavior_seeds_arg(self) -> None:
         args = self.parser.parse_args(["--behavior-seeds", "7", "17", "29"])

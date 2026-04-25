@@ -9,6 +9,7 @@ remain here only for backwards compatibility.
 from __future__ import annotations
 
 from . import commands as _commands
+from . import output as _output
 from .commands import (
     EXPERIMENT_OF_RECORD_CHECKPOINT_DOMINANCE_PENALTY,
     EXPERIMENT_OF_RECORD_CHECKPOINT_OVERRIDE_PENALTY,
@@ -77,8 +78,23 @@ _parse_module_reflex_scales = parse_module_reflex_scales
 
 
 def _sync_command_patch_points() -> None:
+    """
+    Bind required symbols into the CLI command and output modules to preserve backward compatibility.
+    
+    This performs runtime patching by assigning the module-level names expected by the legacy CLI implementation into the internal `_commands` and `_output` modules (for example: `SpiderSimulation`, `assemble_benchmark_package`, `summarize_benchmark_manifest`, `run_claim_test_suite`, and various `compare_*` helpers). The function mutates those modules in-place and does not return a value.
+    """
     _commands.SpiderSimulation = SpiderSimulation
     _commands.assemble_benchmark_package = assemble_benchmark_package
+    if not hasattr(_output, "assemble_benchmark_package"):
+        raise AttributeError(
+            "Expected spider_cortex_sim.cli.output.assemble_benchmark_package patch point."
+        )
+    if not hasattr(_output, "_benchmark_package_manifest_summary"):
+        raise AttributeError(
+            "Expected spider_cortex_sim.cli.output._benchmark_package_manifest_summary patch point."
+        )
+    _output.assemble_benchmark_package = assemble_benchmark_package
+    _output._benchmark_package_manifest_summary = summarize_benchmark_manifest
     _commands.run_claim_test_suite = run_claim_test_suite
     _commands.compare_ablation_suite = compare_ablation_suite
     _commands.compare_behavior_suite = compare_behavior_suite

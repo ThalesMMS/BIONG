@@ -472,9 +472,51 @@ class CounterfactualCreditEdgeCasesTest(unittest.TestCase):
         # The counterfactual weights should match module_credit_weights
         self.assertEqual(stats["counterfactual_credit_weights"], stats["module_credit_weights"])
 
+    def test_route_mask_learn_masks_non_route_proposers(self) -> None:
+        config = BrainAblationConfig(
+            name="test_route_mask",
+            architecture="modular",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            credit_strategy="route_mask",
+            route_mask_threshold=0.05,
+        )
+        brain = SpiderBrain(seed=16, module_dropout=0.0, config=config)
+        obs = _blank_obs()
+        step = brain.act(obs, sample=True, training=True)
+
+        route_owner = "alert_center"
+        for result in step.module_results:
+            result.gate_weight = 0.0
+            result.contribution_share = 0.0
+        for result in step.module_results:
+            if result.name == route_owner:
+                result.gate_weight = 1.0
+                result.contribution_share = 1.0
+                break
+
+        stats = brain.learn(step, reward=1.0, next_observation=obs, done=True)
+
+        self.assertEqual(stats["credit_strategy"], "route_mask")
+        self.assertTrue(stats["route_mask_enabled"])
+        self.assertEqual(stats["route_active_modules"], [route_owner])
+        self.assertEqual(stats["module_credit_weights"][route_owner], 1.0)
+        for name in stats["module_credit_weights"]:
+            expected_weight = 1.0 if name == route_owner else 0.0
+            self.assertAlmostEqual(
+                stats["route_credit_weights"][name],
+                expected_weight,
+            )
+        for name, norm in stats["module_gradient_norms"].items():
+            if name == route_owner:
+                self.assertGreater(float(norm), 0.0)
+            else:
+                self.assertEqual(float(norm), 0.0)
+
     def test_module_gradient_norms_present_for_all_strategies(self) -> None:
         """module_gradient_norms is present in learn() output for all credit strategies."""
-        for strategy in ("broadcast", "local_only", "counterfactual"):
+        for strategy in ("broadcast", "local_only", "counterfactual", "route_mask"):
             config = BrainAblationConfig(
                 name=f"test_{strategy}",
                 architecture="modular",

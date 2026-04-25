@@ -9,7 +9,9 @@ from unittest import mock
 import numpy as np
 
 from spider_cortex_sim.ablations import (
+    A4_FINE_MODULES,
     BrainAblationConfig,
+    COARSE_ROLLUP_MODULES,
     MODULE_NAMES,
     MULTI_PREDATOR_SCENARIOS,
     MULTI_PREDATOR_SCENARIO_GROUPS,
@@ -222,10 +224,10 @@ class LocalCreditOnlyVariantTest(unittest.TestCase):
         self.assertTrue(lc.enable_reflexes)
         self.assertTrue(lc.enable_auxiliary_targets)
 
-    def test_local_credit_only_has_no_disabled_modules(self) -> None:
+    def test_local_credit_only_uses_a4_fine_topology(self) -> None:
         configs = canonical_ablation_configs()
         lc = configs["local_credit_only"]
-        self.assertEqual(lc.disabled_modules, ())
+        self.assertEqual(set(lc.disabled_modules), set(COARSE_ROLLUP_MODULES))
 
     def test_local_credit_only_has_reflex_scale_one(self) -> None:
         configs = canonical_ablation_configs()
@@ -322,7 +324,7 @@ class CanonicalModularFullLearnedArbitrationTest(unittest.TestCase):
 
     def test_drop_variants_have_use_learned_arbitration_true(self) -> None:
         configs = canonical_ablation_configs()
-        for module_name in MODULE_NAMES:
+        for module_name in A4_FINE_MODULES:
             config = configs[f"drop_{module_name}"]
             self.assertTrue(
                 config.use_learned_arbitration,
@@ -658,9 +660,11 @@ class ComparePredatorTypeAblationEdgeCasesTest(unittest.TestCase):
                 }
             },
             "deltas_vs_reference": {
-                "drop_visual_cortex": {
+                "drop_visual_cortex_vs_modular_full": {
                     "scenarios": {
-                        "visual_hunter_open_field": {"success_rate_delta": -0.3},
+                        "visual_hunter_open_field": {
+                            "scenario_success_rate_delta": -0.3,
+                        },
                     }
                 }
             },
@@ -702,11 +706,15 @@ class ComparePredatorTypeAblationEdgeCasesTest(unittest.TestCase):
                 }
             },
             "deltas_vs_reference": {
-                "drop_visual_cortex": {
+                "drop_visual_cortex_vs_modular_full": {
                     "scenarios": {
-                        "visual_olfactory_pincer": {"success_rate_delta": -0.4},
-                        "visual_hunter_open_field": {"success_rate_delta": -0.6},
-                        "olfactory_ambush": {"success_rate_delta": 0.1},
+                        "visual_olfactory_pincer": {
+                            "scenario_success_rate_delta": -0.4,
+                        },
+                        "visual_hunter_open_field": {
+                            "scenario_success_rate_delta": -0.6,
+                        },
+                        "olfactory_ambush": {"scenario_success_rate_delta": 0.1},
                     }
                 }
             },
@@ -720,6 +728,48 @@ class ComparePredatorTypeAblationEdgeCasesTest(unittest.TestCase):
         self.assertAlmostEqual(visual_delta, -0.5, places=5)
         self.assertAlmostEqual(olfactory_delta, -0.15, places=5)
 
+    def test_delta_uses_variant_vs_reference_keys_and_scenario_success_field(self) -> None:
+        payload = {
+            "variants": {
+                "drop_visual_cortex": {
+                    "suite": {
+                        "visual_olfactory_pincer": {"success_rate": 0.2},
+                        "visual_hunter_open_field": {"success_rate": 0.1},
+                        "olfactory_ambush": {"success_rate": 0.8},
+                    }
+                }
+            },
+            "deltas_vs_reference": {
+                "drop_visual_cortex_vs_modular_full": {
+                    "scenarios": {
+                        "visual_olfactory_pincer": {
+                            "scenario_success_rate_delta": -0.4,
+                        },
+                        "visual_hunter_open_field": {
+                            "scenario_success_rate_delta": -0.6,
+                        },
+                        "olfactory_ambush": {
+                            "scenario_success_rate_delta": 0.1,
+                        },
+                    }
+                }
+            },
+        }
+
+        result = compare_predator_type_ablation_performance(payload)
+
+        comparison = result["comparisons"]["drop_visual_cortex"]
+        self.assertAlmostEqual(
+            comparison["visual_predator_scenarios"]["mean_success_rate_delta"],
+            -0.5,
+            places=5,
+        )
+        self.assertAlmostEqual(
+            comparison["olfactory_predator_scenarios"]["mean_success_rate_delta"],
+            -0.15,
+            places=5,
+        )
+
     def test_invalid_success_rate_delta_is_not_counted_in_group_metrics(self) -> None:
         payload = {
             "variants": {
@@ -732,11 +782,17 @@ class ComparePredatorTypeAblationEdgeCasesTest(unittest.TestCase):
                 }
             },
             "deltas_vs_reference": {
-                "drop_visual_cortex": {
+                "drop_visual_cortex_vs_modular_full": {
                     "scenarios": {
-                        "visual_olfactory_pincer": {"success_rate_delta": "bad"},
-                        "visual_hunter_open_field": {"success_rate_delta": -0.6},
-                        "olfactory_ambush": {"success_rate_delta": 0.1},
+                        "visual_olfactory_pincer": {
+                            "scenario_success_rate_delta": "bad",
+                        },
+                        "visual_hunter_open_field": {
+                            "scenario_success_rate_delta": -0.6,
+                        },
+                        "olfactory_ambush": {
+                            "scenario_success_rate_delta": 0.1,
+                        },
                     }
                 }
             },

@@ -78,7 +78,7 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
     This is where the interpretable local reflexes and final motor arbitration live.
     """
 
-    ARCHITECTURE_VERSION = 13
+    ARCHITECTURE_VERSION = 14
     _METADATA_FILE = "metadata.json"
     MONOLITHIC_POLICY_NAME = DEFAULT_MONOLITHIC_POLICY_NAME
     TRUE_MONOLITHIC_POLICY_NAME = DEFAULT_TRUE_MONOLITHIC_POLICY_NAME
@@ -151,20 +151,64 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
                 )
             )
         )
-        self.config = (
-            replace(
+        if config is not None:
+            source_capacity_profile = resolve_capacity_profile(
+                config.capacity_profile
+                if config.capacity_profile is not None
+                else config.capacity_profile_name
+            )
+            source_module_hidden_dims = dict(source_capacity_profile.module_hidden_dims)
+            config_module_hidden_dims = dict(config.module_hidden_dims)
+            explicit_module_hidden_dims = {
+                name: hidden_dim
+                for name, hidden_dim in config_module_hidden_dims.items()
+                if source_module_hidden_dims.get(name) != hidden_dim
+            }
+            module_hidden_dims = {
+                **dict(resolved_capacity_profile.module_hidden_dims),
+                **explicit_module_hidden_dims,
+            }
+
+            def _config_dim_or_profile(
+                field_name: str,
+                source_default: int,
+                profile_default: int,
+            ) -> int:
+                value = getattr(config, field_name)
+                if value is not None and int(value) != int(source_default):
+                    return int(value)
+                return int(profile_default)
+
+            action_center_hidden_dim = _config_dim_or_profile(
+                "action_center_hidden_dim",
+                source_capacity_profile.action_center_hidden_dim,
+                resolved_capacity_profile.action_center_hidden_dim,
+            )
+            arbitration_hidden_dim = _config_dim_or_profile(
+                "arbitration_hidden_dim",
+                source_capacity_profile.arbitration_hidden_dim,
+                resolved_capacity_profile.arbitration_hidden_dim,
+            )
+            motor_hidden_dim = _config_dim_or_profile(
+                "motor_hidden_dim",
+                source_capacity_profile.motor_hidden_dim,
+                resolved_capacity_profile.motor_hidden_dim,
+            )
+            self.config = replace(
                 config,
                 capacity_profile=resolved_capacity_profile,
                 capacity_profile_name=resolved_capacity_profile.name,
-                module_hidden_dims=dict(resolved_capacity_profile.module_hidden_dims),
-                integration_hidden_dim=resolved_capacity_profile.integration_hidden_dim,
+                module_hidden_dims=module_hidden_dims,
+                action_center_hidden_dim=action_center_hidden_dim,
+                arbitration_hidden_dim=arbitration_hidden_dim,
+                motor_hidden_dim=motor_hidden_dim,
+                integration_hidden_dim=action_center_hidden_dim,
             )
-            if config is not None
-            else default_brain_config(
+        else:
+            self.config = default_brain_config(
                 module_dropout=module_dropout,
-                capacity_profile=resolved_capacity_profile.name,
+                capacity_profile=resolved_capacity_profile,
             )
-        )
         self.operational_profile = runtime_operational_profile(operational_profile)
         self.reflex_aux_weights = self.operational_profile.brain_aux_weights
         self.reflex_logit_strengths = self.operational_profile.brain_reflex_logit_strengths
@@ -177,8 +221,10 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         self.motor_cortex: ProposalNetwork | None = None
         self.arbitration_network: ArbitrationNetwork | None = None
         self._frozen_modules: Set[str] = set()
-        module_hidden_dims = dict(resolved_capacity_profile.module_hidden_dims)
-        integration_hidden_dim = int(resolved_capacity_profile.integration_hidden_dim)
+        module_hidden_dims = dict(self.config.module_hidden_dims)
+        action_center_hidden_dim = int(self.config.action_center_hidden_dim)
+        arbitration_hidden_dim = int(self.config.arbitration_hidden_dim)
+        motor_hidden_dim = int(self.config.motor_hidden_dim)
         monolithic_hidden_dim = int(sum(module_hidden_dims.values()))
         if self.config.is_modular:
             self.module_bank = CorticalModuleBank(
@@ -193,14 +239,14 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
             motor_input_dim = self.action_dim + MOTOR_CONTEXT_INTERFACE.input_dim
             self.action_center = MotorNetwork(
                 input_dim=action_input_dim,
-                hidden_dim=integration_hidden_dim,
+                hidden_dim=action_center_hidden_dim,
                 output_dim=self.action_dim,
                 rng=self.rng,
                 name="action_center",
             )
             self.motor_cortex = ProposalNetwork(
                 input_dim=motor_input_dim,
-                hidden_dim=integration_hidden_dim,
+                hidden_dim=motor_hidden_dim,
                 output_dim=self.action_dim,
                 rng=self.rng,
                 name="motor_cortex",
@@ -218,14 +264,14 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
             motor_input_dim = self.action_dim + MOTOR_CONTEXT_INTERFACE.input_dim
             self.action_center = MotorNetwork(
                 input_dim=action_input_dim,
-                hidden_dim=integration_hidden_dim,
+                hidden_dim=action_center_hidden_dim,
                 output_dim=self.action_dim,
                 rng=self.rng,
                 name="action_center",
             )
             self.motor_cortex = ProposalNetwork(
                 input_dim=motor_input_dim,
-                hidden_dim=integration_hidden_dim,
+                hidden_dim=motor_hidden_dim,
                 output_dim=self.action_dim,
                 rng=self.rng,
                 name="motor_cortex",
@@ -245,7 +291,7 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
             )
             self.arbitration_network = ArbitrationNetwork(
                 input_dim=arbitration_input_dim,
-                hidden_dim=integration_hidden_dim,
+                hidden_dim=arbitration_hidden_dim,
                 rng=self.arbitration_rng,
                 name=self.ARBITRATION_NETWORK_NAME,
                 gate_adjustment_min=self.config.gate_adjustment_bounds[0],

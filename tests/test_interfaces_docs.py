@@ -500,6 +500,6 @@ class InterfaceRegistryFingerprintChangedTest(unittest.TestCase):
 
     def test_fingerprint_matches_documented_value(self) -> None:
         # The new fingerprint from docs/interfaces.md after PR
-        expected = "25164d4bee0652c6da69d28bd983d941690a6e6dfd5471dcdcc412bf522f263f"
+        expected = "cf7df9f21d3a0527bd676a63b010ee22a72edd16e86aa52610a2cb564cd45ce8"
         fp = interface_registry_fingerprint()
         self.assertEqual(fp, expected)
