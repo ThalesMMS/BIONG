@@ -439,7 +439,7 @@ class CheckpointSelectionValidationTest(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             payload = json.loads(stdout.getvalue())
 
-        self.assertEqual(manifest["package_version"], "1.0")
+        self.assertEqual(manifest["package_version"], "1.1")
         self.assertEqual(manifest["budget_profile"]["profile"], "paper")
         self.assertEqual(manifest["checkpoint_selection"]["selection"], "best")
         self.assertEqual(manifest["seed_count"], 2)

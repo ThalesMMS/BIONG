@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from ..constants import LADDER_ACTIVE_RUNGS, LADDER_ADJACENT_COMPARISONS, LADDER_PROTOCOL_NAMES, LADDER_RUNG_DESCRIPTIONS, LADDER_RUNG_MAPPING, SHAPING_DEPENDENCE_WARNING_THRESHOLD
@@ -82,6 +83,243 @@ def _report_input_lines(inputs: Mapping[str, object], combined_inputs: Mapping[s
         )
     return lines
 
+
+def _availability_summary_schema() -> list[tuple[str, str, str]]:
+    """Schema for the report overview summary.
+
+    Returns a list of (section_key, label, notes) tuples.
+
+    Notes:
+        This is currently used only to define the rows that should appear in the
+        overview block. Availability evaluation and linking is handled separately.
+    """
+    return [
+        ('inputs', 'Inputs', 'Input artifact paths used for this report.'),
+        ('diagnostics', 'Diagnostics', 'Basic run metadata extracted from the report payload.'),
+        ('variant_metadata', 'Variant assumptions', 'Confound-control metadata and access notes.'),
+        ('architecture_capacity', 'Architecture Capacity', 'Model parameter counts and capacity comparison tables.'),
+        ('capacity_sweep', 'Capacity Sweep', 'Sweep results and interpretation table (if present).'),
+        ('primary_benchmark', 'Primary Benchmark', 'Single-run benchmark-of-record metric row (if present).'),
+        ('aggregate_benchmark_tables', 'Benchmark-of-Record Summary', 'Aggregate benchmark tables with uncertainty (if present).'),
+        ('claim_test_tables', 'Claim Test Results with Uncertainty', 'Claim tests + uncertainty (if present).'),
+        ('effect_size_tables', 'Effect Sizes Against Baselines', 'Effect sizes against baselines (if present).'),
+        ('ladder_comparison', 'Architectural Ladder Comparison', 'Pairwise ladder comparisons and rung descriptions.'),
+        ('ladder_profile_comparison', 'Cross-Profile Ladder Comparison', 'Cross-profile ladder summary + shaping gaps.'),
+        ('unified_ladder_report', 'Unified Architectural Ladder Report', 'Unified ladder analysis with detailed subsections.'),
+        ('shaping_program', 'Shaping Minimization Program', 'Reward shaping audit tables and interpretation.'),
+        ('scenario_success', 'Scenario Success', 'Per-scenario success rates table.'),
+        ('ablations', 'Ablations', 'Ablation benchmark summary and predator-type comparisons.'),
+        ('credit_analysis', 'Credit Assignment Analysis', 'Credit assignment strategy analysis and interpretation.'),
+        ('predator_type_specialization', 'Predator Type Specialization', 'Specialization summary and tables.'),
+        ('representation_specialization', 'Representation Specialization', 'Representation divergence and per-module scores.'),
+        ('reflex_frequency', 'Reflex Frequency', 'Reflex event summary table and plot.'),
+        ('noise_robustness', 'Noise Robustness', 'Robustness matrix table and plot.'),
+        ('module_local_sufficiency', 'Module-Local Sufficiency', 'Module-local sufficiency analysis (if present).'),
+        ('distillation_analysis', 'Distillation Analysis', 'Distillation analysis summary and table (if present).'),
+        ('limitations', 'Limitations', 'Freeform limitations list (if present).'),
+        ('generated_files', 'Generated Files', 'List of artifact files written alongside the report.'),
+    ]
+
+
+def _availability_status_for_key(section_key: str, report: Mapping[str, object]) -> str:
+    """Return a compact availability status for a known overview section key.
+
+    This keeps logic local and intentionally shallow: it mirrors the existing
+    conditional rendering in `write_report` (e.g., `available` flags and whether
+    computed rows exist).
+    """
+    if section_key in {'inputs', 'generated_files'}:
+        return 'available'
+    if section_key == 'diagnostics':
+        diagnostics = report.get('diagnostics', [])
+        if isinstance(diagnostics, list) and diagnostics:
+            return 'available'
+        return 'expected_but_missing'
+    if section_key == 'variant_metadata':
+        variant_metadata = report.get('variant_metadata')
+        if isinstance(variant_metadata, Mapping):
+            return _section_artifact_state(variant_metadata)
+        return 'not_in_this_artifact'
+
+    payload_map = {
+        'architecture_capacity': report.get('model_capacity'),
+        'capacity_sweep': report.get('capacity_sweeps'),
+        'primary_benchmark': report.get('primary_benchmark'),
+        'aggregate_benchmark_tables': report.get('aggregate_benchmark_tables'),
+        'claim_test_tables': report.get('claim_test_tables'),
+        'effect_size_tables': report.get('effect_size_tables'),
+        'ladder_comparison': report.get('ladder_comparison'),
+        'ladder_profile_comparison': report.get('ladder_profile_comparison'),
+        'unified_ladder_report': report.get('unified_ladder_report'),
+        'shaping_program': report.get('shaping_program'),
+        'scenario_success': report.get('scenario_success'),
+        'ablations': report.get('ablations'),
+        'credit_analysis': report.get('credit_analysis'),
+        'predator_type_specialization': report.get('predator_type_specialization'),
+        'representation_specialization': report.get('representation_specialization'),
+        'reflex_frequency': report.get('reflex_frequency'),
+        'noise_robustness': report.get('noise_robustness'),
+        'module_local_sufficiency': report.get('module_local_sufficiency'),
+        'distillation_analysis': report.get('distillation_analysis'),
+        'limitations': report.get('limitations'),
+    }
+    payload = payload_map.get(section_key)
+    if isinstance(payload, Mapping):
+        return _section_artifact_state(payload)
+
+    if section_key == 'limitations':
+        limitations = report.get('limitations', [])
+        if isinstance(limitations, list) and limitations:
+            return 'available'
+        return 'not_in_this_artifact'
+
+    return 'not_in_this_artifact'
+
+
+def _slugify_github_anchor(text: str) -> str:
+    """Slugify heading text to match GitHub-flavored Markdown anchor IDs.
+
+    GitHub's algorithm is not strictly documented, but for our headings we need:
+    - lowercase
+    - collapse whitespace to '-'
+    - drop punctuation/symbols
+    - keep hyphens
+    """
+    slug = text.strip().lower()
+    slug = re.sub(r"\s+", "-", slug)
+    slug = re.sub(r"[^a-z0-9\-]", "", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug
+
+
+def _assign_github_anchors(headings: Sequence[tuple[int, str]]) -> list[tuple[int, str, str]]:
+    """Assign GitHub-style unique anchors for headings in document order.
+
+    GitHub disambiguates duplicate heading slugs by appending `-n` starting at 1
+    (e.g., `heading`, `heading-1`, `heading-2`, ...).
+    """
+    anchor_counts: dict[str, int] = {}
+    assigned: list[tuple[int, str, str]] = []
+    for level, text in headings:
+        base = _slugify_github_anchor(text)
+        count = anchor_counts.get(base, 0)
+        anchor_counts[base] = count + 1
+        anchor = base if count == 0 else f"{base}-{count}"
+        assigned.append((level, text, anchor))
+    return assigned
+
+
+def _heading_text(line: str) -> tuple[int, str] | None:
+    stripped = line.lstrip()
+    if not stripped.startswith('#'):
+        return None
+    hashes = len(stripped) - len(stripped.lstrip('#'))
+    if hashes <= 0:
+        return None
+    if len(stripped) <= hashes or stripped[hashes] != ' ':
+        return None
+    return hashes, stripped[hashes + 1 :].strip()
+
+
+def _extract_toc_from_markdown_lines(lines: Sequence[str]) -> list[tuple[int, str]]:
+    headings: list[tuple[int, str]] = []
+    for line in lines:
+        parsed = _heading_text(line)
+        if not parsed:
+            continue
+        level, text = parsed
+        if level == 1:
+            continue
+        headings.append((level, text))
+    return headings
+
+
+def assign_github_anchors(headings: Sequence[tuple[int, str]]) -> list[tuple[int, str, str]]:
+    return _assign_github_anchors(headings)
+
+
+def extract_toc_from_markdown_lines(lines: Sequence[str]) -> list[tuple[int, str]]:
+    return _extract_toc_from_markdown_lines(lines)
+
+
+def _overview_section_anchor_map(headings: Sequence[tuple[int, str, str]]) -> dict[str, str]:
+    """Return a mapping from overview section keys to anchors.
+
+    This is intentionally a small, explicit mapping so it stays aligned with
+    concrete headings emitted by `write_report`.
+    """
+
+    by_text = {text: anchor for _, text, anchor in headings}
+
+    mapping = {
+        'inputs': by_text.get('Inputs'),
+        'diagnostics': by_text.get('Diagnostics'),
+        'variant_metadata': by_text.get('Variant assumptions (confound-control metadata)'),
+        'architecture_capacity': by_text.get('Architecture Capacity'),
+        'capacity_sweep': by_text.get('Capacity Sweep'),
+        'primary_benchmark': by_text.get('Primary Benchmark'),
+        'aggregate_benchmark_tables': by_text.get('Benchmark-of-Record Summary'),
+        'claim_test_tables': by_text.get('Claim Test Results with Uncertainty'),
+        'effect_size_tables': by_text.get('Effect Sizes Against Baselines'),
+        'ladder_comparison': by_text.get('Architectural Ladder Comparison'),
+        'ladder_profile_comparison': by_text.get('Cross-Profile Ladder Comparison'),
+        'unified_ladder_report': by_text.get('Unified Architectural Ladder Report'),
+        'shaping_program': by_text.get('Shaping Minimization Program'),
+        'scenario_success': by_text.get('Scenario Success'),
+        'ablations': by_text.get('Ablations'),
+        'credit_analysis': by_text.get('Credit Assignment Analysis'),
+        'predator_type_specialization': by_text.get('Predator Type Specialization'),
+        'representation_specialization': by_text.get('Representation Specialization'),
+        'reflex_frequency': by_text.get('Reflex Frequency'),
+        'noise_robustness': by_text.get('Noise Robustness'),
+        'module_local_sufficiency': by_text.get('Module-Local Sufficiency'),
+        'distillation_analysis': by_text.get('Distillation Analysis'),
+        'limitations': by_text.get('Limitations'),
+        'generated_files': by_text.get('Generated Files'),
+    }
+
+    return {key: anchor for key, anchor in mapping.items() if anchor}
+
+
+def _render_toc_block(headings: Sequence[tuple[int, str, str]]) -> list[str]:
+    toc_lines = ['## Table of contents', '']
+    for level, text, anchor in headings:
+        indent = '  ' * max(level - 2, 0)
+        toc_lines.append(f"{indent}- [{text}](#{anchor})")
+    toc_lines.append('')
+    return toc_lines
+
+
+def _overview_status_label(status: str) -> str:
+    if status == 'available':
+        return 'available'
+    if status == 'expected_but_missing':
+        return 'missing'
+    if status == 'not_in_this_artifact':
+        return 'n/a'
+    return status
+
+
+def _render_overview_summary_block(report: Mapping[str, object], *, section_anchors: Mapping[str, str] | None = None) -> list[str]:
+    """Render an overview summary block (purely additive)."""
+    section_anchors = dict(section_anchors or {})
+
+    rows = []
+    for section_key, label, notes in _availability_summary_schema():
+        status = _availability_status_for_key(section_key, report)
+        display_label = label
+        anchor = section_anchors.get(section_key)
+        if anchor:
+            display_label = f"[{label}](#{anchor})"
+        rows.append((display_label, _overview_status_label(status), notes))
+
+    return [
+        '## Overview',
+        '',
+        _markdown_table(rows, ('Section', 'Status', 'Notes')),
+        '',
+    ]
+
 def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[str, str]:
     """
     Write filesystem artifacts (SVG, CSV, JSON, and Markdown) that represent the provided analysis report.
@@ -112,6 +350,14 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
     reflex_frequency = report.get('reflex_frequency', {})
     credit_assignment = _mapping_or_empty(report.get('credit_assignment'))
     credit_analysis = _mapping_or_empty(report.get('credit_analysis'))
+    if 'variant_metadata' in report:
+        raw_variant_metadata = report.get('variant_metadata')
+        variant_metadata = dict(_mapping_or_empty(raw_variant_metadata))
+        raw_variant_metadata_map = _mapping_or_empty(raw_variant_metadata)
+        if 'artifact_state' in raw_variant_metadata_map:
+            variant_metadata['artifact_state'] = raw_variant_metadata_map.get('artifact_state')
+    else:
+        variant_metadata = {'artifact_state': 'not_in_this_artifact'}
     aggregate_benchmark_tables = _mapping_or_empty(report.get('aggregate_benchmark_tables'))
     claim_test_tables = _mapping_or_empty(report.get('claim_test_tables'))
     effect_size_tables = _mapping_or_empty(report.get('effect_size_tables'))
@@ -326,10 +572,166 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
     ladder_report_conclusion_rows = []
     ladder_report_missing_rows = []
     ladder_report_limitation_lines = ['- None.']
+
+    comparison_support_line = _unavailable_section_message(
+        unified_ladder_report,
+        expected_but_missing='_Comparison-support payload was expected in this artifact but missing._',
+        not_in_artifact='_Comparison-support payload was not included in this artifact._',
+    )
+    comparison_support_status = 'unknown'
+    comparison_support_diagnostic_lines = ['- None.']
+
+    comparison_matrix_markdown_lines = [
+        _unavailable_section_message(
+            unified_ladder_report,
+            expected_but_missing='_Comparison-support matrix payload was expected in this artifact but missing._',
+            not_in_artifact='_Comparison-support matrix payload was not included in this artifact._',
+        )
+    ]
+
+    variant_metadata_line = _unavailable_section_message(
+        variant_metadata,
+        expected_but_missing='_Variant metadata payload was expected in this artifact but missing._',
+        not_in_artifact='_Variant metadata payload was not included in this artifact._',
+    )
+    variant_capacity_rows = []
+    variant_interface_lines = ['- None.']
+    variant_credit_lines = ['- None.']
+    variant_metadata_has_payload = any(
+        key != 'artifact_state' for key in variant_metadata
+    )
+    if variant_metadata_has_payload:
+        schema_version = str(variant_metadata.get('schema_version') or '')
+        capacity = _mapping_or_empty(variant_metadata.get('capacity'))
+        interface_access = _mapping_or_empty(variant_metadata.get('interface_access'))
+        credit_assignment_meta = _mapping_or_empty(variant_metadata.get('credit_assignment'))
+
+        def _metadata_value(value: object) -> object:
+            payload = _mapping_or_empty(value)
+            if 'value' in payload:
+                return payload.get('value')
+            return value
+
+        def _metadata_text(value: object) -> str:
+            unwrapped = _metadata_value(value)
+            if isinstance(unwrapped, list):
+                return ', '.join(str(x) for x in unwrapped) if unwrapped else '(missing)'
+            if isinstance(unwrapped, Mapping):
+                return json.dumps(unwrapped, sort_keys=True)
+            text = str(unwrapped)
+            return text if text else '(missing)'
+
+        variant_metadata_line = f"Schema version: `{schema_version or 'unknown'}`."
+        total_trainable = _metadata_value(
+            capacity.get('parameter_count_total', capacity.get('total_trainable'))
+        )
+        total_trainable_numeric = _coerce_optional_float(total_trainable)
+        compute_cost = capacity.get('approximate_compute_cost_total')
+        if compute_cost is None:
+            approximate_compute_cost = _mapping_or_empty(capacity.get('approximate_compute_cost'))
+            compute_cost = approximate_compute_cost.get('total') if approximate_compute_cost else capacity.get('approximate_compute_cost')
+        variant_capacity_rows = [
+            (
+                schema_version or 'unknown',
+                str(int(total_trainable_numeric)) if total_trainable_numeric is not None else 'unknown',
+                _markdown_value(_metadata_value(compute_cost)),
+                str(capacity.get('source') or ''),
+                str(capacity.get('status') or ''),
+            )
+        ]
+        observation_space = interface_access.get('observation_space', interface_access.get('observations'))
+        action_space = interface_access.get('action_space', interface_access.get('actions'))
+        module_inputs = interface_access.get('module_inputs', interface_access.get('internal_signals'))
+        module_outputs = interface_access.get('module_outputs')
+        privileged = interface_access.get('privileged')
+        if isinstance(privileged, list) and privileged:
+            privileged_text = ', '.join(str(x) for x in privileged)
+        elif privileged in (None, '', []):
+            privileged_text = '(none)'
+        else:
+            privileged_text = _metadata_text(privileged)
+        variant_interface_lines = [
+            f"- status: `{interface_access.get('status') or 'unknown'}`",
+            f"- architecture_signature: `{interface_access.get('architecture_signature') or ''}`" if interface_access.get('architecture_signature') else '- architecture_signature: (missing)',
+            f"- observation_space: {_metadata_text(observation_space)}",
+            f"- action_space: {_metadata_text(action_space)}",
+            f"- module_inputs: {_metadata_text(module_inputs)}",
+            f"- module_outputs: {_metadata_text(module_outputs)}",
+            f"- privileged: {privileged_text}",
+        ]
+        mechanism = credit_assignment_meta.get('mechanism')
+        if not mechanism:
+            legacy_mechanism = {}
+            if credit_assignment_meta.get('update_rule'):
+                legacy_mechanism['update_rule'] = credit_assignment_meta.get('update_rule')
+            distillation = credit_assignment_meta.get('distillation_status') or credit_assignment_meta.get('distillation')
+            if distillation:
+                legacy_mechanism['distillation'] = distillation
+            mechanism = legacy_mechanism
+        notes = (
+            variant_metadata.get('credit_assignment_notes')
+            or credit_assignment_meta.get('credit_assignment_notes')
+            or credit_assignment_meta.get('notes')
+        )
+        credit_notes = (
+            '; '.join(str(x) for x in notes)
+            if isinstance(notes, list) and notes
+            else str(notes or '')
+        )
+        credit_items = [
+            f"- status: `{credit_assignment_meta.get('status') or 'unknown'}`",
+            f"- mechanism: {_metadata_text(mechanism)}" if mechanism else '- mechanism: (missing)',
+        ]
+        if credit_notes:
+            credit_items.append(f"- notes: {credit_notes}")
+        variant_credit_lines = credit_items
+
     if unified_ladder_report and bool(unified_ladder_report.get('available')):
         conclusion = str(unified_ladder_report.get('conclusion') or 'modularity inconclusive')
         rationale = str(unified_ladder_report.get('conclusion_rationale') or '')
         ladder_report_summary_line = f'Conclusion: `{conclusion}`. {rationale}'.strip()
+
+        comparison_support = _mapping_or_empty(unified_ladder_report.get('comparison_support'))
+        if comparison_support and bool(comparison_support.get('available')):
+            comparison_support_status = str(comparison_support.get('status') or 'unknown')
+            baseline_variant = str(comparison_support.get('baseline_variant') or '')
+            comparison_variant = str(comparison_support.get('comparison_variant') or '')
+            comparison_support_line = f"Comparison: `{baseline_variant}` → `{comparison_variant}`. Status: `{comparison_support_status}`."
+            comparison_diagnostics_raw = comparison_support.get('diagnostics')
+            if isinstance(comparison_diagnostics_raw, list) and comparison_diagnostics_raw:
+                comparison_support_diagnostic_lines = [f"- {item!s}" for item in comparison_diagnostics_raw if item]
+                if not comparison_support_diagnostic_lines:
+                    comparison_support_diagnostic_lines = ['- No diagnostics reported.']
+            else:
+                comparison_support_diagnostic_lines = ['- No diagnostics reported.']
+
+        comparison_matrix = _mapping_or_empty(
+            unified_ladder_report.get('comparison_support_matrix')
+        )
+        if comparison_matrix and bool(comparison_matrix.get('available')):
+            comparison_matrix_markdown_lines = [
+                _markdown_table_or_message(
+                    _table_rows(_mapping_or_empty(comparison_matrix.get('cells'))),
+                    tuple(
+                        str(item)
+                        for item in (
+                            _mapping_or_empty(comparison_matrix.get('cells')).get('columns')
+                            or []
+                        )
+                    ),
+                    section=comparison_matrix,
+                    expected_but_missing='_Comparison-support matrix cells were expected in this artifact but missing._',
+                    not_in_artifact='_Comparison-support matrix cells were not included in this artifact._',
+                )
+            ]
+            matrix_limitations = comparison_matrix.get('limitations')
+            if isinstance(matrix_limitations, list) and matrix_limitations:
+                comparison_matrix_markdown_lines.extend(['', 'Limitations:', ''])
+                comparison_matrix_markdown_lines.extend(
+                    [f"- {item!s}" for item in matrix_limitations if item]
+                    or ['- None.']
+                )
+
         ladder_report_tables = _mapping_or_empty(unified_ladder_report.get('tables'))
         for item in _table_rows(_mapping_or_empty(ladder_report_tables.get('primary_rung_table'))):
             if not isinstance(item, Mapping):
@@ -542,7 +944,11 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
             marginal_row.append(_format_optional_metric(_noise_robustness_marginal(robustness_eval_marginals, eval_condition)))
         marginal_row.append(_format_optional_metric(_coerce_optional_float(noise_robustness.get('robustness_score'))))
         robustness_rows.append(tuple(marginal_row))
-    markdown_lines = ['# Offline Analysis Report', '', '## Inputs', '', *_report_input_lines(inputs, combined_inputs), '', '## Diagnostics', '', _markdown_table(diagnostic_rows, ('metric', 'value')), '', '## Architecture Capacity', '', f"Current run ({model_capacity.get('variant') or 'unknown'} / {model_capacity.get('architecture') or 'unknown'}): {int(_coerce_float(model_capacity.get('total_trainable'), 0.0))} trainable parameters." if model_capacity.get('available') else _unavailable_section_message(model_capacity, expected_but_missing='_Trainable-parameter payload was expected in this artifact but missing._', not_in_artifact='_Trainable-parameter payload was not included in this artifact._'), '', f"Capacity status: {capacity_analysis.get('status') or 'unavailable'} (ratio {_markdown_value(capacity_analysis.get('ratio'))})." if capacity_analysis.get('available') else 'Capacity status: unavailable.', '', _markdown_table(model_capacity_rows, ('network', 'parameters', 'proportion')), '', f'Capacity comparison against the reference variant `{capacity_reference_variant}`:' if capacity_reference_variant else 'Capacity comparison:', '', _markdown_table(aggregate_architecture_rows, ('variant', 'architecture', 'total_trainable', 'key_components', 'capacity_status', 'ratio_vs_reference')), '', '## Capacity Sweep', '', capacity_sweep_summary_block, '', _markdown_table(capacity_sweep_interpretation_rows, ('variant', 'status', 'interpretation')), '', '## Primary Benchmark', '', _markdown_table(primary_benchmark_rows, ('metric', 'scenario_success_rate', 'eval_reflex_scale', 'reference_variant', 'source')), '', '## Benchmark-of-Record Summary', '', _markdown_table_or_message(aggregate_primary_rows, ('primary_metric', 'value', 'ci_lower', 'ci_upper', 'n_seeds', 'reference_variant', 'source'), section=aggregate_benchmark_tables, expected_but_missing='_Benchmark-of-record summary rows were expected in this artifact but missing._', not_in_artifact='_Benchmark-of-record summary rows were not included in this artifact._'), '', 'Per-scenario success rates with CI[^ci-method]:', '', _markdown_table_or_message(aggregate_scenario_rows, ('scenario', 'success_rate', 'ci_lower', 'ci_upper', 'n_seeds'), section=aggregate_benchmark_tables, expected_but_missing='_Per-scenario benchmark rows were expected in this artifact but missing._', not_in_artifact='_Per-scenario benchmark rows were not included in this artifact._'), '', 'Learning-evidence deltas with CI[^ci-method]:', '', _markdown_table_or_message(aggregate_learning_rows, ('comparison', 'metric', 'delta', 'ci_lower', 'ci_upper', 'n_seeds'), section=aggregate_benchmark_tables, expected_but_missing='_Learning-evidence benchmark rows were expected in this artifact but missing._', not_in_artifact='_Learning-evidence benchmark rows were not included in this artifact._'), '', '## Claim Test Results with Uncertainty', '', _markdown_table_or_message(claim_uncertainty_rows, ('claim', 'role', 'condition', 'metric', 'value', 'ci_lower', 'ci_upper', 'n_seeds', 'cohens_d', 'magnitude'), section=claim_test_tables, expected_but_missing='_Claim-test uncertainty rows were expected in this artifact but missing._', not_in_artifact='_Claim-test uncertainty rows were not included in this artifact._'), '', '## Effect Sizes Against Baselines', '', "Cohen's d and magnitude labels are reported for the main baselines[^effect-size].", '', _markdown_table_or_message(effect_size_rows, ('domain', 'baseline', 'comparison', 'metric', 'raw_delta', 'delta_ci_lower', 'delta_ci_upper', 'cohens_d', 'magnitude', 'effect_ci_lower', 'effect_ci_upper', 'n_seeds'), section=effect_size_tables, expected_but_missing='_Effect-size rows were expected in this artifact but missing._', not_in_artifact='_Effect-size rows were not included in this artifact._'), '', '## Architectural Ladder Comparison', '', ladder_summary_line, '', _markdown_table(ladder_description_rows, ('rung', 'protocol_name', 'experimental_isolation_question')), '', 'Pairwise ladder comparisons:', '', _markdown_table(ladder_comparison_rows, ('baseline_rung', 'comparison_rung', 'scenario_success_rate_delta', 'effect_size', 'interpretation')), '', '## Cross-Profile Ladder Comparison', '', ladder_profile_summary_line, '', _markdown_table(ladder_profile_summary_rows, ('protocol_name', 'classification', 'classic_success_rate', 'ecological_success_rate', 'austere_success_rate', 'austere_competence_gap', 'interpretation')), '', 'Scenario-success shaping gaps:', '', _markdown_table(ladder_profile_gap_rows, ('protocol_name', 'classic_minus_austere', 'classic_ci_lower', 'classic_ci_upper', 'classic_effect_size', 'classic_n_seeds', 'ecological_minus_austere', 'ecological_ci_lower', 'ecological_ci_upper', 'ecological_effect_size', 'ecological_n_seeds')), '', '## Unified Architectural Ladder Report', '', ladder_report_summary_line, '', _markdown_table(ladder_report_rows, ('rung', 'protocol_name', 'variant', 'total_parameters', 'scenario_success_rate', 'ci_lower', 'ci_upper', 'effect_size_vs_a0', 'effect_magnitude', 'n_seeds')), '', 'Adjacent rung comparisons:', '', _markdown_table(ladder_report_adjacent_rows, ('baseline_rung', 'comparison_rung', 'delta', 'ci_lower', 'ci_upper', 'cohens_d', 'effect_magnitude', 'interpretation')), '', 'Capacity matching summary:', '', _markdown_table(ladder_report_capacity_rows, ('capacity_matched', 'ratio', 'largest_variant', 'smallest_variant')), '', 'Credit assignment comparison summary:', '', _markdown_table(ladder_report_credit_rows, ('rung', 'local_only_delta_vs_broadcast', 'counterfactual_delta_vs_broadcast', 'strategies_present')), '', 'Reward shaping sensitivity:', '', _markdown_table(ladder_report_shaping_rows, ('rung', 'classic_minus_austere', 'classic_effect_size', 'ecological_minus_austere', 'ecological_effect_size')), '', 'No-reflex competence:', '', _markdown_table(ladder_report_no_reflex_rows, ('rung', 'no_reflex_evaluated', 'eval_reflex_scale', 'scenario_success_rate')), '', 'Capability probe boundaries:', '', _markdown_table(ladder_report_capability_rows, ('scenario', 'requirement_level', 'first_competent_rung', 'highest_competent_rung', 'rationale')), '', '> Conclusion', '', _markdown_table(ladder_report_conclusion_rows, ('conclusion', 'rationale', 'confidence_level', 'confounding_factors')), '', 'Missing experiments before asserting modular emergence:', '', _markdown_table(ladder_report_missing_rows, ('experiment', 'description', 'priority')), '', 'Unified ladder limitations:', '', *ladder_report_limitation_lines, '', '## Shaping Minimization Program', '']
+    markdown_body_lines = ['## Inputs', '', *_report_input_lines(inputs, combined_inputs), '', '## Diagnostics', '', _markdown_table(diagnostic_rows, ('metric', 'value')), '', '## Variant assumptions (confound-control metadata)', '', variant_metadata_line, '', _markdown_table(variant_capacity_rows, ('schema_version', 'total_trainable', 'approximate_compute_cost', 'capacity_source', 'capacity_status')), '', 'Interface access:', '', *variant_interface_lines, '', 'Credit assignment:', '', *variant_credit_lines, '', '## Architecture Capacity', '', f"Current run ({model_capacity.get('variant') or 'unknown'} / {model_capacity.get('architecture') or 'unknown'}): {int(_coerce_float(model_capacity.get('total_trainable'), 0.0))} trainable parameters." if model_capacity.get('available') else _unavailable_section_message(model_capacity, expected_but_missing='_Trainable-parameter payload was expected in this artifact but missing._', not_in_artifact='_Trainable-parameter payload was not included in this artifact._'), '', f"Capacity status: {capacity_analysis.get('status') or 'unavailable'} (ratio {_markdown_value(capacity_analysis.get('ratio'))})." if capacity_analysis.get('available') else 'Capacity status: unavailable.', '', _markdown_table(model_capacity_rows, ('network', 'parameters', 'proportion')), '', f'Capacity comparison against the reference variant `{capacity_reference_variant}`:' if capacity_reference_variant else 'Capacity comparison:', '', _markdown_table(aggregate_architecture_rows, ('variant', 'architecture', 'total_trainable', 'key_components', 'capacity_status', 'ratio_vs_reference')), '', '## Capacity Sweep', '', capacity_sweep_summary_block, '', _markdown_table(capacity_sweep_interpretation_rows, ('variant', 'status', 'interpretation')), '', '## Primary Benchmark', '', _markdown_table(primary_benchmark_rows, ('metric', 'scenario_success_rate', 'eval_reflex_scale', 'reference_variant', 'source')), '', '## Benchmark-of-Record Summary', '', _markdown_table_or_message(aggregate_primary_rows, ('primary_metric', 'value', 'ci_lower', 'ci_upper', 'n_seeds', 'reference_variant', 'source'), section=aggregate_benchmark_tables, expected_but_missing='_Benchmark-of-record summary rows were expected in this artifact but missing._', not_in_artifact='_Benchmark-of-record summary rows were not included in this artifact._'), '', 'Per-scenario success rates with CI[^ci-method]:', '', _markdown_table_or_message(aggregate_scenario_rows, ('scenario', 'success_rate', 'ci_lower', 'ci_upper', 'n_seeds'), section=aggregate_benchmark_tables, expected_but_missing='_Per-scenario benchmark rows were expected in this artifact but missing._', not_in_artifact='_Per-scenario benchmark rows were not included in this artifact._'), '', 'Learning-evidence deltas with CI[^ci-method]:', '', _markdown_table_or_message(aggregate_learning_rows, ('comparison', 'metric', 'delta', 'ci_lower', 'ci_upper', 'n_seeds'), section=aggregate_benchmark_tables, expected_but_missing='_Learning-evidence benchmark rows were expected in this artifact but missing._', not_in_artifact='_Learning-evidence benchmark rows were not included in this artifact._'), '', '## Claim Test Results with Uncertainty', '', _markdown_table_or_message(claim_uncertainty_rows, ('claim', 'role', 'condition', 'metric', 'value', 'ci_lower', 'ci_upper', 'n_seeds', 'cohens_d', 'magnitude'), section=claim_test_tables, expected_but_missing='_Claim-test uncertainty rows were expected in this artifact but missing._', not_in_artifact='_Claim-test uncertainty rows were not included in this artifact._'), '', '## Effect Sizes Against Baselines', '', "Cohen's d and magnitude labels are reported for the main baselines[^effect-size].", '', _markdown_table_or_message(effect_size_rows, ('domain', 'baseline', 'comparison', 'metric', 'raw_delta', 'delta_ci_lower', 'delta_ci_upper', 'cohens_d', 'magnitude', 'effect_ci_lower', 'effect_ci_upper', 'n_seeds'), section=effect_size_tables, expected_but_missing='_Effect-size rows were expected in this artifact but missing._', not_in_artifact='_Effect-size rows were not included in this artifact._'), '', '## Architectural Ladder Comparison', '', ladder_summary_line, '', _markdown_table(ladder_description_rows, ('rung', 'protocol_name', 'experimental_isolation_question')), '', 'Pairwise ladder comparisons:', '', _markdown_table(ladder_comparison_rows, ('baseline_rung', 'comparison_rung', 'scenario_success_rate_delta', 'effect_size', 'interpretation')), '', '## Cross-Profile Ladder Comparison', '', ladder_profile_summary_line, '', _markdown_table(ladder_profile_summary_rows, ('protocol_name', 'classification', 'classic_success_rate', 'ecological_success_rate', 'austere_success_rate', 'austere_competence_gap', 'interpretation')), '', 'Scenario-success shaping gaps:', '', _markdown_table(ladder_profile_gap_rows, ('protocol_name', 'classic_minus_austere', 'classic_ci_lower', 'classic_ci_upper', 'classic_effect_size', 'classic_n_seeds', 'ecological_minus_austere', 'ecological_ci_lower', 'ecological_ci_upper', 'ecological_effect_size', 'ecological_n_seeds')), '', '## Unified Architectural Ladder Report', '', ladder_report_summary_line, '', '### Comparison support status (confound-controlled)', '', comparison_support_line, '', 'Diagnostics:', '', *comparison_support_diagnostic_lines, '', '### Comparison status matrix (confound-controlled)', '', *comparison_matrix_markdown_lines, '', _markdown_table(ladder_report_rows, ('rung', 'protocol_name', 'variant', 'total_parameters', 'scenario_success_rate', 'ci_lower', 'ci_upper', 'effect_size_vs_a0', 'effect_magnitude', 'n_seeds')), '', 'Adjacent rung comparisons:', '', _markdown_table(ladder_report_adjacent_rows, ('baseline_rung', 'comparison_rung', 'delta', 'ci_lower', 'ci_upper', 'cohens_d', 'effect_magnitude', 'interpretation')), '', 'Capacity matching summary:', '', _markdown_table(ladder_report_capacity_rows, ('capacity_matched', 'ratio', 'largest_variant', 'smallest_variant')), '', 'Credit assignment comparison summary:', '', _markdown_table(ladder_report_credit_rows, ('rung', 'local_only_delta_vs_broadcast', 'counterfactual_delta_vs_broadcast', 'strategies_present')), '', 'Reward shaping sensitivity:', '', _markdown_table(ladder_report_shaping_rows, ('rung', 'classic_minus_austere', 'classic_effect_size', 'ecological_minus_austere', 'ecological_effect_size')), '', 'No-reflex competence:', '', _markdown_table(ladder_report_no_reflex_rows, ('rung', 'no_reflex_evaluated', 'eval_reflex_scale', 'scenario_success_rate')), '', 'Capability probe boundaries:', '', _markdown_table(ladder_report_capability_rows, ('scenario', 'requirement_level', 'first_competent_rung', 'highest_competent_rung', 'rationale')), '', '> Conclusion', '', _markdown_table(ladder_report_conclusion_rows, ('conclusion', 'rationale', 'confidence_level', 'confounding_factors')), '', 'Missing experiments before asserting modular emergence:', '', _markdown_table(ladder_report_missing_rows, ('experiment', 'description', 'priority')), '', 'Unified ladder limitations:', '', *ladder_report_limitation_lines, '', '## Shaping Minimization Program', '']
+    toc_headings = _extract_toc_from_markdown_lines(markdown_body_lines)
+    assigned_headings = _assign_github_anchors(toc_headings)
+    overview_anchors = _overview_section_anchor_map(assigned_headings)
+    markdown_lines = ['# Offline Analysis Report', '', *_render_overview_summary_block(report, section_anchors=overview_anchors), '', *_render_toc_block(assigned_headings), *markdown_body_lines]
     if shaping_warning_line:
         markdown_lines.extend([shaping_warning_line, ''])
     markdown_lines.extend(['### Dense vs Minimal Gap', '', _markdown_table(shaping_gap_rows, ('comparison', 'scenario_success_rate_delta', 'episode_success_rate_delta', 'mean_reward_delta', 'interpretation')), '', '### Profile-Level Summary', '', shaping_removed_gap_line, '', 'Profile disposition weight proxies:', '', _markdown_table(shaping_profile_rows, ('profile', 'disposition', 'total_weight_proxy')), '', 'Disposition component summary:', '', _markdown_table(shaping_disposition_rows, ('disposition', 'component_count', 'components')), '', '### Component Dispositions', '', _markdown_table(shaping_component_rows, ('Component', 'Category', 'Risk', 'Disposition', 'Rationale')), '', '### Behavior Survival', '', shaping_summary_line, '', _markdown_table(shaping_survival_rows, ('scenario', 'austere_success_rate', 'survives', 'episodes')), '', '## Scenario Success', '', _markdown_table(scenario_rows, ('scenario', 'success_rate', 'check_count')), '', '## Ablations', '', _markdown_table(ablation_rows, ('variant', 'architecture', 'eval_reflex_scale', 'scenario_success_rate', 'capacity_status')), '', 'Ablation predator-type comparisons:', '', _markdown_table(ablation_predator_type_rows, ('variant', 'visual_scenarios', 'olfactory_scenarios', 'visual_minus_olfactory')), '', '## Credit Assignment Analysis', '', _markdown_table(credit_strategy_rows, ('rung', 'strategy', 'scenario_success_rate', 'delta_vs_broadcast', 'dominant_module')), '', _markdown_table(credit_architecture_rows, ('architecture_rung', 'strategy', 'variant', 'scenario_success_rate', 'effective_module_count')), '', _markdown_table(credit_module_rows, ('rung', 'strategy', 'module', 'module_credit_weight', 'counterfactual_credit_weight', 'module_gradient_norm', 'dominant_module_rate')), '', _markdown_table(credit_scenario_rows, ('rung', 'strategy', 'scenario', 'success_rate')), '', *credit_interpretation_lines, '', '## Predator Type Specialization', '', specialization_summary_line, '', _markdown_table(specialization_rows, ('predator_type', 'visual_cortex_activation', 'sensory_cortex_activation', 'dominant_module')), '', _markdown_table(specialization_delta_rows, ('differential', 'value')), '', '## Representation Specialization', '', representation_summary_line, '', representation_chart_line, '', _markdown_table(representation_divergence_rows, ('module', 'js_divergence', 'interpretation')), '', _markdown_table(representation_action_center_rows, ('module', 'gate_differential', 'contribution_differential')), '', '## Noise Robustness Matrix', '', _markdown_table(robustness_rows, ('train \\ eval', *robustness_eval_conditions, 'mean')) if robustness_rows else '_No noise robustness matrix was available._', '', f"Overall robustness score: {_format_optional_metric(_coerce_optional_float(_mapping_or_empty(noise_robustness).get('robustness_score')))}.", f"Diagonal score: {_format_optional_metric(_coerce_optional_float(_mapping_or_empty(noise_robustness).get('diagonal_score')))}.", f"Off-diagonal score: {_format_optional_metric(_coerce_optional_float(_mapping_or_empty(noise_robustness).get('off_diagonal_score')))}.", '', '## Module-Local Sufficiency', '', module_local_summary_line if module_local_summary_line else _unavailable_section_message(module_local_sufficiency, expected_but_missing='_Module-local sufficiency summary was expected in this artifact but missing._', not_in_artifact='_Module-local sufficiency summary was not included in this artifact._'), '', _markdown_table_or_message(module_local_rows, ('module', 'coverage_mode', 'seeds', 'minimal_sufficient_level', 'canonical_v4_pass', 'partial_variant_coverage'), section=module_local_sufficiency, expected_but_missing='_Module-local sufficiency rows were expected in this artifact but missing._', not_in_artifact='_Module-local sufficiency rows were not included in this artifact._'), '', '## Distillation Diagnostic', '', distillation_summary_line if distillation_summary_line else _unavailable_section_message(distillation_analysis, expected_but_missing='_Distillation diagnostic summary was expected in this artifact but missing._', not_in_artifact='_Distillation diagnostic summary was not included in this artifact._'), '', _markdown_table_or_message(distillation_rows, ('condition', 'episodes', 'survival_rate', 'mean_reward', 'mean_food_distance_delta'), section=distillation_analysis, expected_but_missing='_Distillation diagnostic rows were expected in this artifact but missing._', not_in_artifact='_Distillation diagnostic rows were not included in this artifact._'), '', '## Limitations', ''])
@@ -562,4 +968,53 @@ def write_report(output_dir: str | Path, report: Mapping[str, object]) -> dict[s
     report_md_path.write_text('\n'.join(markdown_lines) + '\n', encoding='utf-8')
     return {'report_md': str(report_md_path), 'report_json': str(report_json_path), 'training_eval_svg': str(training_svg_path), 'scenario_success_svg': str(scenario_svg_path), 'robustness_matrix_svg': str(robustness_svg_path), 'representation_specialization_svg': str(representation_svg_path), 'scenario_checks_csv': str(scenario_checks_path), 'reward_components_csv': str(reward_components_path), 'ablation_comparison_svg': ablation_svg_path, 'capacity_comparison_svg': capacity_comparison_svg_path, 'capacity_sweep_svg': capacity_comparison_svg_path, 'reflex_frequency_svg': reflex_svg_path}
 
-__all__ = ["build_report_data", "write_report"]
+def normalize_gate_status(value: object) -> str:
+    """Normalize a gate/check outcome to a small set of status labels.
+
+    This helper exists so the index (and any other static views) can apply a
+    consistent mapping for highlighting. It is intentionally conservative.
+
+    Accepted inputs:
+    - bool: True -> pass, False -> fail
+    - str: common spellings like 'passed', 'failed', 'skipped', 'borderline'
+    - mapping: looks for keys like 'passed'/'pass'/'status'
+
+    Returns:
+        One of: 'pass', 'fail', 'skipped', 'borderline', 'unknown'
+    """
+    if isinstance(value, bool):
+        return 'pass' if value else 'fail'
+
+    if isinstance(value, Mapping):
+        for key in ('status', 'outcome', 'result'):
+            if key in value:
+                nested = value.get(key)
+                if isinstance(nested, Mapping):
+                    return 'unknown'
+                return normalize_gate_status(nested)
+        for key in ('passed', 'pass', 'ok', 'success'):
+            if key in value and isinstance(value.get(key), bool):
+                return 'pass' if bool(value.get(key)) else 'fail'
+
+    if value is None:
+        return 'unknown'
+
+    status = str(value).strip().lower()
+    if status in {'pass', 'passed', 'ok', 'success', 'true'}:
+        return 'pass'
+    if status in {'fail', 'failed', 'error', 'false'}:
+        return 'fail'
+    if status in {'skipped', 'skip', 'not_run', 'not_applicable', 'n/a'}:
+        return 'skipped'
+    if status in {'borderline', 'warning', 'soft_fail'}:
+        return 'borderline'
+    return 'unknown'
+
+
+__all__ = [
+    "assign_github_anchors",
+    "build_report_data",
+    "extract_toc_from_markdown_lines",
+    "normalize_gate_status",
+    "write_report",
+]

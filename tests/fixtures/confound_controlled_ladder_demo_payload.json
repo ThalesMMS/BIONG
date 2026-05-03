@@ -1,0 +1,100 @@
+{
+  "behavior_evaluation": {
+    "ablations": {
+      "variants": {
+        "true_monolithic_policy": {
+          "summary": {
+            "scenario_success_rate": 0.5
+          },
+          "uncertainty": {
+            "scenario_success_rate": {
+              "seed_items": [
+                {"seed": "0", "value": 0.4},
+                {"seed": "1", "value": 0.5},
+                {"seed": "2", "value": 0.6}
+              ]
+            }
+          },
+          "parameter_counts": {
+            "total_trainable": 1000
+          },
+          "variant_metadata": {
+            "schema_version": "confound_control_v2",
+            "capacity": {
+              "parameter_count_total": 1000
+            },
+            "interface_access": {
+              "architecture_signature": {
+                "observation_space": "default_v1",
+                "action_space": "default_v1"
+              }
+            },
+            "credit_assignment": {
+              "mechanism": {
+                "training_regime": {"name": "baseline"},
+                "loss_structure": {
+                  "loss_override_penalty_weight": 0.0,
+                  "loss_dominance_penalty_weight": 0.0,
+                  "arbitration_regularization_weight": 0.0,
+                  "arbitration_valence_regularization_weight": 0.0
+                },
+                "distillation": {
+                  "enabled": false,
+                  "epochs": 0,
+                  "temperature": 1.0,
+                  "lr": 0.0
+                }
+              }
+            }
+          }
+        },
+        "modular_full": {
+          "summary": {
+            "scenario_success_rate": 0.55
+          },
+          "uncertainty": {
+            "scenario_success_rate": {
+              "seed_items": [
+                {"seed": "0", "value": 0.45},
+                {"seed": "1", "value": 0.55},
+                {"seed": "2", "value": 0.65}
+              ]
+            }
+          },
+          "parameter_counts": {
+            "total_trainable": 1100
+          },
+          "variant_metadata": {
+            "schema_version": "confound_control_v2",
+            "capacity": {
+              "parameter_count_total": 1100
+            },
+            "interface_access": {
+              "architecture_signature": {
+                "observation_space": "default_v1",
+                "action_space": "default_v1"
+              }
+            },
+            "credit_assignment": {
+              "mechanism": {
+                "training_regime": {"name": "baseline"},
+                "loss_structure": {
+                  "loss_override_penalty_weight": 0.0,
+                  "loss_dominance_penalty_weight": 0.0,
+                  "arbitration_regularization_weight": 0.0,
+                  "arbitration_valence_regularization_weight": 0.0
+                },
+                "distillation": {
+                  "enabled": false,
+                  "epochs": 0,
+                  "temperature": 1.0,
+                  "lr": 0.0
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

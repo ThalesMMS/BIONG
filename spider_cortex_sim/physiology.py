@@ -305,6 +305,15 @@ def resolve_autonomic_behaviors(
             )
         return
 
+    if action_name != "STAY":
+        reset_sleep_state(world)
+        if tick_context is not None:
+            tick_context.record_event(
+                "autonomic",
+                "sleep_reset_non_stay",
+                action=action_name,
+            )
+
     fatigue_before = world.state.fatigue
     shelter_role = world.shelter_role_at(world.spider_pos())
     can_attempt_rest = (
@@ -363,11 +372,8 @@ def resolve_autonomic_behaviors(
             hunger=round(float(world.state.hunger), 6),
         )
     if night or fatigue_before > 0.45 or world.state.sleep_debt > 0.45:
-        if action_name != "STAY":
-            reward_components["resting"] -= 0.10 + (0.08 if night else 0.04) + 0.32 * world.state.hunger
-        else:
-            reward_components["resting"] -= 0.10 + 0.20 * world.state.hunger
-    elif action_name == "STAY" and world.state.hunger > 0.45 and not night:
+        reward_components["resting"] -= 0.10 + 0.20 * world.state.hunger
+    elif world.state.hunger > 0.45 and not night:
         reward_components["resting"] -= 0.08 + 0.16 * world.state.hunger
 
 

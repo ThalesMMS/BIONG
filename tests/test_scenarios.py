@@ -7,6 +7,7 @@ from spider_cortex_sim.scenarios import (
     CAPABILITY_PROBE_SCENARIOS,
     FAST_VISUAL_HUNTER_PROFILE,
     FOOD_DEPRIVATION_INITIAL_HUNGER,
+    NIGHT_REST_HUNGER_BASELINE,
     NIGHT_REST_INITIAL_SLEEP_DEBT,
     ProbeType,
     SCENARIO_NAMES,
@@ -408,6 +409,10 @@ class ScenariosInitExportsTest(unittest.TestCase):
     def test_night_rest_initial_sleep_debt_exported(self) -> None:
         """NIGHT_REST_INITIAL_SLEEP_DEBT is accessible from the scenarios package."""
         self.assertAlmostEqual(NIGHT_REST_INITIAL_SLEEP_DEBT, 0.60)
+
+    def test_night_rest_hunger_baseline_exported(self) -> None:
+        """NIGHT_REST_HUNGER_BASELINE is accessible from the scenarios package."""
+        self.assertAlmostEqual(NIGHT_REST_HUNGER_BASELINE, 0.02)
 
     def test_sleep_vs_exploration_initial_sleep_debt_exported(self) -> None:
         """SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT is accessible from the scenarios package."""

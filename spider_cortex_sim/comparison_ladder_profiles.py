@@ -31,6 +31,12 @@ from .reward import (
 )
 from .statistics import cohens_d
 
+# Canonical A0-A4 ladder.
+#
+# NOTE: A0/A1 variants are configured with module_dropout=0.0 in the ablation
+# registry, while A2-A4 default to the caller-provided dropout. If you need a
+# *strict* interface/capacity-matched ladder run (e.g., for confound-controlled
+# comparisons), pass `module_dropout=0.0` at the CLI.
 LADDER_VARIANT_NAMES: tuple[str, ...] = (
     TRUE_MONOLITHIC_POLICY_NAME,
     MONOLITHIC_POLICY_NAME,

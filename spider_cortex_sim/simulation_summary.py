@@ -392,6 +392,160 @@ class SimulationSummaryMixin:
                 },
             },
             "approximate_compute_cost": approximate_compute_cost,
+            "variant_metadata": {
+                "schema_version": "confound_control_v2",
+                "capacity": {
+                    "status": "captured",
+                    "parameter_count_total": int(total_trainable_parameters),
+                    "parameter_count_per_network": {
+                        str(name): int(count)
+                        for name, count in parameter_counts_by_network.items()
+                    },
+                    "parameter_count_proportions": {
+                        str(name): (
+                            0.0
+                            if total_trainable_parameters <= 0
+                            else float(count / total_trainable_parameters)
+                        )
+                        for name, count in parameter_counts_by_network.items()
+                    },
+                    "hidden_size": {
+                        "value": int(self.brain.config.hidden_dim or 0),
+                        "source": "config",
+                    }
+                    if getattr(self.brain.config, "hidden_dim", None) is not None
+                    else {
+                        "value": "unknown",
+                        "reason": "brain.config.hidden_dim unavailable",
+                    },
+                    "num_modules": {
+                        "value": len(getattr(self.brain.config, "module_hidden_dims", {}) or {}),
+                        "source": "config",
+                    },
+                    "training_steps": {
+                        "value": "unknown",
+                        "reason": "training steps not recorded in summary",
+                    },
+                    "env_steps": {
+                        "value": "unknown",
+                        "reason": "environment steps not recorded in summary",
+                    },
+                    "compute_budget_notes": {
+                        "value": "unknown",
+                        "reason": "compute budget not summarized",
+                    },
+                    "approximate_compute_cost": deepcopy(approximate_compute_cost),
+                },
+                "interface_access": {
+                    "status": "captured",
+                    "observation_space": {
+                        "value": "unknown",
+                        "reason": "observation schema hash not recorded",
+                    },
+                    "action_space": {
+                        "value": "unknown",
+                        "reason": "action schema hash not recorded",
+                    },
+                    "module_inputs": {
+                        "value": "unknown",
+                        "reason": "per-module input keys not recorded",
+                    },
+                    "module_outputs": {
+                        "value": "unknown",
+                        "reason": "per-module output keys not recorded",
+                    },
+                    "cross_module_signals": {
+                        "value": "unknown",
+                        "reason": "explicit cross-module channels not recorded",
+                    },
+                    "privileged_access_notes": {
+                        "value": "unknown",
+                        "reason": "privileged access notes not recorded",
+                    },
+                    "architecture_signature": deepcopy(
+                        getattr(self.brain, "_architecture_signature", lambda: {})()
+                    ),
+                    "interface_registry": deepcopy(
+                        getattr(self.brain, "_interface_registry", lambda: {})()
+                    ),
+                },
+                "credit_assignment": {
+                    "status": "captured",
+                    "training_objective": {
+                        "value": "unknown",
+                        "reason": "high-level objective not summarized",
+                    },
+                    "loss_terms": {
+                        "value": "unknown",
+                        "reason": "loss term list not enumerated",
+                    },
+                    "gradient_flow": {
+                        "value": "unknown",
+                        "reason": "gradient flow not traced",
+                    },
+                    "module_supervision": {
+                        "value": "unknown",
+                        "reason": "per-module supervision not recorded",
+                    },
+                    "shared_vs_local": {
+                        "value": "unknown",
+                        "reason": "shared_vs_local label not inferred",
+                    },
+                    "mechanism": {
+                        "training_regime": deepcopy(training_regime_summary),
+                        "loss_structure": {
+                            "loss_override_penalty_weight": float(
+                                training_regime_summary.get(
+                                    "loss_override_penalty_weight",
+                                    0.0,
+                                )
+                            ),
+                            "loss_dominance_penalty_weight": float(
+                                training_regime_summary.get(
+                                    "loss_dominance_penalty_weight",
+                                    0.0,
+                                )
+                            ),
+                            "arbitration_regularization_weight": float(
+                                self.brain.arbitration_regularization_weight
+                            ),
+                            "arbitration_valence_regularization_weight": float(
+                                self.brain.arbitration_valence_regularization_weight
+                            ),
+                        },
+                        "distillation": {
+                            "enabled": bool(
+                                training_regime_summary.get(
+                                    "distillation_enabled",
+                                    False,
+                                )
+                            ),
+                            "epochs": int(
+                                training_regime_summary.get(
+                                    "distillation_epochs",
+                                    0,
+                                )
+                            ),
+                            "temperature": float(
+                                training_regime_summary.get(
+                                    "distillation_temperature",
+                                    1.0,
+                                )
+                            ),
+                            "lr": float(
+                                training_regime_summary.get(
+                                    "distillation_lr",
+                                    0.0,
+                                )
+                            ),
+                        },
+                    },
+                },
+                "credit_assignment_notes": [
+                    "Captured at summary level from training regime + learning config; "
+                    "does not explicitly trace gradient flow or per-module supervision.",
+                ],
+            }
         }
         frozen_modules = self.brain.frozen_module_names()
         if frozen_modules:

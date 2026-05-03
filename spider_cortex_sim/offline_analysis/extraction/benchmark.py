@@ -31,6 +31,9 @@ PARAMETER_COUNT_METADATA_KEYS = frozenset(
         "architecture",
         "by_network",
         "per_network",
+        "parameter_count_per_network",
+        "parameter_count_proportions",
+        "parameter_count_total",
         "proportions",
         "total",
         "total_trainable",
@@ -205,10 +208,21 @@ def build_primary_benchmark(
 
 
 def _parameter_counts_payload(value: object) -> dict[str, object]:
+    """Normalize parameter count payloads across schema versions.
+
+    This helper supports both legacy summaries that store parameter counts under
+    `summary.parameter_counts` and confound-control v2 summaries that store the
+    same data under `summary.variant_metadata.capacity`.
+    """
     payload = _mapping_or_empty(value)
-    raw_by_network = _mapping_or_empty(payload.get("per_network"))
+
+    # confound-control v2: `capacity.parameter_count_per_network`
+    raw_by_network = _mapping_or_empty(payload.get("parameter_count_per_network"))
+    if not raw_by_network:
+        raw_by_network = _mapping_or_empty(payload.get("per_network"))
     if not raw_by_network:
         raw_by_network = _mapping_or_empty(payload.get("by_network"))
+
     by_network = {
         str(name): int(_coerce_float(count, 0.0))
         for name, count in raw_by_network.items()
@@ -221,12 +235,20 @@ def _parameter_counts_payload(value: object) -> dict[str, object]:
             for name, count in payload.items()
             if str(name) not in PARAMETER_COUNT_METADATA_KEYS
         }
-    total_trainable = int(_coerce_float(payload.get("total"), 0.0))
+
+    # legacy: `total` / `total_trainable`; v2: `parameter_count_total`
+    total_trainable = int(_coerce_float(payload.get("parameter_count_total"), 0.0))
+    if total_trainable <= 0:
+        total_trainable = int(_coerce_float(payload.get("total"), 0.0))
     if total_trainable <= 0:
         total_trainable = int(_coerce_float(payload.get("total_trainable"), 0.0))
     if total_trainable <= 0 and by_network:
         total_trainable = int(sum(by_network.values()))
-    raw_proportions = _mapping_or_empty(payload.get("proportions"))
+
+    # legacy: `proportions`; v2: `parameter_count_proportions`
+    raw_proportions = _mapping_or_empty(payload.get("parameter_count_proportions"))
+    if not raw_proportions:
+        raw_proportions = _mapping_or_empty(payload.get("proportions"))
     proportions = {
         str(name): _coerce_float(value)
         for name, value in raw_proportions.items()
@@ -237,6 +259,7 @@ def _parameter_counts_payload(value: object) -> dict[str, object]:
             name: round(count / total_trainable, 6)
             for name, count in by_network.items()
         }
+
     return {
         "architecture": str(payload.get("architecture") or ""),
         "by_network": by_network,
@@ -472,7 +495,11 @@ def extract_model_capacity(summary: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def extract_architecture_capacity(summary: Mapping[str, object]) -> dict[str, object]:
+def extract_architecture_capacity(
+    summary: Mapping[str, object],
+    *,
+    variant_name: str | None = None,
+) -> dict[str, object]:
     """
     Extract architecture-capacity rows from a summary or ablation payload.
 
@@ -496,8 +523,14 @@ def extract_architecture_capacity(summary: Mapping[str, object]) -> dict[str, ob
                     f"Variant {variant_name} had a non-mapping payload."
                 )
                 continue
-            counts = _parameter_counts_payload(payload.get("parameter_counts"))
-            if not counts["by_network"]:
+            counts = _parameter_counts_payload(
+                payload.get("parameter_counts")
+                or _mapping_or_empty(
+                    _mapping_or_empty(payload.get("variant_metadata")).get("capacity")
+                )
+            )
+            total_trainable = int(_coerce_float(counts.get("total_trainable"), 0.0))
+            if not counts["by_network"] and total_trainable == 0:
                 invalid_variants.append(
                     f"Variant {variant_name} was missing parameter counts."
                 )
@@ -507,7 +540,7 @@ def extract_architecture_capacity(summary: Mapping[str, object]) -> dict[str, ob
                 counts["by_network"].items(),
                 key=lambda item: (-item[1], item[0]),
             )
-            totals_by_variant[str(variant_name)] = int(counts["total_trainable"])
+            totals_by_variant[str(variant_name)] = total_trainable
             rows.append(
                 {
                     "variant": str(variant_name),
@@ -516,7 +549,7 @@ def extract_architecture_capacity(summary: Mapping[str, object]) -> dict[str, ob
                         or config_payload.get("architecture")
                         or ""
                     ),
-                    "total_trainable": int(counts["total_trainable"]),
+                    "total_trainable": total_trainable,
                     "key_components": ", ".join(
                         f"{name}={count}"
                         for name, count in sorted_components[:3]
@@ -594,6 +627,47 @@ def extract_architecture_capacity(summary: Mapping[str, object]) -> dict[str, ob
 
     model_capacity = extract_model_capacity(summary)
     if not model_capacity["available"]:
+        config = _mapping_or_empty(summary.get("config"))
+        brain = _mapping_or_empty(config.get("brain"))
+        raw_counts = summary.get("parameter_counts")
+        raw_counts_source = "summary.parameter_counts"
+        if not raw_counts:
+            raw_counts = _mapping_or_empty(
+                _mapping_or_empty(summary.get("variant_metadata")).get("capacity")
+            )
+            raw_counts_source = "summary.variant_metadata.capacity"
+        counts = _parameter_counts_payload(raw_counts)
+        total_trainable = int(_coerce_float(counts.get("total_trainable"), 0.0))
+        if total_trainable > 0:
+            current_variant = str(
+                variant_name or model_capacity.get("variant") or brain.get("name") or ""
+            )
+            capacity_analysis = compare_capacity_totals(
+                {current_variant: total_trainable}
+            )
+            return {
+                "available": True,
+                "reference_variant": current_variant,
+                "total_trainable": total_trainable,
+                "capacity_analysis": capacity_analysis,
+                "rows": [
+                    {
+                        "variant": current_variant,
+                        "architecture": str(
+                            counts["architecture"] or brain.get("architecture") or ""
+                        ),
+                        "total_trainable": total_trainable,
+                        "key_components": "",
+                        "capacity_matched": True,
+                        "capacity_status": "reference",
+                        "reference_variant": current_variant,
+                        "reference_total_trainable": total_trainable,
+                        "total_ratio_vs_reference": 1.0,
+                        "source": raw_counts_source,
+                    }
+                ],
+                "limitations": [],
+            }
         return {
             "available": False,
             "reference_variant": "",
@@ -611,6 +685,9 @@ def extract_architecture_capacity(summary: Mapping[str, object]) -> dict[str, ob
     return {
         "available": True,
         "reference_variant": str(model_capacity.get("variant") or ""),
+        "total_trainable": int(
+            _coerce_float(model_capacity.get("total_trainable"), 0.0)
+        ),
         "capacity_analysis": capacity_analysis,
         "rows": [
             {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Dict, Mapping, Sequence
 
 from ..metrics import (
@@ -36,6 +37,8 @@ from .trace import (
     _payload_float,
     _payload_text,
 )
+
+NIGHT_SHELTER_OCCUPANCY_CUTOFF = 0.9
 
 def _food_approached(metrics: Mapping[str, object]) -> bool:
     """
@@ -206,11 +209,69 @@ def _classify_two_shelter_tradeoff_failure(metrics: Mapping[str, object]) -> str
     night_shelter_occupancy_rate = (
         _float_or_none(metrics.get("night_shelter_occupancy_rate")) or 0.0
     )
-    if _food_approached(metrics) and night_shelter_occupancy_rate < 0.9:
+    if _food_approached(metrics) and night_shelter_occupancy_rate < NIGHT_SHELTER_OCCUPANCY_CUTOFF:
         return "no_return_to_shelter"
-    if night_shelter_occupancy_rate < 0.9:
+    if night_shelter_occupancy_rate < NIGHT_SHELTER_OCCUPANCY_CUTOFF:
         return "night_shelter_missed"
     return "scoring_mismatch"
+
+
+def _attribute_two_shelter_tradeoff_failure(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+    metrics: Mapping[str, object],
+) -> str:
+    """Assign a higher-level failure attribution label.
+
+    Labels are coarse and are meant to quickly route investigation:
+    - perception: agent likely never detected/considered the alternative shelter.
+    - memory: agent likely encoded shelter but failed to return / failed to retain it.
+    - arbitration: agent moved but did not choose to prioritize shelter vs competing drives.
+    - motor: agent appeared to choose shelter but did not execute (pathing/target binding).
+    - reward: fallback bucket for scoring/utility mismatches.
+
+    Note: This intentionally uses only trace/metric information available in scenario traces.
+    """
+    _ = stats  # Reserved for future attribution rules.
+    if metrics.get("checks_passed", False):
+        return "success"
+
+    left_shelter = bool(metrics.get("left_shelter", False))
+    if not left_shelter:
+        return "motor"
+
+    predator_contacts = int(_int_or_none(metrics.get("predator_contacts")) or 0)
+    if predator_contacts > 0:
+        return "motor"
+
+    alive = bool(metrics.get("alive", False))
+    if not alive:
+        return "motor"
+
+    # Did the agent ever make progress toward food? If yes, it perceived at least one goal and can move.
+    progressed_to_food = _food_approached(metrics)
+
+    # If we have action-selection payloads, use the winning_valence share as a proxy for arbitration.
+    hunger_share = _hunger_valence_rate(trace)
+    if hunger_share >= 0.8:
+        return "arbitration"
+
+    # If the agent made little/no food progress yet also failed to occupy the night shelter,
+    # assume perception/memory problem; distinguish using whether predator was seen.
+    predator_visible_ticks = int(_int_or_none(metrics.get("predator_visible_ticks")) or 0)
+    if not progressed_to_food:
+        return "perception" if predator_visible_ticks == 0 else "arbitration"
+
+    # Made food progress but failed to return/occupy the alternative shelter.
+    night_val = _float_or_none(metrics.get("night_shelter_occupancy_rate"))
+    if (
+        night_val is not None
+        and math.isfinite(night_val)
+        and night_val < NIGHT_SHELTER_OCCUPANCY_CUTOFF
+    ):
+        return "memory"
+
+    return "reward"
 
 
 def _classify_corridor_gauntlet_failure(

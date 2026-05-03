@@ -510,6 +510,7 @@ def build_report_data(
         "predator_type_specialization": predator_type_specialization,
         "representation_specialization": representation_specialization,
         "parameter_counts": _summary_parameter_counts_payload(summary, model_capacity),
+        "variant_metadata": dict(_mapping_or_empty(summary.get("variant_metadata"))),
         "model_capacity": model_capacity,
         "capacity_sweeps": capacity_sweeps,
         "capacity_analysis": dict(capacity_analysis),

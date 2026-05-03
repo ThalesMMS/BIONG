@@ -8,6 +8,7 @@ from ..world import SpiderWorld
 from .specs import (
     FAST_VISUAL_HUNTER_PROFILE,
     FOOD_DEPRIVATION_INITIAL_HUNGER,
+    NIGHT_REST_HUNGER_BASELINE,
     NIGHT_REST_INITIAL_SLEEP_DEBT,
     SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT,
 )
@@ -259,9 +260,11 @@ def _night_rest(world: SpiderWorld) -> None:
     deep = _first_cell(world.shelter_deep_cells or world.shelter_interior_cells or world.shelter_entrance_cells)
     world.tick = world.day_length + 1
     _teleport_spider(world, deep)
-    world.state.hunger = 0.08
+    world.state.hunger = NIGHT_REST_HUNGER_BASELINE
     world.state.fatigue = 0.82
     world.state.sleep_debt = NIGHT_REST_INITIAL_SLEEP_DEBT
+    world.state.sleep_phase = "AWAKE"
+    world.state.rest_streak = 0
     lx, ly = _safe_lizard_cell(world)
     world.lizard = LizardState(x=lx, y=ly, mode="PATROL")
     world.refresh_memory(initial=True)

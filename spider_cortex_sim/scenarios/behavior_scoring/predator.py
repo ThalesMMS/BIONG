@@ -15,6 +15,7 @@ from .common import (
     VISUAL_OLFACTORY_PINCER_CHECKS,
     BehavioralEpisodeScore,
     EpisodeStats,
+    _attribute_two_shelter_tradeoff_failure,
     _classify_corridor_gauntlet_failure,
     _classify_two_shelter_tradeoff_failure,
     _module_response_for_type,
@@ -278,11 +279,15 @@ def _score_two_shelter_tradeoff(stats: EpisodeStats, trace: Sequence[Dict[str, o
         "alive": bool(stats.alive),
         "final_health": float(stats.final_health),
     }
-    behavior_metrics["failure_mode"] = _classify_two_shelter_tradeoff_failure(
-        {
-            **behavior_metrics,
-            "checks_passed": full_success,
-        }
+    classification_metrics: dict[str, object] = {
+        **behavior_metrics,
+        "checks_passed": full_success,
+    }
+    behavior_metrics["failure_mode"] = _classify_two_shelter_tradeoff_failure(classification_metrics)
+    behavior_metrics["failure_attribution"] = _attribute_two_shelter_tradeoff_failure(
+        stats,
+        trace,
+        classification_metrics,
     )
     return build_behavior_score(
         stats=stats,

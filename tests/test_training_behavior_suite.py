@@ -144,6 +144,7 @@ class SpiderTrainingBehaviorSuiteTest(SpiderTrainingTestBase):
             episodes_per_scenario=1,
             capture_trace=False,
             debug_trace=False,
+            seeds=[61],
         )
 
         self.assertIn("suite", payload)
@@ -158,3 +159,49 @@ class SpiderTrainingBehaviorSuiteTest(SpiderTrainingTestBase):
         self.assertIn("metric_motor_slip_rate", row)
         self.assertIn("metric_mean_orientation_alignment", row)
         self.assertIn("metric_mean_terrain_difficulty", row)
+
+    def test_behavior_suite_episode_indices_and_debug_trace_use_final_run_only(self) -> None:
+        sim = SpiderSimulation(seed=23, max_steps=6)
+        original_run_episode = sim.run_episode
+        calls: list[dict[str, object]] = []
+
+        def record_run_episode(episode_index: int, *args: object, **kwargs: object):
+            calls.append(
+                {
+                    "episode_index": episode_index,
+                    "scenario_name": kwargs.get("scenario_name"),
+                    "debug_trace": kwargs.get("debug_trace"),
+                }
+            )
+            return original_run_episode(episode_index, *args, **kwargs)
+
+        with mock.patch.object(sim, "run_episode", side_effect=record_run_episode):
+            _payload, trace, rows = sim.evaluate_behavior_suite(
+                ["night_rest", "food_deprivation"],
+                episodes_per_scenario=2,
+                seeds=[23, 29],
+                capture_trace=True,
+                debug_trace=True,
+            )
+
+        self.assertEqual(
+            [call["episode_index"] for call in calls],
+            list(range(100_000, 100_008)),
+        )
+        debug_calls = [call for call in calls if call["debug_trace"]]
+        self.assertEqual(
+            debug_calls,
+            [
+                {
+                    "episode_index": 100_007,
+                    "scenario_name": "food_deprivation",
+                    "debug_trace": True,
+                }
+            ],
+        )
+        self.assertTrue(trace)
+        self.assertTrue(all(item["scenario"] == "food_deprivation" for item in trace))
+        self.assertEqual(
+            sorted(row["episode"] for row in rows),
+            list(range(100_000, 100_008)),
+        )

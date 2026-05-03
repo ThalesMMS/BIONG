@@ -387,7 +387,8 @@ class SimulationEpisodeMixin:
                 "run_episode() only supports training=True with policy_mode='normal'."
             )
         episode_seed = self.seed + 997 * (episode_index + 1)
-        scenario = get_scenario(scenario_name) if scenario_name is not None else None
+        normalized_scenario = str(scenario_name) if scenario_name is not None else None
+        scenario = get_scenario(normalized_scenario) if normalized_scenario is not None else None
         episode_map_template = scenario.map_template if scenario is not None else self.default_map_template
         if self.world.map_template_name != episode_map_template:
             self.world.configure_map_template(episode_map_template)
@@ -511,7 +512,7 @@ class SimulationEpisodeMixin:
                     "tick": step,
                     "training": training,
                     "policy_mode": policy_mode,
-                    "scenario": scenario_name,
+                    "scenario": normalized_scenario,
                     "action": info.get("action"),
                     "intended_action": info.get("intended_action"),
                     "executed_action": info.get("executed_action"),
@@ -625,7 +626,7 @@ class SimulationEpisodeMixin:
             episode=episode_index,
             seed=episode_seed,
             training=training,
-            scenario=scenario_name,
+            scenario=normalized_scenario,
             total_reward=float(total_reward),
             state=state,
         )

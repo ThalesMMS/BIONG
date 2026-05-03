@@ -12,11 +12,38 @@ from spider_cortex_sim.offline_analysis.writers import (
     _write_csv,
     _write_svg,
 )
+from spider_cortex_sim.offline_analysis.reporting.writer import (
+    _assign_github_anchors,
+    _slugify_github_anchor,
+)
 
 
 class WritersFormatterTest(unittest.TestCase):
     def test_markdown_value_formats_float_with_requested_digits(self) -> None:
         self.assertEqual(_markdown_value(0.12345, digits=3), "0.123")
+
+    def test_slugify_github_anchor_normalizes_and_strips_punctuation(self) -> None:
+        self.assertEqual(_slugify_github_anchor("Hello World"), "hello-world")
+        self.assertEqual(_slugify_github_anchor("  Hello   World  "), "hello-world")
+        self.assertEqual(_slugify_github_anchor("Effect Sizes Against Baselines"), "effect-sizes-against-baselines")
+        self.assertEqual(_slugify_github_anchor("Variant assumptions (confound-control metadata)"), "variant-assumptions-confound-control-metadata")
+        self.assertEqual(_slugify_github_anchor("Cross-Profile Ladder Comparison"), "cross-profile-ladder-comparison")
+
+    def test_assign_github_anchors_disambiguates_duplicates(self) -> None:
+        assigned = _assign_github_anchors(
+            [
+                (2, "Heading"),
+                (2, "Heading"),
+                (3, "Heading"),
+                (2, "Different"),
+                (2, "Heading"),
+            ]
+        )
+
+        self.assertEqual(
+            [anchor for _, _, anchor in assigned],
+            ["heading", "heading-1", "heading-2", "different", "heading-3"],
+        )
 
     def test_markdown_table_renders_headers_and_rows(self) -> None:
         markdown = _markdown_table([["night_rest", 1.0]], ["scenario", "success"])

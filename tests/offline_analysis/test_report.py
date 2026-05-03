@@ -5,12 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from spider_cortex_sim.offline_analysis.report import build_report_data, write_report
+
 from spider_cortex_sim.comparison_capacity import compare_capacity_sweep
 from spider_cortex_sim.export import save_behavior_csv
 from spider_cortex_sim.offline_analysis.combined import build_combined_ladder_report
 from spider_cortex_sim.offline_analysis.cli import run_offline_analysis
 from spider_cortex_sim.offline_analysis.extractors import extract_shaping_audit
-from spider_cortex_sim.offline_analysis.report import build_report_data, write_report
 from spider_cortex_sim.simulation import SpiderSimulation
 
 from .conftest import (
@@ -24,6 +25,83 @@ from .conftest import (
 )
 
 class ShapingReportTest(unittest.TestCase):
+    def test_report_markdown_prepends_overview_and_toc_snapshot(self) -> None:
+        report = {
+            "inputs": {
+                "summary_path": "summary.json",
+                "trace_path": "trace.jsonl",
+                "behavior_csv_path": "behavior.csv",
+            },
+            "diagnostics": [{"metric": "seed", "value": "0"}],
+            "variant_metadata": {"artifact_state": "not_in_this_artifact"},
+            "model_capacity": {"available": False, "artifact_state": "expected_but_missing"},
+            "capacity_sweeps": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "primary_benchmark": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "aggregate_benchmark_tables": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "claim_test_tables": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "effect_size_tables": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "ladder_comparison": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "ladder_profile_comparison": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "unified_ladder_report": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "shaping_program": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "scenario_success": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "ablations": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "credit_analysis": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "predator_type_specialization": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "representation_specialization": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "reflex_frequency": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "noise_robustness": {"available": False, "artifact_state": "not_in_this_artifact"},
+            "limitations": [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs = write_report(tmpdir, report)
+            report_md = Path(outputs["report_md"]).read_text(encoding="utf-8")
+
+        snapshot = "\n".join(report_md.splitlines()[:35])
+        self.assertEqual(
+            snapshot,
+            "\n".join(
+                [
+                    "# Offline Analysis Report",
+                    "",
+                    "## Overview",
+                    "",
+                    "| Section | Status | Notes |",
+                    "| --- | --- | --- |",
+                    "| [Inputs](#inputs) | available | Input artifact paths used for this report. |",
+                    "| [Diagnostics](#diagnostics) | available | Basic run metadata extracted from the report payload. |",
+                    "| Variant assumptions | n/a | Confound-control metadata and access notes. |",
+                    "| Architecture Capacity | missing | Model parameter counts and capacity comparison tables. |",
+                    "| Capacity Sweep | n/a | Sweep results and interpretation table (if present). |",
+                    "| Primary Benchmark | n/a | Single-run benchmark-of-record metric row (if present). |",
+                    "| Benchmark-of-Record Summary | n/a | Aggregate benchmark tables with uncertainty (if present). |",
+                    "| Claim Test Results with Uncertainty | n/a | Claim tests + uncertainty (if present). |",
+                    "| Effect Sizes Against Baselines | n/a | Effect sizes against baselines (if present). |",
+                    "| Architectural Ladder Comparison | n/a | Pairwise ladder comparisons and rung descriptions. |",
+                    "| Cross-Profile Ladder Comparison | n/a | Cross-profile ladder summary + shaping gaps. |",
+                    "| Unified Architectural Ladder Report | n/a | Unified ladder analysis with detailed subsections. |",
+                    "| Shaping Minimization Program | n/a | Reward shaping audit tables and interpretation. |",
+                    "| Scenario Success | n/a | Per-scenario success rates table. |",
+                    "| Ablations | n/a | Ablation benchmark summary and predator-type comparisons. |",
+                    "| Credit Assignment Analysis | n/a | Credit assignment strategy analysis and interpretation. |",
+                    "| Predator Type Specialization | n/a | Specialization summary and tables. |",
+                    "| Representation Specialization | n/a | Representation divergence and per-module scores. |",
+                    "| Reflex Frequency | n/a | Reflex event summary table and plot. |",
+                    "| Noise Robustness | n/a | Robustness matrix table and plot. |",
+                    "| Module-Local Sufficiency | n/a | Module-local sufficiency analysis (if present). |",
+                    "| Distillation Analysis | n/a | Distillation analysis summary and table (if present). |",
+                    "| Limitations | n/a | Freeform limitations list (if present). |",
+                    "| [Generated Files](#generated-files) | available | List of artifact files written alongside the report. |",
+                    "",
+                    "",
+                    "## Table of contents",
+                    "",
+                    "- [Inputs](#inputs)",
+                ]
+            ),
+        )
+
     def _summary(
         self,
         scenario_success_rate_delta: float = LARGE_SHAPING_GAP,
@@ -122,6 +200,91 @@ class ShapingReportTest(unittest.TestCase):
         )
         self.assertIn("shaping_program", report)
         self.assertTrue(report["shaping_program"]["available"])
+
+    def test_write_report_renders_v2_variant_metadata_keys(self) -> None:
+        report = {
+            "variant_metadata": {
+                "schema_version": "confound_control_v2",
+                "capacity": {
+                    "status": "captured",
+                    "source": "summary.variant_metadata.capacity",
+                    "parameter_count_total": 123,
+                    "approximate_compute_cost": {"total": 456, "unit": "ops"},
+                },
+                "interface_access": {
+                    "status": "captured",
+                    "observation_space": {"value": "obs-v2", "source": "registry"},
+                    "action_space": {"value": "actions-v2", "source": "registry"},
+                    "module_inputs": {"visual_cortex": ["vision"]},
+                    "module_outputs": {"visual_cortex": ["proposal"]},
+                },
+                "credit_assignment": {
+                    "status": "captured",
+                    "mechanism": {"training_objective": "shared_reward"},
+                },
+                "credit_assignment_notes": ["notes-v2"],
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs = write_report(tmpdir, report)
+            report_md = Path(outputs["report_md"]).read_text(encoding="utf-8")
+
+        self.assertIn("| confound_control_v2 | 123 | 456.00 |", report_md)
+        self.assertIn("- observation_space: obs-v2", report_md)
+        self.assertIn("- action_space: actions-v2", report_md)
+        self.assertIn("- module_inputs: {\"visual_cortex\": [\"vision\"]}", report_md)
+        self.assertIn("- module_outputs: {\"visual_cortex\": [\"proposal\"]}", report_md)
+        self.assertIn("- mechanism: {\"training_objective\": \"shared_reward\"}", report_md)
+        self.assertIn("- notes: notes-v2", report_md)
+
+    def test_write_report_distinguishes_absent_variant_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs = write_report(tmpdir, {})
+            report_md = Path(outputs["report_md"]).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "_Variant metadata payload was not included in this artifact._",
+            report_md,
+        )
+
+    def test_write_report_preserves_variant_metadata_artifact_state(self) -> None:
+        report = {"variant_metadata": {"artifact_state": "not_in_this_artifact"}}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs = write_report(tmpdir, report)
+            report_md = Path(outputs["report_md"]).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "_Variant metadata payload was not included in this artifact._",
+            report_md,
+        )
+
+    def test_write_report_preserves_unknown_parameter_count_and_privileged_value(
+        self,
+    ) -> None:
+        report = {
+            "variant_metadata": {
+                "schema_version": "confound_control_v2",
+                "capacity": {"parameter_count_total": "unknown"},
+                "interface_access": {"privileged": True},
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs = write_report(tmpdir, report)
+            report_md = Path(outputs["report_md"]).read_text(encoding="utf-8")
+
+        self.assertIn("| confound_control_v2 | unknown |", report_md)
+        self.assertIn("- privileged: True", report_md)
+
+        report["variant_metadata"]["interface_access"]["privileged"] = False
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs = write_report(tmpdir, report)
+            report_md = Path(outputs["report_md"]).read_text(encoding="utf-8")
+
+        self.assertIn("| confound_control_v2 | unknown |", report_md)
+        self.assertIn("- privileged: False", report_md)
 
     def test_write_report_contains_shaping_minimization_section(self) -> None:
         report = build_report_data(

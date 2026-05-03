@@ -261,6 +261,26 @@ class OfflineAnalysisLadderAndAblationTest(OfflineAnalysisToleranceFixtures, uni
             result["limitations"],
         )
 
+    def test_extract_architecture_capacity_accepts_total_only_variant_counts(
+        self,
+    ) -> None:
+        summary = build_uncertainty_summary()
+        summary["behavior_evaluation"]["ablations"]["reference_variant"] = "total_only"
+        summary["behavior_evaluation"]["ablations"]["variants"] = {
+            "total_only": {
+                "config": {"architecture": "modular"},
+                "variant_metadata": {
+                    "capacity": {"parameter_count_total": 250}
+                },
+            },
+        }
+
+        result = extract_architecture_capacity(summary)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["rows"][0]["total_trainable"], 250)
+        self.assertEqual(result["rows"][0]["key_components"], "")
+
     def test_extract_architecture_capacity_is_unavailable_for_non_mapping_variant(
         self,
     ) -> None:

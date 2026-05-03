@@ -36,6 +36,190 @@ That distinction matters. The ladder is official as a validation protocol now, e
 
 For the detailed ablation-variant definitions, competence-gap reporting, shaping-gap reads, and benchmark-of-record claim procedures, use [ablation_workflow.md](./ablation_workflow.md). The ladder defined here is the diagnostic framework for deciding how to interpret those comparisons across progressively modular architectures.
 
+## Confound-control metadata fields (v2)
+
+To support *confound-controlled* comparisons across ladder rungs, each variant should be annotated with three orthogonal metadata groups:
+
+- **Capacity**: how much function-approximation / compute budget the variant has.
+- **Interface access**: what information and control channels the variant can use.
+- **Credit-assignment**: how training signal flows to the parts of the system.
+
+These fields are intended to be machine-readable in artifacts and mirrored in reports. When a field cannot be measured, it must be recorded as `unknown` with a short reason.
+
+### Canonical field set
+
+#### 1) Capacity
+
+Record both *declared* (from config) and *measured* (from instantiated modules, when available) capacity signals. Current `confound_control_v2` artifacts emit these under `variant_metadata.capacity`. Numeric metadata fields may be plain scalars or wrapped objects such as `{value, source}` for captured values and `{value, reason}` for unknown values.
+
+- `capacity.parameter_count_total` (int | `unknown`)
+  - Total trainable parameters across the full policy (all submodules).
+- `capacity.parameter_count_per_network` (object: network_name -> int | `unknown`)
+  - Trainable parameter counts per major component (e.g., proposer modules, action_center, motor_cortex).
+- `capacity.hidden_size` (`{value, source}` | `{value, reason}`)
+  - Primary model width used by the policy/proposers (if there is a single canonical width).
+- `capacity.num_modules` (`{value, source}` | `{value, reason}`)
+  - Count of learned modules participating in decision-making (e.g., number of proposer centers; may exclude purely mechanical wrappers).
+- `capacity.training_steps` (`{value, source}` | `{value, reason}`)
+  - Number of optimizer steps used for the run.
+- `capacity.env_steps` (`{value, source}` | `{value, reason}`)
+  - Environment steps / frames seen during training.
+- `capacity.compute_budget_notes` (`{value, source}` | `{value, reason}`)
+  - Free-text summary when compute is controlled indirectly (e.g., via wall-clock limits, truncated BPTT, batch sizes).
+- `capacity.approximate_compute_cost` (object | `{value, reason}`)
+  - Estimated compute-cost payload when available.
+
+Legacy readers may still encounter `capacity.parameter_count_by_component` for per-component counts and `capacity.total_trainable` for total counts. Consumers should reconcile those with the current `parameter_count_per_network` and `parameter_count_total` keys. If only some fields are measurable, fill the rest with `unknown` and provide reasons through the `{value, source}` or `{value, reason}` wrapper.
+
+#### 2) Interface access
+
+Describe *what each variant can see and control*; differences here are treated as potential privileged-information confounds.
+Current artifacts store this section as `variant_metadata.interface_access`; older notes may use the shorter `interface.*` prefix for the same concepts.
+
+- `interface.observation_space` (string | `unknown`)
+  - Reference/summary of the observation schema used (e.g., env obs keys; include version or hash if available).
+- `interface.action_space` (string | `unknown`)
+  - Reference/summary of the action schema used.
+- `interface.module_inputs` (object: module_name -> list[string] | `unknown`)
+  - For each learned module, which observation keys / derived features it receives.
+- `interface.module_outputs` (object: module_name -> list[string] | `unknown`)
+  - For each module, what it can emit (e.g., action logits, proposals, value heads).
+- `interface.cross_module_signals` (list[object] | `unknown`)
+  - Explicit cross-module channels beyond shared observation (e.g., global latent broadcast, direct access to other modules' hidden states).
+  - Each entry should include: `from`, `to`, `signal_type`, `notes`.
+- `interface.privileged_access_notes` (string | `unknown`)
+  - Any known privilege (e.g., a module sees global state not available to others; arbitration sees extra diagnostic features).
+
+#### 3) Credit-assignment
+
+Capture how gradients / learning signals reach each module.
+
+- `credit_assignment.training_objective` (string | `unknown`)
+  - High-level objective description (e.g., PPO on shared reward; auxiliary losses).
+- `credit_assignment.loss_terms` (list[object] | `unknown`)
+  - Enumerate loss terms with: `name`, `applies_to` (components), `weight` (if known), `notes`.
+- `credit_assignment.gradient_flow` (object | `unknown`)
+  - Summary of which components receive gradients from which losses.
+  - Record explicit stops/detaches if present.
+- `credit_assignment.module_supervision` (object: module_name -> string | `unknown`)
+  - Whether modules receive direct supervision (e.g., local rewards, counterfactual signals, distillation targets).
+- `credit_assignment.shared_vs_local` (string | `unknown`)
+  - One of: `shared_only`, `shared_plus_local`, `counterfactual`, `distilled`, `unknown`.
+
+### Defaults and fallbacks
+
+- If a run does not yet emit this metadata, reports must assume all fields are `unknown`.
+- If a value can be inferred (e.g., `num_modules` from the rung definition), it should be recorded as inferred and accompanied by a short note in the corresponding `*_notes` field.
+
+## Confound-controlled ladder reports (v2 quick note)
+
+Ladder run artifacts and offline reports now include **confound-control metadata (v2)** and use it to label each variant comparison as **supported**, **confounded**, or **underpowered**.
+
+Where to look in outputs:
+
+- **Benchmark package artifacts**: each run's benchmark package should include a machine-readable `variant_metadata.json` describing:
+  - `capacity`: parameter counts and compute notes
+  - `interface_access`: what each variant can observe/control (captured from the runtime interface registry)
+  - `credit_assignment`: training signal / loss structure assumptions
+- **Unified ladder report**: the report includes:
+  - **Variant assumptions (confound-control metadata)**: per-variant capacity/interface/credit-assignment summaries
+  - **Comparison support status (confound-controlled)**: per-comparison status + diagnostics
+  - **Comparison status matrix (confound-controlled)**: at-a-glance matrix across all variants
+
+Limitations:
+
+- If a field is missing from artifacts, the report will treat it as `unknown` and avoid making strong confound-related claims that depend on it.
+- Seed-level evidence is required to avoid **underpowered** labels (see the rules below).
+
+## Comparison support labeling rules (v2)
+
+These rules define how to label any reported comparison between two (or more) variants as:
+
+- **supported**: comparison is interpretable under the metadata we have
+- **confounded**: comparison is *not* interpretable because a known confound differs across variants
+- **underpowered**: comparison is not interpretable because the evidence is too weak / incomplete (e.g., too few seeds)
+
+The intent is to make it explicit when an apparent performance delta could be explained by **capacity**, **interface privilege**, or **credit-assignment** differences rather than architectural modularity itself.
+
+### Required inputs
+
+The evaluator operates on:
+
+- per-variant confound-control metadata (capacity/interface/credit-assignment)
+- per-seed outputs availability and per-seed metrics (when present)
+
+If these inputs are missing, the evaluator must fall back to `unknown` and use **underpowered** rather than guessing.
+
+### Status decision precedence
+
+When multiple issues apply, choose the most conservative label in this order:
+
+1. **underpowered** (insufficient or missing evidence)
+2. **confounded** (known confound differences)
+3. **supported** (no known confound differences and sufficient evidence)
+
+Rationale: missing data makes even confound checks unreliable.
+
+### Underpowered rules
+
+Label a comparison as **underpowered** if any of the following hold:
+
+- **Too few seeds**: fewer than `MIN_SEEDS = 3` seeds are available *for every variant* in the comparison.
+  - If the run was configured for ≥3 seeds but only fewer are present in artifacts, treat as underpowered and record missing-seed diagnostics.
+- **Missing per-seed metrics**: required per-seed summary metrics for the target claim are absent for one or more variants.
+  - (The specific metric names are report-dependent; the rule is that seed-level evidence must exist.)
+- **Inconsistent seed sets**: seed IDs differ across variants such that paired/aggregated statistics would be misleading (e.g., variant A has seeds {0,1,2} and variant B has {0,1}).
+
+Diagnostics must include the observed seed counts and which seeds/metrics are missing.
+
+### Confounded rules
+
+Label a comparison as **confounded** if metadata indicates a meaningful mismatch in any of these categories.
+
+#### 1) Capacity confounds
+
+Capacity is treated as confounded if any of the following are true:
+
+- **Parameter-count mismatch**:
+  - if both variants have `capacity.parameter_count_total` known and
+  - `max(params_a, params_b) / min(params_a, params_b) > PARAM_RATIO_THRESHOLD`
+  - with `PARAM_RATIO_THRESHOLD = 1.2` (i.e., >20% difference).
+- **Training/experience mismatch**:
+  - if both variants have known `capacity.training_steps` and they differ, or
+  - if both variants have known `capacity.env_steps` and they differ.
+
+If capacity fields are `unknown`, do *not* mark confounded solely on that basis; instead record `unknown` diagnostics and proceed to other checks (or end up as supported if everything else is matched and evidence is sufficient).
+
+#### 2) Interface-access confounds
+
+Interface is treated as confounded if any of the following are true:
+
+- **Privileged observation access**: one variant has non-unknown `interface.privileged_access_notes` indicating additional information not available to the other.
+- **Cross-module privilege**: `interface.cross_module_signals` differs in a way that introduces extra learned communication channels for only one variant.
+- **Observation/action schema mismatch**: `interface.observation_space` or `interface.action_space` are both known and not equal.
+
+#### 3) Credit-assignment confounds
+
+Credit-assignment is treated as confounded if any of the following are true:
+
+- `credit_assignment.shared_vs_local` is known for both and differs (e.g., `shared_only` vs `shared_plus_local`).
+- `credit_assignment.training_objective` is known for both and differs in a way that changes the optimization target (e.g., extra auxiliary loss only for one variant).
+- `credit_assignment.loss_terms` are known and differ (by name or applies_to) in a way that changes the effective training signal for one variant.
+
+### Supported rules
+
+Label a comparison as **supported** only if:
+
+- it is **not underpowered** (enough seeds and per-seed metrics are present), and
+- it is **not confounded** (no capacity/interface/credit-assignment mismatches detected using known fields).
+
+If many fields are `unknown`, a comparison can still be labeled supported *as long as*:
+
+- the evidence is sufficient, and
+- no *known* confound differences are present.
+
+In that case, the evaluator must emit diagnostics that the support is conditional on unknown fields.
+
 ## Ladder Overview
 
 ```text

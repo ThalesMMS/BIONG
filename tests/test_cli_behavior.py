@@ -719,7 +719,11 @@ class EvaluateBehaviorSuiteIntegrationTest(unittest.TestCase):
 
     def test_multiple_episodes_per_scenario(self) -> None:
         sim = self.SimClass(seed=7, max_steps=12)
-        payload, _, rows = sim.evaluate_behavior_suite(["night_rest"], episodes_per_scenario=2)
+        payload, _, rows = sim.evaluate_behavior_suite(
+            ["night_rest"],
+            episodes_per_scenario=2,
+            seeds=[7],
+        )
         self.assertEqual(payload["suite"]["night_rest"]["episodes"], 2)
         self.assertEqual(len(rows), 2)
 

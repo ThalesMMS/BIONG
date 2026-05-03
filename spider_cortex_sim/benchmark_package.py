@@ -37,7 +37,7 @@ from .offline_analysis import (
 )
 
 
-BENCHMARK_PACKAGE_VERSION = "1.0"
+BENCHMARK_PACKAGE_VERSION = "1.1"
 
 # Canonical inventory expected in a benchmark-of-record output directory. Some
 # files can be empty or absent from the manifest when the source run lacks the
@@ -45,6 +45,7 @@ BENCHMARK_PACKAGE_VERSION = "1.0"
 BENCHMARK_PACKAGE_CONTENTS: tuple[str, ...] = (
     "benchmark_manifest.json",
     "resolved_config.json",
+    "variant_metadata.json",
     "pip_freeze.txt",
     "seed_level_rows.csv",
     "aggregate_benchmark_tables.json",
@@ -567,7 +568,10 @@ def assemble_benchmark_package(
         resolved_config["parameter_counts"] = summary["parameter_counts"]
     if "approximate_compute_cost" in summary:
         resolved_config["approximate_compute_cost"] = summary["approximate_compute_cost"]
+
+    variant_metadata = dict(_mapping_or_empty(summary.get("variant_metadata")))
     _json_dump(output_path / "resolved_config.json", resolved_config)
+    _json_dump(output_path / "variant_metadata.json", variant_metadata)
     _json_dump(output_path / "aggregate_benchmark_tables.json", aggregate_tables)
     _json_dump(output_path / "credit_table.json", credit_tables)
     _json_dump(output_path / "capacity_sweep_tables.json", capacity_sweep_tables)

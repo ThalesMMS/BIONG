@@ -11,7 +11,7 @@ from ..simulation import SpiderSimulation
 from .constants import BOTTOM_BAR_HEIGHT, CELL_SIZE, TOP_BAR_HEIGHT
 from .controller import GUIController
 from .events import EventHandler
-from .pygame_compat import require_pygame
+from .pygame_compat import pygame, require_pygame
 from .rendering import Renderer
 from .widgets import Button
 
@@ -21,22 +21,25 @@ class SpiderGUI:
 
     def __init__(self, sim: SpiderSimulation) -> None:
         self.pygame = require_pygame()
-        self.controller = GUIController(sim)
-        grid_h = sim.world.height * CELL_SIZE
-        self.win_w = self.controller.win_w
-        self.win_h = TOP_BAR_HEIGHT + grid_h + BOTTOM_BAR_HEIGHT
-
         self.pygame.init()
-        self.screen = self.pygame.display.set_mode((self.win_w, self.win_h))
+        self.controller = GUIController(sim)
+        self.controller.apply_window_size(
+            self.controller.win_w,
+            TOP_BAR_HEIGHT + (sim.world.height * CELL_SIZE) + BOTTOM_BAR_HEIGHT,
+        )
+        grid_h = sim.world.height * self.controller.cell_size
+
+        self.fonts = self._create_fonts()
+        self.win_w = self.controller.win_w
+        self.win_h = self.controller.win_h
+
+        self.screen = self.pygame.display.set_mode(
+            (self.win_w, self.win_h),
+            self.pygame.RESIZABLE,
+        )
         self.pygame.display.set_caption("Neuro-Modular Spider Simulation")
         self.clock = self.pygame.time.Clock()
 
-        fonts = {
-            "sm": self.pygame.font.SysFont("monospace", 13),
-            "md": self.pygame.font.SysFont("monospace", 15, bold=True),
-            "lg": self.pygame.font.SysFont("monospace", 18, bold=True),
-            "xl": self.pygame.font.SysFont("monospace", 22, bold=True),
-        }
 
         self.buttons = self._build_buttons(grid_h)
         self.events = EventHandler(
@@ -45,7 +48,7 @@ class SpiderGUI:
         )
         self.renderer = Renderer(
             surface=self.screen,
-            fonts=fonts,
+            fonts=self.fonts,
             controller=self.controller,
             buttons=self.buttons,
         )
@@ -53,14 +56,52 @@ class SpiderGUI:
     def _build_buttons(self, grid_h: int) -> dict[str, Button]:
         btn_y = TOP_BAR_HEIGHT + grid_h + 4
         btn_h = 24
+        min_padding = 10
+        preferred_gap = 6
+        button_specs = [
+            ("pause", "⏸ Pause", 100),
+            ("step", "⏭ Step", 90),
+            ("slower", "◀ Slower", 90),
+            ("faster", "Faster ▶", 90),
+            ("restart", "↻ Restart", 100),
+            ("save", "💾 Save", 96),
+            ("load", "📂 Load", 100),
+        ]
+        gap_count = len(button_specs) - 1
+        total_button_w = sum(width for _, _, width in button_specs)
+        min_padding_current = min_padding
+        gap = preferred_gap
+        available_w = max(0, self.win_w - 2 * min_padding_current)
+        while (
+            min_padding_current > 0
+            and total_button_w + gap * gap_count > available_w
+        ):
+            min_padding_current -= 1
+            available_w = max(0, self.win_w - 2 * min_padding_current)
+        if total_button_w + gap * gap_count > available_w:
+            gap = 0
+            available_w = max(0, self.win_w - 2 * min_padding_current)
+
+        scaled_w = max(0, available_w - gap * gap_count)
+        scale = min(1.0, scaled_w / total_button_w)
+        widths = [max(0, round(width * scale)) for _, _, width in button_specs]
+
+        overflow = sum(widths) + gap * gap_count - available_w
+        idx = len(widths) - 1
+        while overflow > 0 and idx >= 0:
+            shrink = min(overflow, widths[idx])
+            widths[idx] -= shrink
+            overflow -= shrink
+            idx -= 1
+
+        x = min_padding_current
+        buttons: dict[str, Button] = {}
+        for (name, text, _), width in zip(button_specs, widths, strict=True):
+            buttons[name] = Button(text, x, btn_y, width, btn_h)
+            x += width + gap
         return {
-            "pause": Button("⏸ Pause", 10, btn_y, 100, btn_h),
-            "step": Button("⏭ Step", 116, btn_y, 90, btn_h),
-            "slower": Button("◀ Slower", 212, btn_y, 90, btn_h),
-            "faster": Button("Faster ▶", 308, btn_y, 90, btn_h),
-            "restart": Button("↻ Restart", 404, btn_y, 100, btn_h),
-            "save": Button("💾 Save", 510, btn_y, 96, btn_h),
-            "load": Button("📂 Load", 612, btn_y, 100, btn_h),
+            name: buttons[name]
+            for name, _, _ in button_specs
         }
 
     def launch(self, train_episodes: int, eval_episodes: int) -> None:
@@ -71,10 +112,45 @@ class SpiderGUI:
         while self.controller.running:
             dt = self.clock.tick(60) / 1000.0
             self.events.handle_events()
+
+            size = self.controller.consume_resize_request()
+            if size is not None:
+                self.win_w, self.win_h = size
+                self.controller.apply_window_size(self.win_w, self.win_h)
+                self.win_w = self.controller.win_w
+                self.win_h = self.controller.win_h
+                self.screen = self.pygame.display.set_mode(
+                    (self.win_w, self.win_h),
+                    self.pygame.RESIZABLE,
+                )
+                self.renderer.screen = self.screen
+
+                self.fonts = self._create_fonts()
+                self.renderer.set_fonts(self.fonts)
+                self._rebuild_buttons()
+
             self.controller.tick(dt)
             self.renderer.draw()
             self.pygame.display.flip()
         self.pygame.quit()
+
+    def _create_fonts(self) -> dict[str, pygame.font.Font]:
+        return {
+            "sm": self.pygame.font.SysFont("monospace", max(11, int(13 * self.controller.ui_scale))),
+            "md": self.pygame.font.SysFont("monospace", max(12, int(15 * self.controller.ui_scale)), bold=True),
+            "lg": self.pygame.font.SysFont("monospace", max(14, int(18 * self.controller.ui_scale)), bold=True),
+            "xl": self.pygame.font.SysFont("monospace", max(16, int(22 * self.controller.ui_scale)), bold=True),
+        }
+
+    def _rebuild_buttons(self) -> None:
+        grid_h = self.controller.world.height * self.controller.cell_size
+        self.buttons = self._build_buttons(grid_h)
+        self.events = EventHandler(
+            controller=self.controller,
+            buttons=self.buttons,
+        )
+        self.renderer.buttons = self.buttons
+        self.renderer.btn_pause = self.buttons["pause"]
 
 
 def run_gui(

@@ -147,7 +147,7 @@ class BenchmarkPackageAssemblyTest(BenchmarkPackageFixtures, unittest.TestCase):
                 )
             )
 
-        self.assertEqual(manifest_payload["package_version"], "1.0")
+        self.assertEqual(manifest_payload["package_version"], "1.1")
         self.assertEqual(manifest_payload["seed_count"], 2)
         self.assertEqual(manifest_payload["confidence_level"], 0.95)
         self.assertEqual(manifest_payload["environment"], environment)

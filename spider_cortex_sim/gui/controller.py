@@ -11,6 +11,7 @@ from ..predator import PREDATOR_STATES
 from ..simulation import SpiderSimulation
 from ..world import REWARD_COMPONENT_NAMES
 from .constants import (
+    BOTTOM_BAR_HEIGHT,
     CELL_SIZE,
     DEFAULT_BRAIN_DIR,
     DEFAULT_SPEED_IDX,
@@ -27,8 +28,12 @@ class GUIController:
         self.brain = sim.brain
         self.bus = sim.bus
 
-        grid_w = self.world.width * CELL_SIZE
-        self.win_w = grid_w + PANEL_WIDTH
+        self.cell_size = CELL_SIZE
+        self.panel_width = PANEL_WIDTH
+
+        grid_w = self.world.width * self.cell_size
+        self.win_w = grid_w + self.panel_width
+        self.win_h = TOP_BAR_HEIGHT + (self.world.height * self.cell_size) + BOTTOM_BAR_HEIGHT
 
         self.grid_offset_x = 0
         self.grid_offset_y = TOP_BAR_HEIGHT
@@ -61,11 +66,65 @@ class GUIController:
         self.show_smell_overlay = False
         self.panel_scroll = 0
         self.panel_content_height = 0
+        self.ui_scale = 1.0
 
         # Status toast
         self.toast_text: str = ""
         self.toast_timer: float = 0.0
         self.toast_is_error: bool = False
+
+        # Window resize (handled by GUI/renderer)
+        self.resize_requested = False
+        self.requested_win_size: tuple[int, int] | None = None
+
+    def request_resize(self, win_w: int, win_h: int) -> None:
+        self.resize_requested = True
+        self.requested_win_size = (win_w, win_h)
+
+    def compute_fit_cell_size(
+        self,
+        win_w: int,
+        win_h: int,
+        *,
+        panel_width: int,
+        min_cell: int = 8,
+        max_cell: int = CELL_SIZE,
+    ) -> int:
+        available_w = max(1, win_w - panel_width)
+        available_h = max(1, win_h - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT)
+
+        fit_w = available_w // max(1, self.world.width)
+        fit_h = available_h // max(1, self.world.height)
+        fit = min(fit_w, fit_h)
+
+        if fit < min_cell:
+            return min_cell
+        if fit > max_cell:
+            return max_cell
+        return int(fit)
+
+    def apply_window_size(self, win_w: int, win_h: int) -> None:
+        self.win_w = win_w
+        self.win_h = win_h
+
+        min_panel = 240
+        max_panel = PANEL_WIDTH
+        self.panel_width = max(min_panel, min(max_panel, win_w // 3))
+
+        self.cell_size = self.compute_fit_cell_size(win_w, win_h, panel_width=self.panel_width)
+        self.ui_scale = max(0.85, min(1.4, self.cell_size / CELL_SIZE))
+
+        grid_w = self.world.width * self.cell_size
+        self.grid_offset_x = 0
+        self.grid_offset_y = TOP_BAR_HEIGHT
+        self.panel_x = grid_w
+        self.panel_y = TOP_BAR_HEIGHT
+
+    def consume_resize_request(self) -> tuple[int, int] | None:
+        if not self.resize_requested:
+            return None
+        self.resize_requested = False
+        return self.requested_win_size
 
     def configure_run(self, train_episodes: int, eval_episodes: int) -> None:
         self.total_train_episodes = train_episodes
@@ -298,7 +357,7 @@ class GUIController:
         self.show_smell_overlay = not self.show_smell_overlay
 
     def scroll_panel(self, delta: int) -> None:
-        grid_h = self.world.height * CELL_SIZE
+        grid_h = self.world.height * self.cell_size
         max_scroll = max(0, self.panel_content_height - grid_h)
         self.panel_scroll = max(0, min(self.panel_scroll + delta, max_scroll))
 

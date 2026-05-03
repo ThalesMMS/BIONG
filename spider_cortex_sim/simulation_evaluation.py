@@ -259,6 +259,7 @@ class SimulationEvaluationMixin:
         policy_mode: str = "normal",
         extra_row_metadata: Dict[str, object] | None = None,
         summary_only: bool = False,
+        seeds: Sequence[int] | None = None,
     ) -> tuple[Dict[str, object], List[Dict[str, object]], List[Dict[str, object]]]:
         """
         Evaluate the specified behavior scenarios and produce aggregated metrics, an optional execution trace, and flattened CSV-ready rows.
@@ -272,6 +273,7 @@ class SimulationEvaluationMixin:
             policy_mode (str): Inference mode forwarded to run_episode() for evaluation runs (e.g., "normal" or "reflex_only").
             extra_row_metadata (Dict[str, object] | None): Metadata merged into every flattened CSV row after standard simulation annotations.
             summary_only (bool): If True, skip construction of flattened rows and return an empty rows list.
+            seeds (Sequence[int] | None): Optional explicit seed list to use for behavior-suite evaluation runs. When provided, each scenario run uses the corresponding seed value as the simulation seed; scenario episodes are repeated per seed.
         
         Returns:
             payload (Dict[str, object]): Behavior-suite payload containing:
@@ -297,6 +299,7 @@ class SimulationEvaluationMixin:
                 capture_trace=capture_trace,
                 debug_trace=debug_trace,
                 policy_mode=policy_mode,
+                seeds=seeds,
             )
         finally:
             self.brain.set_runtime_reflex_scale(previous_reflex_scale)
@@ -359,6 +362,7 @@ class SimulationEvaluationMixin:
         debug_trace: bool,
         base_index: int = 100_000,
         policy_mode: str = "normal",
+        seeds: Sequence[int] | None = None,
     ) -> tuple[
         Dict[str, List[EpisodeStats]],
         Dict[str, List[BehavioralEpisodeScore]],
@@ -384,30 +388,57 @@ class SimulationEvaluationMixin:
         stats_histories: Dict[str, List[EpisodeStats]] = {}
         behavior_histories: Dict[str, List[BehavioralEpisodeScore]] = {}
         trace: List[Dict[str, object]] = []
+        budget_resolved = self.budget_summary.get("resolved")
+        budget_behavior_seeds: tuple[int, ...] = ()
+        if isinstance(budget_resolved, dict):
+            raw_behavior_seeds = budget_resolved.get("behavior_seeds")
+            if isinstance(raw_behavior_seeds, (list, tuple)):
+                budget_behavior_seeds = tuple(int(seed) for seed in raw_behavior_seeds)
+        seed_values = tuple(seeds) if seeds is not None else (budget_behavior_seeds or (self.seed,))
+        if not seed_values:
+            seed_values = (self.seed,)
         run_count = max(1, int(episodes_per_scenario))
+        scenario_stride = len(seed_values) * run_count
         for offset, name in enumerate(scenario_names):
+            is_final_scenario = offset == len(scenario_names) - 1
             scenario = get_scenario(name)
             stats_group: List[EpisodeStats] = []
             score_group: List[BehavioralEpisodeScore] = []
-            for run_idx in range(run_count):
-                capture_public_trace = capture_trace and run_idx == run_count - 1
-                stats, run_trace = self.run_episode(
-                    base_index + offset * run_count + run_idx,
-                    training=False,
-                    sample=False,
-                    capture_trace=True,
-                    scenario_name=name,
-                    debug_trace=debug_trace and capture_public_trace,
-                    policy_mode=policy_mode,
-                )
-                stats_group.append(stats)
-                score = scenario.score_episode(stats, run_trace)
-                score.behavior_metrics.update(
-                    self._episode_stats_behavior_metrics(stats)
-                )
-                score_group.append(score)
-                if capture_public_trace:
-                    trace = run_trace
+            for seed_index, seed_value in enumerate(seed_values):
+                previous_seed = int(self.seed)
+                self.seed = int(seed_value)
+                try:
+                    for run_idx in range(run_count):
+                        capture_public_trace = (
+                            capture_trace
+                            and is_final_scenario
+                            and seed_index == len(seed_values) - 1
+                            and run_idx == run_count - 1
+                        )
+                        stats, run_trace = self.run_episode(
+                            base_index
+                            + offset * scenario_stride
+                            + seed_index * run_count
+                            + run_idx,
+                            training=False,
+                            sample=False,
+                            capture_trace=True,
+                            scenario_name=name,
+                            debug_trace=debug_trace and capture_public_trace,
+                            policy_mode=policy_mode,
+                        )
+                        for item in run_trace:
+                            item["scenario"] = name
+                        stats_group.append(stats)
+                        score = scenario.score_episode(stats, run_trace)
+                        score.behavior_metrics.update(
+                            self._episode_stats_behavior_metrics(stats)
+                        )
+                        score_group.append(score)
+                        if capture_public_trace:
+                            trace = run_trace
+                finally:
+                    self.seed = previous_seed
             stats_histories[name] = stats_group
             behavior_histories[name] = score_group
         return stats_histories, behavior_histories, trace

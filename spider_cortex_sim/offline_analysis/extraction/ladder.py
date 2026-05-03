@@ -30,6 +30,12 @@ MODULARITY_INCONCLUSIVE = "modularity inconclusive"
 MODULARITY_HARMFUL = "modularity currently harmful"
 CAPACITY_INTERFACE_CONFOUNDED = "capacity/interface confounded"
 
+COMPARISON_SUPPORTED = "supported"
+COMPARISON_CONFOUNDED = "confounded"
+COMPARISON_UNDERPOWERED = "underpowered"
+
+MIN_COMPARISON_SEEDS = 3
+
 
 def _table(
     columns: Sequence[str],
@@ -704,6 +710,307 @@ def _overall_modularity_comparison(
     }
 
 
+def evaluate_variant_comparison_support(
+    *,
+    baseline_variant: str,
+    comparison_variant: str,
+    baseline_payload: Mapping[str, object],
+    comparison_payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Evaluate whether a comparison is supported/confounded/underpowered.
+
+    This evaluator is intentionally conservative and uses only machine-readable fields:
+      - underpowered: missing per-seed items for the comparison metric
+      - underpowered: per-variant seed counts (< MIN_COMPARISON_SEEDS)
+      - underpowered: non-overlapping/non-comparable seed identifiers
+      - confounded: capacity mismatch beyond CAPACITY_MATCH_RATIO_THRESHOLD
+      - confounded: interface-access mismatch (architecture_signature differs)
+      - confounded: credit-assignment mismatch (distillation/loss-structure weights differ)
+
+    When interface/credit metadata is missing, the evaluator reports "unknown" and
+    does not mark the comparison as confounded.
+    """
+
+    diagnostics: list[str] = []
+    confounds: dict[str, object] = {
+        "capacity": "unknown",
+        "interface_access": "unknown",
+        "credit_assignment": "unknown",
+    }
+
+    def seed_items(payload: Mapping[str, object]) -> list[tuple[str | None, float]]:
+        return _payload_metric_seed_items(payload, "scenario_success_rate")
+
+    def seed_count(payload: Mapping[str, object]) -> int:
+        items = seed_items(payload)
+        if items:
+            return len(items)
+        uncertainty = _mapping_or_empty(
+            _payload_uncertainty(payload, "scenario_success_rate")
+        )
+        return int(_coerce_float(uncertainty.get("n_seeds"), 0.0))
+
+    baseline_seed_items = seed_items(baseline_payload)
+    comparison_seed_items = seed_items(comparison_payload)
+    baseline_seeds = seed_count(baseline_payload)
+    comparison_seeds = seed_count(comparison_payload)
+
+    missing_seed_level: list[str] = []
+    if not baseline_seed_items:
+        missing_seed_level.append(baseline_variant)
+    if not comparison_seed_items:
+        missing_seed_level.append(comparison_variant)
+    if missing_seed_level:
+        diagnostics.append(
+            "underpowered: missing per-seed scenario_success_rate values for "
+            + ", ".join(missing_seed_level)
+        )
+        return {
+            "status": COMPARISON_UNDERPOWERED,
+            "diagnostics": diagnostics,
+            "seed_counts": {
+                baseline_variant: baseline_seeds,
+                comparison_variant: comparison_seeds,
+            },
+            "confounds": confounds,
+        }
+
+    if baseline_seeds < MIN_COMPARISON_SEEDS or comparison_seeds < MIN_COMPARISON_SEEDS:
+        missing: list[str] = []
+        if baseline_seeds < MIN_COMPARISON_SEEDS:
+            missing.append(
+                f"{baseline_variant}: {baseline_seeds} (<{MIN_COMPARISON_SEEDS})"
+            )
+        if comparison_seeds < MIN_COMPARISON_SEEDS:
+            missing.append(
+                f"{comparison_variant}: {comparison_seeds} (<{MIN_COMPARISON_SEEDS})"
+            )
+        diagnostics.append("underpowered: insufficient seeds (" + ", ".join(missing) + ")")
+        return {
+            "status": COMPARISON_UNDERPOWERED,
+            "diagnostics": diagnostics,
+            "seed_counts": {
+                baseline_variant: baseline_seeds,
+                comparison_variant: comparison_seeds,
+            },
+            "confounds": confounds,
+        }
+
+    shared_seeds: set[str] = {
+        seed
+        for seed, _value in baseline_seed_items
+        if seed is not None
+    } & {
+        seed
+        for seed, _value in comparison_seed_items
+        if seed is not None
+    }
+    if baseline_seed_items and comparison_seed_items and not shared_seeds:
+        diagnostics.append(
+            "underpowered: no overlapping non-empty seed identifiers between baseline and comparison"
+        )
+        return {
+            "status": COMPARISON_UNDERPOWERED,
+            "diagnostics": diagnostics,
+            "seed_counts": {
+                baseline_variant: baseline_seeds,
+                comparison_variant: comparison_seeds,
+            },
+            "confounds": confounds,
+        }
+
+    baseline_capacity = extract_architecture_capacity(
+        baseline_payload,
+        variant_name=baseline_variant,
+    )
+    comparison_capacity = extract_architecture_capacity(
+        comparison_payload,
+        variant_name=comparison_variant,
+    )
+    baseline_total = int(_coerce_float(baseline_capacity.get("total_trainable"), 0.0))
+    comparison_total = int(
+        _coerce_float(comparison_capacity.get("total_trainable"), 0.0)
+    )
+
+    ratio: float | None = None
+    if baseline_total > 0 and comparison_total > 0:
+        ratio = max(baseline_total, comparison_total) / min(
+            baseline_total, comparison_total
+        )
+        confounds["capacity"] = "matched"
+        diagnostics.append(
+            f"capacity: baseline={baseline_total:,} params, comparison={comparison_total:,} params (ratio={ratio:.2f}x; threshold={CAPACITY_MATCH_RATIO_THRESHOLD:.2f}x)"
+        )
+        if ratio > CAPACITY_MATCH_RATIO_THRESHOLD:
+            confounds["capacity"] = "mismatch"
+            diagnostics.append("confounded: capacity mismatch")
+            return {
+                "status": COMPARISON_CONFOUNDED,
+                "diagnostics": diagnostics,
+                "seed_counts": {
+                    baseline_variant: baseline_seeds,
+                    comparison_variant: comparison_seeds,
+                },
+                "confounds": confounds,
+            }
+    else:
+        diagnostics.append(
+            "capacity: unknown (missing parameter counts for one or both variants)"
+        )
+
+    baseline_metadata = _mapping_or_empty(baseline_payload.get("variant_metadata"))
+    comparison_metadata = _mapping_or_empty(comparison_payload.get("variant_metadata"))
+
+    def _norm_jsonish(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {str(k): _norm_jsonish(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_norm_jsonish(v) for v in value]
+        return value
+
+    baseline_interface = _mapping_or_empty(baseline_metadata.get("interface_access"))
+    comparison_interface = _mapping_or_empty(comparison_metadata.get("interface_access"))
+    baseline_sig = _mapping_or_empty(baseline_interface.get("architecture_signature"))
+    comparison_sig = _mapping_or_empty(comparison_interface.get("architecture_signature"))
+
+    if baseline_sig and comparison_sig:
+        if _norm_jsonish(baseline_sig) == _norm_jsonish(comparison_sig):
+            confounds["interface_access"] = "matched"
+            diagnostics.append("interface_access: matched (architecture_signature)")
+        else:
+            confounds["interface_access"] = "mismatch"
+            diagnostics.append("confounded: interface_access mismatch (architecture_signature differs)")
+            return {
+                "status": COMPARISON_CONFOUNDED,
+                "diagnostics": diagnostics,
+                "seed_counts": {
+                    baseline_variant: baseline_seeds,
+                    comparison_variant: comparison_seeds,
+                },
+                "confounds": confounds,
+            }
+    else:
+        diagnostics.append(
+            "interface_access: unknown (missing architecture_signature for one or both variants)"
+        )
+
+    baseline_credit = _mapping_or_empty(baseline_metadata.get("credit_assignment"))
+    comparison_credit = _mapping_or_empty(comparison_metadata.get("credit_assignment"))
+    baseline_mech = _mapping_or_empty(baseline_credit.get("mechanism"))
+    comparison_mech = _mapping_or_empty(comparison_credit.get("mechanism"))
+
+    baseline_distill = _mapping_or_empty(baseline_mech.get("distillation"))
+    comparison_distill = _mapping_or_empty(comparison_mech.get("distillation"))
+    baseline_losses = _mapping_or_empty(baseline_mech.get("loss_structure"))
+    comparison_losses = _mapping_or_empty(comparison_mech.get("loss_structure"))
+
+    def _coerce_flag(value: object) -> bool:
+        return bool(_coerce_bool(value))
+
+    def _loss_weight(value: object) -> float:
+        return float(_coerce_float(value, 0.0))
+
+    baseline_distill_enabled = _coerce_flag(baseline_distill.get("enabled"))
+    comparison_distill_enabled = _coerce_flag(comparison_distill.get("enabled"))
+
+    loss_keys = tuple(
+        sorted(str(key) for key in {*baseline_losses.keys(), *comparison_losses.keys()})
+    )
+    baseline_loss_tuple = tuple(
+        _loss_weight(baseline_losses.get(key)) for key in loss_keys
+    )
+    comparison_loss_tuple = tuple(
+        _loss_weight(comparison_losses.get(key)) for key in loss_keys
+    )
+
+    if baseline_mech and comparison_mech:
+        if (
+            baseline_distill_enabled == comparison_distill_enabled
+            and baseline_loss_tuple == comparison_loss_tuple
+        ):
+            confounds["credit_assignment"] = "matched"
+            diagnostics.append(
+                "credit_assignment: matched (distillation enabled + loss_structure weights)"
+            )
+        else:
+            confounds["credit_assignment"] = "mismatch"
+            diagnostics.append(
+                "confounded: credit_assignment mismatch (distillation/loss_structure differs)"
+            )
+            diagnostics.append(
+                f"credit_assignment: baseline distill_enabled={baseline_distill_enabled}, comparison distill_enabled={comparison_distill_enabled}"
+            )
+            diagnostics.append(
+                f"credit_assignment: baseline loss_structure={baseline_loss_tuple}, comparison loss_structure={comparison_loss_tuple}"
+            )
+            return {
+                "status": COMPARISON_CONFOUNDED,
+                "diagnostics": diagnostics,
+                "seed_counts": {
+                    baseline_variant: baseline_seeds,
+                    comparison_variant: comparison_seeds,
+                },
+                "confounds": confounds,
+            }
+    else:
+        diagnostics.append(
+            "credit_assignment: unknown (missing credit_assignment.mechanism for one or both variants)"
+        )
+
+    return {
+        "status": COMPARISON_SUPPORTED,
+        "diagnostics": diagnostics,
+        "seed_counts": {
+            baseline_variant: baseline_seeds,
+            comparison_variant: comparison_seeds,
+        },
+        "confounds": confounds,
+    }
+
+
+def build_comparison_support_matrix(
+    *,
+    variants: Mapping[str, Mapping[str, object]],
+    variant_order: list[str] | None = None,
+    baseline_variant: str | None = None,
+) -> dict[str, object]:
+    ordered = [v for v in (variant_order or []) if v in variants]
+    if not ordered:
+        ordered = sorted(variants.keys())
+
+    matrix_rows: list[dict[str, object]] = []
+    for row_variant in ordered:
+        row: dict[str, object] = {"variant": row_variant}
+        row_payload = _mapping_or_empty(variants.get(row_variant))
+        for col_variant in ordered:
+            if col_variant == row_variant:
+                row[col_variant] = "self"
+                continue
+            col_payload = _mapping_or_empty(variants.get(col_variant))
+            if not row_payload or not col_payload:
+                row[col_variant] = "unavailable"
+                continue
+            evaluation = evaluate_variant_comparison_support(
+                baseline_variant=row_variant,
+                comparison_variant=col_variant,
+                baseline_payload=row_payload,
+                comparison_payload=col_payload,
+            )
+            row[col_variant] = str(evaluation.get("status") or "unknown")
+        matrix_rows.append(row)
+
+    return {
+        "available": bool(ordered),
+        "variants": ordered,
+        "baseline_variant": str(baseline_variant or ""),
+        "cells": _table(tuple(["variant", *ordered]), matrix_rows),
+        "limitations": [
+            "Matrix compares every variant against every other variant; it does not encode rung adjacency.",
+            "Interface-access and credit-assignment confounds are evaluated when variant_metadata is available; otherwise they are reported as unknown.",
+        ],
+    }
+
+
 def compute_modularity_conclusion(
     unified_ladder_report: Mapping[str, object],
 ) -> dict[str, object]:
@@ -941,6 +1248,43 @@ def extract_unified_ladder_report(
             if item
         )
 
+    comparison_support: dict[str, object] = {
+        "available": False,
+        "baseline_variant": "",
+        "comparison_variant": "",
+        "status": COMPARISON_UNDERPOWERED,
+        "diagnostics": [
+            "comparison support evaluator could not run because baseline/comparison variants were missing."
+        ],
+        "seed_counts": {},
+        "confounds": {
+            "capacity": "unknown",
+            "interface_access": "unknown",
+            "credit_assignment": "unknown",
+        },
+    }
+    baseline_variant = str(overall_comparison.get("baseline_variant") or "")
+    comparison_variant = str(overall_comparison.get("comparison_variant") or "")
+    variants = {
+        str(name): payload
+        for name, payload in _mapping_or_empty(ablations.get("variants")).items()
+        if isinstance(payload, Mapping)
+    }
+    baseline_payload = _mapping_or_empty(variants.get(baseline_variant))
+    comparison_payload = _mapping_or_empty(variants.get(comparison_variant))
+    if baseline_variant and comparison_variant and baseline_payload and comparison_payload:
+        comparison_support = {
+            "available": True,
+            "baseline_variant": baseline_variant,
+            "comparison_variant": comparison_variant,
+            **evaluate_variant_comparison_support(
+                baseline_variant=baseline_variant,
+                comparison_variant=comparison_variant,
+                baseline_payload=baseline_payload,
+                comparison_payload=comparison_payload,
+            ),
+        }
+
     report = {
         "available": bool(
             any(_coerce_bool(row.get("present")) for row in ladder_rows)
@@ -969,6 +1313,12 @@ def extract_unified_ladder_report(
         ),
         "adjacent_comparisons": adjacent_comparisons,
         "overall_comparison": overall_comparison,
+        "comparison_support": comparison_support,
+        "comparison_support_matrix": build_comparison_support_matrix(
+            variants=variants,
+            variant_order=list(variants.keys()),
+            baseline_variant=baseline_variant,
+        ),
         "capacity_matched_comparison": capacity_comparison,
         "interface_sufficiency_results": interface_results,
         "credit_assignment_comparison": credit_comparison,

@@ -607,7 +607,7 @@ archiving or citing a benchmark-of-record bundle.
 
 Expected outputs in `spider_ablation_report/`:
 
-- `report.md`
+- `report.md` (begins with an **Overview** summary table and a linked **Table of contents**)
 - `report.json`
 - `training_eval.svg`
 - `scenario_success.svg`

@@ -470,7 +470,7 @@ class AccumulatorRecordingMixin:
             if role not in self.night_role_ticks:
                 self.night_role_ticks[role] = 0
             self.night_role_ticks[role] += 1
-            if bool(next_meta["on_shelter"]):
+            if bool(next_meta["on_shelter"]) and str(role) != "outside":
                 self.night_shelter_ticks += 1
             if getattr(state, "last_move_dx", 0) == 0 and getattr(state, "last_move_dy", 0) == 0:
                 self.night_still_ticks += 1

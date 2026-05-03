@@ -23,6 +23,8 @@ class EventHandler:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.controller.request_quit()
+            elif event.type == pygame.VIDEORESIZE:
+                self.controller.request_resize(event.w, event.h)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE or event.key == pygame.K_q:
                     self.controller.request_quit()

@@ -9,7 +9,6 @@ from ..predator import PREDATOR_STATES
 from ..world import ACTIONS
 from .constants import (
     BOTTOM_BAR_HEIGHT,
-    CELL_SIZE,
     PANEL_WIDTH,
     TICK_SPEEDS,
     TOP_BAR_HEIGHT,
@@ -84,6 +83,7 @@ _CONTROLLER_DELEGATED_NAMES = {
     "last_info",
     "last_reward",
     "observation",
+    "panel_width",
     "panel_x",
     "panel_y",
     "paused",
@@ -120,13 +120,16 @@ class Renderer:
         self.screen = surface
         self.controller = controller
         self.buttons = buttons
+        self.set_fonts(fonts)
+        self._night_overlay = None
+        self._night_overlay_size = None
+        self.btn_pause = buttons["pause"]
+
+    def set_fonts(self, fonts: dict[str, pygame.font.Font]) -> None:
         self.font_sm = fonts["sm"]
         self.font_md = fonts["md"]
         self.font_lg = fonts["lg"]
         self.font_xl = fonts["xl"]
-        self._night_overlay = None
-        self._night_overlay_size = None
-        self.btn_pause = buttons["pause"]
 
     def __getattr__(self, name: str):
         if name not in _CONTROLLER_DELEGATED_NAMES:
@@ -215,19 +218,21 @@ class Renderer:
         shelter_c = _lerp_color(COLOR_SHELTER, COLOR_SHELTER_NIGHT, nt)
         grid_c = _lerp_color(COLOR_GRID, COLOR_GRID_NIGHT, nt)
 
-        grid_w = self.world.width * CELL_SIZE
-        grid_h = self.world.height * CELL_SIZE
+        cell = self.controller.cell_size
+        grid_w = self.world.width * cell
+        grid_h = self.world.height * cell
         grid_rect = pygame.Rect(self.grid_offset_x, self.grid_offset_y, grid_w, grid_h)
         pygame.draw.rect(self.screen, bg, grid_rect)
 
         ox, oy = self.grid_offset_x, self.grid_offset_y
+        cell = self.controller.cell_size
 
         # Cells
         for cy in range(self.world.height):
             for cx in range(self.world.width):
-                rx = ox + cx * CELL_SIZE
-                ry = oy + cy * CELL_SIZE
-                cell_rect = pygame.Rect(rx, ry, CELL_SIZE, CELL_SIZE)
+                rx = ox + cx * cell
+                ry = oy + cy * cell
+                cell_rect = pygame.Rect(rx, ry, cell, cell)
                 pos = (cx, cy)
                 terrain = self.world.terrain_at(pos)
                 if terrain == BLOCKED:
@@ -243,7 +248,7 @@ class Renderer:
                     pygame.draw.rect(
                         self.screen,
                         _lerp_color((122, 108, 72), (88, 78, 54), nt),
-                        pygame.Rect(rx + 10, ry + CELL_SIZE // 2 - 4, CELL_SIZE - 20, 8),
+                        pygame.Rect(rx + 10, ry + cell // 2 - 4, cell - 20, 8),
                         border_radius=4,
                     )
                 elif pos in self.world.shelter_deep_cells:
@@ -258,13 +263,13 @@ class Renderer:
                 if pos in self.world.shelter_cells:
                     roof_color = _lerp_color((120, 90, 60), (70, 50, 35), nt)
                     pygame.draw.polygon(self.screen, roof_color, [
-                        (rx + CELL_SIZE // 2, ry + 4),
-                        (rx + 6, ry + CELL_SIZE // 2 - 2),
-                        (rx + CELL_SIZE - 6, ry + CELL_SIZE // 2 - 2),
+                        (rx + cell // 2, ry + 4),
+                        (rx + 6, ry + cell // 2 - 2),
+                        (rx + cell - 6, ry + cell // 2 - 2),
                     ])
                     if pos in self.world.shelter_entrance_cells:
                         door_color = _lerp_color((90, 60, 30), (50, 35, 20), nt)
-                        door_rect = pygame.Rect(rx + CELL_SIZE // 2 - 5, ry + CELL_SIZE // 2, 10, CELL_SIZE // 2 - 4)
+                        door_rect = pygame.Rect(rx + cell // 2 - 5, ry + cell // 2, 10, cell // 2 - 4)
                         pygame.draw.rect(self.screen, door_color, door_rect, border_radius=2)
 
                 pygame.draw.rect(self.screen, grid_c, cell_rect, width=1)
@@ -273,7 +278,7 @@ class Renderer:
             food_smell = self.world.smell_field("food")
             predator_smell = self.world.smell_field("predator")
             smell_overlay_surface = pygame.Surface(
-                (CELL_SIZE, CELL_SIZE),
+                (cell, cell),
                 pygame.SRCALPHA,
             )
             for cy in range(self.world.height):
@@ -287,17 +292,17 @@ class Renderer:
                     )
                     self.screen.blit(
                         smell_overlay_surface,
-                        (ox + cx * CELL_SIZE, oy + cy * CELL_SIZE),
+                        (ox + cx * cell, oy + cy * cell),
                     )
 
         if self.show_visibility_overlay:
             visibility = self.world.visibility_overlay()
             occluded_overlay_surface = pygame.Surface(
-                (CELL_SIZE, CELL_SIZE),
+                (cell, cell),
                 pygame.SRCALPHA,
             )
             visible_overlay_surface = pygame.Surface(
-                (CELL_SIZE, CELL_SIZE),
+                (cell, cell),
                 pygame.SRCALPHA,
             )
             occluded_overlay_surface.fill((220, 180, 60, 48))
@@ -305,37 +310,54 @@ class Renderer:
             for cx, cy in visibility["occluded"]:
                 self.screen.blit(
                     occluded_overlay_surface,
-                    (ox + cx * CELL_SIZE, oy + cy * CELL_SIZE),
+                    (ox + cx * cell, oy + cy * cell),
                 )
             for cx, cy in visibility["visible"]:
                 self.screen.blit(
                     visible_overlay_surface,
-                    (ox + cx * CELL_SIZE, oy + cy * CELL_SIZE),
+                    (ox + cx * cell, oy + cy * cell),
                 )
 
         # Food
         for fx, fy in self.world.food_positions:
-            cx = ox + fx * CELL_SIZE + CELL_SIZE // 2
-            cy_pos = oy + fy * CELL_SIZE + CELL_SIZE // 2
+            cx = ox + fx * cell + cell // 2
+            cy_pos = oy + fy * cell + cell // 2
+            s = max(1, cell / 70.0)
             # Fly or insect body
-            pygame.draw.circle(self.screen, (80, 60, 40), (cx, cy_pos), 8)
-            pygame.draw.circle(self.screen, COLOR_FOOD, (cx, cy_pos), 6)
+            pygame.draw.circle(self.screen, (80, 60, 40), (cx, cy_pos), max(1, int(8 * s)))
+            pygame.draw.circle(self.screen, COLOR_FOOD, (cx, cy_pos), max(1, int(6 * s)))
             # Wings
-            pygame.draw.ellipse(self.screen, (255, 200, 200),
-                                pygame.Rect(cx - 12, cy_pos - 8, 10, 6))
-            pygame.draw.ellipse(self.screen, (255, 200, 200),
-                                pygame.Rect(cx + 2, cy_pos - 8, 10, 6))
+            pygame.draw.ellipse(
+                self.screen,
+                (255, 200, 200),
+                pygame.Rect(
+                    round(cx - 12 * s),
+                    round(cy_pos - 8 * s),
+                    round(10 * s),
+                    round(6 * s),
+                ),
+            )
+            pygame.draw.ellipse(
+                self.screen,
+                (255, 200, 200),
+                pygame.Rect(
+                    round(cx + 2 * s),
+                    round(cy_pos - 8 * s),
+                    round(10 * s),
+                    round(6 * s),
+                ),
+            )
 
         # Predator lizard
         self._draw_lizard(
-            ox + self.world.lizard.x * CELL_SIZE + CELL_SIZE // 2,
-            oy + self.world.lizard.y * CELL_SIZE + CELL_SIZE // 2,
+            ox + self.world.lizard.x * cell + cell // 2,
+            oy + self.world.lizard.y * cell + cell // 2,
         )
 
         # Spider
         self._draw_spider(
-            ox + self.world.state.x * CELL_SIZE + CELL_SIZE // 2,
-            oy + self.world.state.y * CELL_SIZE + CELL_SIZE // 2,
+            ox + self.world.state.x * cell + cell // 2,
+            oy + self.world.state.y * cell + cell // 2,
         )
 
         # Soft nighttime overlay
@@ -351,50 +373,68 @@ class Renderer:
             self.screen.blit(self._night_overlay, (ox, oy))
 
     def _draw_lizard(self, cx: int, cy: int) -> None:
-        """
-        Draws a simplified lizard icon centered at the given grid pixel coordinates.
+        """Draw a simplified lizard icon centered at (cx, cy) in pixels."""
+        cell = self.controller.cell_size
+        s = max(1, cell / 70.0)
 
-        Parameters:
-            cx (int): X coordinate of the lizard's center in pixels.
-            cy (int): Y coordinate of the lizard's center in pixels.
-        """
-        tail = [(cx - 16, cy + 2), (cx - 26, cy + 6), (cx - 22, cy + 10)]
-        pygame.draw.lines(self.screen, COLOR_LIZARD_BODY, False, tail, 4)
-        body_rect = pygame.Rect(cx - 12, cy - 8, 24, 16)
+        def px(dx: float) -> int:
+            return round(cx + dx * s)
+
+        def py(dy: float) -> int:
+            return round(cy + dy * s)
+
+        tail = [(px(-16), py(2)), (px(-26), py(6)), (px(-22), py(10))]
+        pygame.draw.lines(self.screen, COLOR_LIZARD_BODY, False, tail, max(1, int(4 * s)))
+        body_rect = pygame.Rect(px(-12), py(-8), round(24 * s), round(16 * s))
         pygame.draw.ellipse(self.screen, COLOR_LIZARD_BODY, body_rect)
-        head_rect = pygame.Rect(cx + 6, cy - 6, 14, 12)
+        head_rect = pygame.Rect(px(6), py(-6), round(14 * s), round(12 * s))
         pygame.draw.ellipse(self.screen, (80, 170, 90), head_rect)
         for lx, ly in [(-8, -8), (-8, 8), (4, -8), (4, 8)]:
-            pygame.draw.line(self.screen, COLOR_LIZARD_BODY, (cx + lx, cy), (cx + lx - 8, cy + ly), 2)
-        pygame.draw.circle(self.screen, COLOR_LIZARD_EYE, (cx + 12, cy - 2), 2)
+            pygame.draw.line(
+                self.screen,
+                COLOR_LIZARD_BODY,
+                (px(lx), py(0)),
+                (px(lx - 8), py(ly)),
+                max(1, int(2 * s)),
+            )
+        pygame.draw.circle(self.screen, COLOR_LIZARD_EYE, (px(12), py(-2)), max(1, int(2 * s)))
 
     def _draw_spider(self, cx: int, cy: int) -> None:
-        # Legs
-        """
-        Draws a stylized spider centered at the given screen coordinates.
+        """Draw a stylized spider centered at (cx, cy) in pixels."""
+        cell = self.controller.cell_size
+        s = max(1, cell / 70.0)
 
-        Parameters:
-            cx (int): X coordinate of the spider center (pixels).
-            cy (int): Y coordinate of the spider center (pixels).
-        """
+        def px(dx: float) -> int:
+            return round(cx + dx * s)
+
+        def py(dy: float) -> int:
+            return round(cy + dy * s)
+
+        # Legs
         leg_offsets = [
             (-14, -10), (-16, -3), (-15, 5), (-12, 12),
             (14, -10), (16, -3), (15, 5), (12, 12),
         ]
         for lx, ly in leg_offsets:
-            pygame.draw.line(self.screen, COLOR_SPIDER_LEGS, (cx, cy), (cx + lx, cy + ly), 2)
+            pygame.draw.line(
+                self.screen,
+                COLOR_SPIDER_LEGS,
+                (px(0), py(0)),
+                (px(lx), py(ly)),
+                max(1, int(2 * s)),
+            )
 
         # Body (abdomen + cephalothorax)
-        pygame.draw.circle(self.screen, COLOR_SPIDER_BODY, (cx, cy + 4), 9)
-        pygame.draw.circle(self.screen, (60, 60, 60), (cx, cy - 4), 7)
+        pygame.draw.circle(self.screen, COLOR_SPIDER_BODY, (px(0), py(4)), max(1, int(9 * s)))
+        pygame.draw.circle(self.screen, (60, 60, 60), (px(0), py(-4)), max(1, int(7 * s)))
 
         # Eyes
-        pygame.draw.circle(self.screen, COLOR_SPIDER_EYES, (cx - 3, cy - 7), 2)
-        pygame.draw.circle(self.screen, COLOR_SPIDER_EYES, (cx + 3, cy - 7), 2)
+        pygame.draw.circle(self.screen, COLOR_SPIDER_EYES, (px(-3), py(-7)), max(1, int(2 * s)))
+        pygame.draw.circle(self.screen, COLOR_SPIDER_EYES, (px(3), py(-7)), max(1, int(2 * s)))
 
         # Eye highlights
-        pygame.draw.circle(self.screen, (255, 255, 255), (cx - 2, cy - 8), 1)
-        pygame.draw.circle(self.screen, (255, 255, 255), (cx + 4, cy - 8), 1)
+        pygame.draw.circle(self.screen, (255, 255, 255), (px(-2), py(-8)), max(1, int(1 * s)))
+        pygame.draw.circle(self.screen, (255, 255, 255), (px(4), py(-8)), max(1, int(1 * s)))
 
     def _draw_panel(self) -> None:
         """
@@ -411,15 +451,15 @@ class Renderer:
 
         No value is returned.
         """
-        grid_h = self.world.height * CELL_SIZE
+        grid_h = self.world.height * self.controller.cell_size
         # Create an off-screen surface tall enough for all content
         panel_surf_h = max(grid_h, MIN_PANEL_SURF_H)
-        panel_surf = pygame.Surface((PANEL_WIDTH, panel_surf_h))
+        panel_surf = pygame.Surface((self.panel_width, panel_surf_h))
         panel_surf.fill(COLOR_PANEL_BG)
 
         x0 = 14
         y = 10
-        pw = PANEL_WIDTH - 28
+        pw = self.panel_width - 28
         metric_snapshot = self.episode_metrics.snapshot()
 
         # --- Status ---
@@ -580,17 +620,17 @@ class Renderer:
         max_scroll = max(0, self.panel_content_height - grid_h)
         self.panel_scroll = max(0, min(self.panel_scroll, max_scroll))
         # Draw panel background and border on real screen
-        panel_rect = pygame.Rect(self.panel_x, self.panel_y, PANEL_WIDTH, grid_h)
+        panel_rect = pygame.Rect(self.panel_x, self.panel_y, self.panel_width, grid_h)
         pygame.draw.rect(self.screen, COLOR_PANEL_BG, panel_rect)
         pygame.draw.line(self.screen, COLOR_PANEL_BORDER,
                          (self.panel_x, self.panel_y),
                          (self.panel_x, self.panel_y + grid_h))
         # Blit the visible portion of the panel surface
-        source_rect = pygame.Rect(0, self.panel_scroll, PANEL_WIDTH, grid_h)
+        source_rect = pygame.Rect(0, self.panel_scroll, self.panel_width, grid_h)
         self.screen.blit(panel_surf, (self.panel_x, self.panel_y), source_rect)
         # Scrollbar indicator
         if self.panel_content_height > grid_h:
-            sb_x = self.panel_x + PANEL_WIDTH - 6
+            sb_x = self.panel_x + self.panel_width - 6
             sb_h = max(20, int(grid_h * grid_h / self.panel_content_height))
             sb_travel = grid_h - sb_h
             sb_y = self.panel_y + int(sb_travel * self.panel_scroll / max_scroll) if max_scroll > 0 else self.panel_y
@@ -606,7 +646,7 @@ class Renderer:
         label = self.font_md.render(text, True, COLOR_TEXT_TITLE)
         surface.blit(label, (x, y))
         y += label.get_height() + 2
-        pygame.draw.line(surface, COLOR_PANEL_BORDER, (x, y), (x + PANEL_WIDTH - 28, y))
+        pygame.draw.line(surface, COLOR_PANEL_BORDER, (x, y), (x + self.panel_width - 28, y))
         return y + 4
 
     def _draw_text(
@@ -700,7 +740,7 @@ class Renderer:
 
         Updates the pause button label to reflect current pause state, renders all bottom-bar buttons, displays left and right-aligned shortcut/help text, and if a toast is active renders a centered status message using explicit success or error styling.
         """
-        grid_h = self.world.height * CELL_SIZE
+        grid_h = self.world.height * self.controller.cell_size
         bar_y = TOP_BAR_HEIGHT + grid_h
         rect = pygame.Rect(0, bar_y, self.win_w, BOTTOM_BAR_HEIGHT)
         pygame.draw.rect(self.screen, (40, 40, 48), rect)

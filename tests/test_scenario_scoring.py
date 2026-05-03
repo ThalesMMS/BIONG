@@ -28,6 +28,7 @@ from spider_cortex_sim.scenarios.scoring import (
     PREDATOR_EDGE_CHECKS,
     SLEEP_VS_EXPLORATION_CONFLICT_CHECKS,
     VISUAL_HUNTER_OPEN_FIELD_CHECKS,
+    _attribute_two_shelter_tradeoff_failure,
     _classify_corridor_gauntlet_failure,
     _classify_exposed_day_foraging_failure,
     _classify_food_deprivation_failure,
@@ -203,6 +204,51 @@ class ScoreFunctionCoreTest(ScoreFunctionTestBase):
             }.issubset(score.behavior_metrics)
         )
         self.assertEqual(score.behavior_metrics["failure_mode"], "no_return_to_shelter")
+
+    def test_two_shelter_attribution_high_hunger_without_food_progress_is_arbitration(self) -> None:
+        stats = _make_episode_stats(scenario="two_shelter_tradeoff")
+        trace = [
+            _make_action_selection_trace_item({"winning_valence": "hunger"})
+            for _ in range(4)
+        ]
+        metrics = {
+            "checks_passed": False,
+            "left_shelter": True,
+            "predator_contacts": 0,
+            "alive": True,
+            "initial_food_distance": 8.0,
+            "min_food_distance_reached": 8.0,
+            "food_distance_delta": 0.0,
+            "predator_visible_ticks": 0,
+            "night_shelter_occupancy_rate": 0.0,
+        }
+
+        result = _attribute_two_shelter_tradeoff_failure(stats, trace, metrics)
+
+        self.assertEqual(result, "arbitration")
+
+    def test_two_shelter_attribution_unknown_night_occupancy_skips_memory(self) -> None:
+        stats = _make_episode_stats(scenario="two_shelter_tradeoff")
+        base_metrics = {
+            "checks_passed": False,
+            "left_shelter": True,
+            "predator_contacts": 0,
+            "alive": True,
+            "initial_food_distance": 8.0,
+            "min_food_distance_reached": 5.0,
+            "food_distance_delta": 3.0,
+            "predator_visible_ticks": 0,
+        }
+
+        for night_value in (None, float("nan")):
+            with self.subTest(night_shelter_occupancy_rate=night_value):
+                metrics = dict(base_metrics)
+                if night_value is not None:
+                    metrics["night_shelter_occupancy_rate"] = night_value
+
+                result = _attribute_two_shelter_tradeoff_failure(stats, [], metrics)
+
+                self.assertEqual(result, "reward")
 
     def test_food_deprivation_score_checks_hunger_reduction(self) -> None:
         spec = get_scenario("food_deprivation")

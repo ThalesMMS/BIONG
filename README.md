@@ -67,7 +67,7 @@ deeper inspection.
 
 - Just run the simulator: start with [Quick Start](#quick-start) or add `--render-eval` for an ASCII replay
 - Run with the GUI: add `--gui`; see [Graphical Interface (Pygame)](#graphical-interface-pygame)
-- Inspect behavior scenarios or the behavior suite: see [Behavioral Evaluation](#behavioral-evaluation)
+- Inspect behavior scenarios or the behavior suite: see [Behavioral Evaluation](#behavioral-evaluation) and [docs/behavior_gate_diagnostics.md](docs/behavior_gate_diagnostics.md)
 - Run claim tests: see [Claim Test Suite](#claim-test-suite)
 - Run ablations or learning-evidence workflows: see [Ablations And Learning Evidence](#ablations-and-learning-evidence) and [docs/ablation_workflow.md](docs/ablation_workflow.md)
 - Diagnose progressive modularity before adding new centers: see [docs/architectural_ladder.md](docs/architectural_ladder.md)
@@ -652,6 +652,10 @@ $PYTHON_BIN -m spider_cortex_sim \
   --map-template central_burrow
 ```
 
+The GUI window is resizable. When you resize it, the grid automatically zooms to fit the available space (the right-side panel stays docked and its width is recomputed within reasonable bounds).
+
+To adjust scaling behavior, see the GUI controller logic (`spider_cortex_sim/gui/controller.py`), including the min/max cell size clamps and the `ui_scale` used for font sizing.
+
 The GUI displays:
 
 - the predator lizard on the grid
@@ -877,6 +881,11 @@ Rules:
 - at least one of `--summary`, `--trace`, or `--behavior-csv` is required
 - the report is always emitted, even with partial input
 - missing blocks are reported in `report.md` and `report.json` instead of aborting execution
+
+The offline analysis output directory also includes a navigation index at `INDEX.md`.
+
+- Open `INDEX.md` first to jump to scenario summaries, gate results, claims, and evidence.
+- All links are relative, so you can move/copy the report folder and still browse it locally.
 
 ## Ablations And Learning Evidence
 

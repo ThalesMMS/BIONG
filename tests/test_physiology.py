@@ -612,6 +612,43 @@ class PhysiologyModuleTest(unittest.TestCase):
         self.assertIn("hunger", event.payload)
         self.assertEqual(event.stage, "autonomic")
 
+    def test_resolve_autonomic_behaviors_non_stay_shelter_action_applies_rest_penalty(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        deep_cells = list(world.shelter_deep_cells)
+        if not deep_cells:
+            self.skipTest("No deep shelter cells available")
+        world.state.x, world.state.y = sorted(deep_cells)[0]
+        world.state.fatigue = 0.7
+        world.state.sleep_debt = 0.7
+        world.state.hunger = 0.1
+        world.state.rest_streak = 2
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+        ctx = self._make_tick_context(world)
+
+        resolve_autonomic_behaviors(
+            world,
+            action_name="UP",
+            predator_threat=False,
+            night=True,
+            reward_components=reward_components,
+            info=info,
+            tick_context=ctx,
+        )
+
+        event_names = [e.name for e in ctx.event_log]
+        self.assertIn("sleep_reset_non_stay", event_names)
+        self.assertIn("rest_blocked", event_names)
+        self.assertNotIn("rest_phase", event_names)
+        reset_event = next(e for e in ctx.event_log if e.name == "sleep_reset_non_stay")
+        self.assertEqual(reset_event.stage, "autonomic")
+        self.assertEqual(reset_event.payload["action"], "UP")
+        self.assertEqual(world.state.sleep_phase, "AWAKE")
+        self.assertEqual(world.state.rest_streak, 0)
+        self.assertAlmostEqual(world.state.sleep_debt, 0.7)
+        self.assertLess(reward_components["resting"], 0.0)
+
     def test_resolve_autonomic_behaviors_without_tick_context_still_works(self) -> None:
         world = SpiderWorld(seed=5, lizard_move_interval=999999)
         world.reset(seed=5)
