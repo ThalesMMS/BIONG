@@ -108,6 +108,23 @@ class CapacityConfigIntegrationTest(unittest.TestCase):
             sum(summary["module_hidden_dims"].values()),
         )
 
+    def test_true_monolithic_direct_policy_hidden_dims_override_summary(self) -> None:
+        config = BrainAblationConfig(
+            architecture="true_monolithic",
+            direct_policy_hidden_dims=(128, 64),
+        )
+        summary = config.to_summary()
+
+        self.assertEqual(summary["direct_policy_hidden_dims"], [128, 64])
+        self.assertEqual(summary["monolithic_hidden_dim"], 192)
+
+    def test_direct_policy_hidden_dims_reject_non_true_monolithic(self) -> None:
+        with self.assertRaisesRegex(ValueError, "true_monolithic architectures"):
+            BrainAblationConfig(
+                architecture="modular",
+                direct_policy_hidden_dims=(128, 64),
+            )
+
     def test_simulation_summary_includes_capacity_and_compute_cost(self) -> None:
         sim = SpiderSimulation(
             seed=7,
@@ -130,6 +147,20 @@ class CapacityConfigIntegrationTest(unittest.TestCase):
             "approx_forward_macs",
         )
         self.assertGreater(summary["approximate_compute_cost"]["total"], 0)
+
+    def test_true_monolithic_architecture_signature_includes_direct_policy_hidden_sizes(self) -> None:
+        sim = SpiderSimulation(
+            seed=9,
+            max_steps=5,
+            brain_config=BrainAblationConfig(
+                architecture="true_monolithic",
+                direct_policy_hidden_dims=(128, 64),
+            ),
+        )
+        architecture = sim.brain._architecture_signature()
+
+        self.assertEqual(architecture["direct_policy"]["hidden_sizes"], [128, 64])
+        self.assertEqual(architecture["capacity"]["direct_policy_hidden_dims"], [128, 64])
 
     def test_simulation_summary_lists_frozen_modules_when_present(self) -> None:
         sim = SpiderSimulation(seed=7, max_steps=5)

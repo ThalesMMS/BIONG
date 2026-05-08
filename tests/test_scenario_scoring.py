@@ -21,6 +21,7 @@ from spider_cortex_sim.reward import SCENARIO_AUSTERE_REQUIREMENTS, SHAPING_GAP_
 from spider_cortex_sim.scenarios import SCENARIO_NAMES, get_scenario
 from spider_cortex_sim.scenarios.scoring import (
     CONFLICT_PASS_RATE,
+    CONTINUOUS_SURVIVAL_CHECKS,
     FOOD_DEPRIVATION_CHECKS,
     FOOD_VS_PREDATOR_CONFLICT_CHECKS,
     NIGHT_REST_CHECKS,
@@ -155,6 +156,63 @@ class ScoreFunctionCoreTest(ScoreFunctionTestBase):
             }.issubset(score.behavior_metrics)
         )
         self.assertEqual(score.behavior_metrics["failure_mode"], "deep_without_recovery")
+
+    def test_continuous_survival_canonical_score_requires_repeated_cycle(self) -> None:
+        spec = get_scenario("continuous_survival_canonical")
+        stats = _make_episode_stats(
+            scenario="continuous_survival_canonical",
+            steps=300,
+            food_eaten=3,
+            sleep_events=20,
+            predator_contacts=0,
+            final_health=1.0,
+            final_hunger=0.18,
+            final_fatigue=0.0,
+            final_sleep_debt=0.0,
+        )
+        trace = [
+            {
+                "state": {
+                    "x": 1,
+                    "y": 1,
+                    "hunger": 0.8,
+                    "fatigue": 0.7,
+                    "sleep_debt": 0.6,
+                    "shelter_role": "deep",
+                    "predator_motion_salience": 0.0,
+                    "predator_trace": {"strength": 0.0},
+                    "predator_memory": {"target": None},
+                },
+                "prev_state": {
+                    "x": 1,
+                    "y": 1,
+                    "food_positions": [(5, 5)],
+                },
+            },
+            {
+                "state": {
+                    "x": 2,
+                    "y": 1,
+                    "shelter_role": "outside",
+                    "predator_motion_salience": 0.4,
+                    "predator_trace": {"strength": 0.2},
+                    "predator_memory": {"target": [4, 4]},
+                }
+            },
+            {
+                "state": {
+                    "x": 1,
+                    "y": 1,
+                    "shelter_role": "inside",
+                    "predator_motion_salience": 0.0,
+                    "predator_trace": {"strength": 0.0},
+                    "predator_memory": {"target": None},
+                }
+            },
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertFalse(score.checks["repeated_foraging_cycle"].passed)
+        self.assertEqual(score.behavior_metrics["shelter_exits"], 1)
 
     def test_two_shelter_tradeoff_emits_trace_diagnostics_and_failure_mode(self) -> None:
         spec = get_scenario("two_shelter_tradeoff")
@@ -377,13 +435,17 @@ class CheckSpecConstantsTest(unittest.TestCase):
     def test_food_vs_predator_conflict_checks_has_three_items(self) -> None:
         self.assertEqual(len(FOOD_VS_PREDATOR_CONFLICT_CHECKS), 3)
 
-    def test_sleep_vs_exploration_conflict_checks_has_three_items(self) -> None:
-        self.assertEqual(len(SLEEP_VS_EXPLORATION_CONFLICT_CHECKS), 3)
+    def test_continuous_survival_checks_has_four_items(self) -> None:
+        self.assertEqual(len(CONTINUOUS_SURVIVAL_CHECKS), 4)
+
+    def test_sleep_vs_exploration_conflict_checks_has_four_items(self) -> None:
+        self.assertEqual(len(SLEEP_VS_EXPLORATION_CONFLICT_CHECKS), 4)
 
     def test_all_specs_have_non_empty_fields(self) -> None:
         for spec in (
             list(NIGHT_REST_CHECKS)
             + list(PREDATOR_EDGE_CHECKS)
+            + list(CONTINUOUS_SURVIVAL_CHECKS)
             + list(FOOD_DEPRIVATION_CHECKS)
             + list(FOOD_VS_PREDATOR_CONFLICT_CHECKS)
             + list(SLEEP_VS_EXPLORATION_CONFLICT_CHECKS)

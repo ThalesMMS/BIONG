@@ -31,6 +31,7 @@ from spider_cortex_sim.arbitration import (
 )
 from spider_cortex_sim.modules import ModuleResult
 from spider_cortex_sim.bus import MessageBus
+from spider_cortex_sim.brain.runtime import TRUE_MONOLITHIC_THREAT_ESCAPE_BIAS_LOGIT
 from spider_cortex_sim.interfaces import (
     ACTION_CONTEXT_INTERFACE,
     LOCOMOTION_ACTIONS,
@@ -447,6 +448,205 @@ class ComputeArbitrationTest(unittest.TestCase):
         self.assertEqual(step.arbitration_decision.winning_valence, "hunger")
         self.assertFalse(step.arbitration_decision.food_bias_applied)
         self.assertIsNone(step.arbitration_decision.food_bias_action)
+
+    def test_true_monolithic_food_direction_bias_can_be_enabled(self) -> None:
+        base_brain = SpiderBrain(
+            seed=5,
+            config=BrainAblationConfig(
+                name="true_monolithic_baseline",
+                architecture="true_monolithic",
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=False,
+            ),
+        )
+        biased_brain = SpiderBrain(
+            seed=5,
+            config=BrainAblationConfig(
+                name="true_monolithic_food_bias",
+                architecture="true_monolithic",
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=True,
+            ),
+        )
+        obs = _blank_obs()
+        obs["hunger"] = _vector_for(
+            _module_interface("hunger_center"),
+            food_memory_dx=-1.0,
+            food_memory_dy=0.0,
+            food_memory_age=0.0,
+        )
+
+        base_step = base_brain.act(obs, bus=None, sample=False, training=False)
+        biased_step = biased_brain.act(obs, bus=None, sample=False, training=False)
+
+        self.assertFalse(base_step.arbitration_decision.food_bias_applied)
+        self.assertTrue(biased_step.arbitration_decision.food_bias_applied)
+        self.assertEqual(biased_step.arbitration_decision.food_bias_action, "MOVE_LEFT")
+        diff = biased_step.total_logits - base_step.total_logits
+        expected = np.zeros_like(diff)
+        expected[LOCOMOTION_ACTIONS.index("MOVE_LEFT")] = 3.0
+        np.testing.assert_allclose(diff, expected)
+
+    def test_true_monolithic_threat_escape_bias_prefers_shelter_memory(self) -> None:
+        brain = SpiderBrain(
+            seed=5,
+            config=BrainAblationConfig(
+                name="true_monolithic_escape_bias",
+                architecture="true_monolithic",
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=True,
+            ),
+        )
+        obs = _blank_obs()
+        obs["hunger"] = _vector_for(
+            _module_interface("hunger_center"),
+            food_memory_dx=1.0,
+            food_memory_dy=0.0,
+            food_memory_age=0.0,
+        )
+        obs["threat"] = _vector_for(
+            _module_interface("threat_center"),
+            recent_contact=1.0,
+            predator_memory_dx=1.0,
+            predator_memory_dy=0.0,
+            predator_memory_age=0.0,
+        )
+        obs["sleep"] = _vector_for(
+            _module_interface("sleep_center"),
+            shelter_memory_dx=-1.0,
+            shelter_memory_dy=0.0,
+            shelter_memory_age=0.0,
+        )
+
+        step = brain.act(obs, bus=None, sample=False, training=False)
+
+        self.assertTrue(step.arbitration_decision.food_bias_applied)
+        self.assertEqual(step.arbitration_decision.food_bias_action, "MOVE_LEFT")
+        self.assertEqual(step.action_idx, LOCOMOTION_ACTIONS.index("MOVE_LEFT"))
+        expected = np.zeros_like(step.total_logits)
+        expected[LOCOMOTION_ACTIONS.index("MOVE_LEFT")] = (
+            TRUE_MONOLITHIC_THREAT_ESCAPE_BIAS_LOGIT
+        )
+        np.testing.assert_allclose(
+            step.total_logits - step.total_logits_without_reflex,
+            expected,
+        )
+
+    def test_true_monolithic_threat_escape_bias_ignores_faint_smell(self) -> None:
+        brain = SpiderBrain(
+            seed=5,
+            config=BrainAblationConfig(
+                name="true_monolithic_escape_bias_smell_gate",
+                architecture="true_monolithic",
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=True,
+            ),
+        )
+        obs = _blank_obs()
+        obs["threat"] = _vector_for(
+            _module_interface("threat_center"),
+            predator_visible=0.0,
+            predator_certainty=0.0,
+            predator_dx=0.0,
+            predator_dy=0.0,
+            predator_trace_strength=0.0,
+            predator_trace_dx=0.0,
+            predator_trace_dy=0.0,
+            predator_memory_age=1.0,
+            predator_memory_dx=0.0,
+            predator_memory_dy=0.0,
+            predator_smell_strength=0.15,
+            predator_smell_dx=1.0,
+            predator_smell_dy=0.0,
+            recent_contact=0.0,
+            recent_pain=0.0,
+        )
+        obs["sleep"] = _vector_for(
+            _module_interface("sleep_center"),
+            shelter_memory_dx=-1.0,
+            shelter_memory_dy=0.0,
+            shelter_memory_age=0.0,
+        )
+
+        self.assertIsNone(brain._threat_escape_bias_action(obs))
+
+    def test_true_monolithic_sleep_rest_bias_prefers_stay_in_shelter(self) -> None:
+        brain = SpiderBrain(
+            seed=5,
+            config=BrainAblationConfig(
+                name="true_monolithic_sleep_rest_bias",
+                architecture="true_monolithic",
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=True,
+            ),
+        )
+        obs = _blank_obs()
+        obs["sleep"] = _vector_for(
+            _module_interface("sleep_center"),
+            on_shelter=1.0,
+            night=0.0,
+            fatigue=0.35,
+            sleep_debt=0.24,
+            hunger=0.12,
+            sleep_phase_level=0.0,
+            shelter_role_level=2.0 / 3.0,
+            rest_streak_norm=0.0,
+        )
+
+        self.assertEqual(brain._sleep_rest_bias_action(obs), "STAY")
+
+    def test_true_monolithic_threat_escape_yields_to_sleep_rest_for_smell_only(self) -> None:
+        brain = SpiderBrain(
+            seed=5,
+            config=BrainAblationConfig(
+                name="true_monolithic_sleep_rest_over_smell",
+                architecture="true_monolithic",
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=True,
+            ),
+        )
+        obs = _blank_obs()
+        obs["threat"] = _vector_for(
+            _module_interface("threat_center"),
+            predator_visible=0.0,
+            predator_certainty=0.0,
+            predator_dx=0.0,
+            predator_dy=0.0,
+            predator_trace_strength=0.0,
+            predator_trace_dx=0.0,
+            predator_trace_dy=0.0,
+            predator_memory_age=1.0,
+            predator_memory_dx=0.0,
+            predator_memory_dy=0.0,
+            predator_smell_strength=0.6,
+            predator_smell_dx=1.0,
+            predator_smell_dy=0.0,
+            recent_contact=0.0,
+            recent_pain=0.0,
+        )
+        obs["sleep"] = _vector_for(
+            _module_interface("sleep_center"),
+            on_shelter=1.0,
+            night=0.0,
+            fatigue=0.35,
+            sleep_debt=0.24,
+            hunger=0.12,
+            sleep_phase_level=0.0,
+            shelter_role_level=2.0 / 3.0,
+            rest_streak_norm=0.0,
+            shelter_memory_dx=0.0,
+            shelter_memory_dy=0.0,
+            shelter_memory_age=0.0,
+        )
+
+        self.assertEqual(brain._sleep_rest_bias_action(obs), "STAY")
+        self.assertIsNone(brain._threat_escape_bias_action(obs))
 
     def test_food_bias_flip_does_not_count_as_final_reflex_override(self) -> None:
         config = BrainAblationConfig(

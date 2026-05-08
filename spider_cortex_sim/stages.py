@@ -215,7 +215,6 @@ def run_action_stage(world: "SpiderWorld", context: TickContext) -> None:
         momentum=round(float(momentum_after), 6),
     )
 
-
 def run_terrain_stage(world: "SpiderWorld", context: TickContext) -> None:
     """Apply terrain costs, wakefulness effects, and pressure penalties."""
     cfg = world.reward_config

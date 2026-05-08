@@ -256,7 +256,11 @@ def canonical_ablation_configs(
             module_dropout=0.0,
             enable_reflexes=False,
             enable_auxiliary_targets=False,
-            **_arbitration_fields(use_learned_arbitration=False, warm_start_scale=0.0),
+            **_arbitration_fields(
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=True,
+            ),
             credit_strategy="broadcast",
             disabled_modules=(),
             reflex_scale=0.0,
@@ -272,6 +276,35 @@ def canonical_ablation_configs(
             disabled_modules=(*COARSE_ROLLUP_MODULES, module_name),
         )
     return variants
+
+
+def diagnostic_ablation_configs(
+    *,
+    module_dropout: float = 0.05,
+    capacity_profile: str | CapacityProfile | None = None,
+) -> Dict[str, BrainAblationConfig]:
+    """Build opt-in diagnostic variants that should not become canonical defaults."""
+    profile_fields = {"capacity_profile": capacity_profile}
+    return {
+        "direct_mlp_policy": BrainAblationConfig(
+            name="direct_mlp_policy",
+            architecture="true_monolithic",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            **_arbitration_fields(
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=True,
+            ),
+            credit_strategy="broadcast",
+            disabled_modules=(),
+            reflex_scale=0.0,
+            module_reflex_scales={},
+            direct_policy_hidden_dims=(128, 64),
+            **profile_fields,
+        ),
+    }
 
 
 def canonical_ablation_variant_names(*, module_dropout: float = 0.05) -> tuple[str, ...]:
@@ -311,6 +344,12 @@ def resolve_ablation_configs(
     registry = canonical_ablation_configs(
         module_dropout=module_dropout,
         capacity_profile=capacity_profile,
+    )
+    registry.update(
+        diagnostic_ablation_configs(
+            module_dropout=module_dropout,
+            capacity_profile=capacity_profile,
+        )
     )
     requested = list(names) if names is not None else list(registry)
     unknown = sorted({name for name in requested if name not in registry})

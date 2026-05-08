@@ -61,6 +61,13 @@ OPEN_FIELD_FORAGING_CHECKS: Sequence[BehaviorCheckSpec] = (
     BehaviorCheckSpec("survives_exposure", "Survives the exposed foraging scenario.", "true"),
 )
 
+CONTINUOUS_SURVIVAL_CHECKS: Sequence[BehaviorCheckSpec] = (
+    BehaviorCheckSpec("long_run_viable", "Survives at least two full day-night cycles with non-terminal homeostasis.", "cycles >= 2 and final homeostasis non-terminal"),
+    BehaviorCheckSpec("repeated_foraging_cycle", "Leaves shelter repeatedly, returns at least once, and eats at least twice.", "food_eaten >= 2 and shelter_exits >= 2 and shelter_returns >= 1"),
+    BehaviorCheckSpec("rest_cycle_under_ecology", "Shows a real rest cycle while predator pressure remains relevant.", "rest_cycle_detected and predator_threat_exposure > 0"),
+    BehaviorCheckSpec("low_contact_survival", "Keeps predator contact low during the long run.", "predator_contacts <= 1"),
+)
+
 SHELTER_BLOCKADE_CHECKS: Sequence[BehaviorCheckSpec] = (
     BehaviorCheckSpec("survives_blockade", "Survives the nighttime entrance blockade.", "true"),
     BehaviorCheckSpec("avoids_blockade_contact", "Avoids direct contact during the blockade.", "true"),
@@ -134,4 +141,5 @@ SLEEP_VS_EXPLORATION_CONFLICT_CHECKS: Sequence[BehaviorCheckSpec] = (
     BehaviorCheckSpec("sleep_priority", "Sleep wins arbitration in a safe nighttime context with high sleep pressure.", "winning_valence=sleep"),
     BehaviorCheckSpec("exploration_suppressed_under_sleep_pressure", "Residual exploration is suppressed while sleep pressure remains high.", "visual/sensory gates reduced"),
     BehaviorCheckSpec("resting_behavior_emerges", "The spider stays in or returns to the shelter and enters useful rest.", "sleep event or sleep debt reduction"),
+    BehaviorCheckSpec("reactivates_after_recovery", "After useful rest clears the acute sleep pressure, the spider resumes movement instead of resting indefinitely.", "daytime movement or shelter exit after recovery"),
 )

@@ -39,6 +39,9 @@ class ScenarioSetupRegressionTest(ScenarioWorldHelpers, unittest.TestCase):
                 "visual_olfactory_pincer",
                 "olfactory_ambush",
                 "visual_hunter_open_field",
+                "continuous_survival_canonical",
+                "continuous_survival_easy_v1",
+                "continuous_survival_medium_v1",
             }:
                 continue
             with self.subTest(scenario=name):
@@ -102,6 +105,49 @@ class ScenarioSetupRegressionTest(ScenarioWorldHelpers, unittest.TestCase):
             food_memory_signal,
         )
         self.assertGreater(food_signal, 0.0)
+
+    def test_continuous_survival_canonical_starts_with_food_outside_shelter(self) -> None:
+        world = self._setup_world("continuous_survival_canonical")
+        self.assertFalse(world.is_night())
+        self.assertEqual(len(world.food_positions), 1)
+        self.assertNotIn(world.food_positions[0], world.shelter_cells)
+        self.assertNotEqual(world.food_positions[0], world.spider_pos())
+        self.assertGreater(world.food_positions[0][0], world.spider_pos()[0])
+        self.assertEqual(world.food_positions[0][1], world.spider_pos()[1])
+        self.assertEqual(world.lizard.profile, VISUAL_HUNTER_PROFILE)
+        self.assertGreaterEqual(world.state.hunger, 0.88)
+        self.assertEqual(
+            (world.state.heading_dx, world.state.heading_dy),
+            world._heading_toward(world.food_positions[0], origin=world.spider_pos()),
+        )
+
+    def test_continuous_survival_canonical_respawns_food_in_corridor(self) -> None:
+        world = self._setup_world("continuous_survival_canonical")
+        corridor = getattr(world, "_scenario_food_spawn_cells")
+        self.assertEqual(corridor, ((9, 7), (10, 7), (11, 7)))
+        eaten = world.food_positions[0]
+        world.respawn_food(eaten)
+        self.assertEqual(len(world.food_positions), 1)
+        self.assertIn(world.food_positions[0], corridor)
+        self.assertNotEqual(world.food_positions[0], eaten)
+
+    def test_continuous_survival_easy_v1_keeps_food_outside_shelter_and_softens_predator(self) -> None:
+        world = self._setup_world("continuous_survival_easy_v1")
+        self.assertEqual(len(world.food_positions), 1)
+        self.assertNotIn(world.food_positions[0], world.shelter_cells)
+        self.assertEqual(world.food_positions[0], (9, 7))
+        self.assertEqual(world.tick, world.day_length - 16)
+        self.assertEqual(getattr(world, "_scenario_food_spawn_cells"), ((9, 7), (10, 7)))
+        self.assertEqual(world.lizard.profile.move_interval, 4)
+        self.assertGreater(world.lizard.profile.detection_threshold, VISUAL_HUNTER_PROFILE.detection_threshold)
+
+    def test_continuous_survival_medium_v1_uses_intermediate_food_and_predator_pressure(self) -> None:
+        world = self._setup_world("continuous_survival_medium_v1")
+        self.assertEqual(len(world.food_positions), 1)
+        self.assertNotIn(world.food_positions[0], world.shelter_cells)
+        self.assertEqual(world.food_positions[0], (10, 7))
+        self.assertEqual(world.lizard.profile.move_interval, 3)
+        self.assertGreater(world.lizard.profile.detection_threshold, VISUAL_HUNTER_PROFILE.detection_threshold)
 
     def test_open_field_foraging_first_route_avoids_blocked_east_wall(self) -> None:
         """
@@ -554,10 +600,13 @@ class ConflictScenarioSetupTest(unittest.TestCase):
         world = self._setup_world("sleep_vs_exploration_conflict")
         self.assertIn(world.spider_pos(), world.shelter_cells)
 
-    def test_sleep_vs_exploration_conflict_food_is_far_from_spider(self) -> None:
+    def test_sleep_vs_exploration_conflict_food_is_in_reactivation_corridor(self) -> None:
         world = self._setup_world("sleep_vs_exploration_conflict")
         food_pos = world.food_positions[0]
-        self.assertGreater(world.manhattan(world.spider_pos(), food_pos), 1)
+        self.assertGreater(food_pos[0], world.spider_pos()[0])
+        self.assertEqual(food_pos[1], world.spider_pos()[1])
+        self.assertGreaterEqual(world.manhattan(world.spider_pos(), food_pos), 3)
+        self.assertLessEqual(world.manhattan(world.spider_pos(), food_pos), 5)
 
     def test_food_vs_predator_conflict_lizard_close_to_spider(self) -> None:
         world = self._setup_world("food_vs_predator_conflict")

@@ -110,6 +110,52 @@ class PhysiologyModuleTest(unittest.TestCase):
         self.assertTrue(info["ate"])
         self.assertLess(world.state.hunger, 0.9)
 
+    def test_resolve_autonomic_behaviors_uses_operational_rest_hunger_threshold(self) -> None:
+        world = SpiderWorld(seed=6, lizard_move_interval=999999)
+        world.reset(seed=6)
+        world.state.hunger = 0.7
+        world.state.fatigue = 0.4
+        world.state.sleep_debt = 0.4
+        world.state.rest_streak = 1
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+
+        resolve_autonomic_behaviors(
+            world,
+            action_name="STAY",
+            predator_threat=False,
+            night=True,
+            reward_components=reward_components,
+            info=info,
+        )
+
+        self.assertTrue(info["slept"])
+        self.assertEqual(world.state.sleep_phase, "RESTING")
+        self.assertGreater(world.state.sleep_events, 0)
+
+    def test_resolve_autonomic_behaviors_allows_orientation_to_rest_on_shelter(self) -> None:
+        world = SpiderWorld(seed=7, lizard_move_interval=999999)
+        world.reset(seed=7)
+        world.state.hunger = 0.7
+        world.state.fatigue = 0.4
+        world.state.sleep_debt = 0.4
+        world.state.rest_streak = 1
+        reward_components = {name: 0.0 for name in REWARD_COMPONENT_NAMES}
+        info = {"ate": False, "slept": False}
+
+        resolve_autonomic_behaviors(
+            world,
+            action_name="ORIENT_LEFT",
+            predator_threat=False,
+            night=True,
+            reward_components=reward_components,
+            info=info,
+        )
+
+        self.assertTrue(info["slept"])
+        self.assertGreater(world.state.sleep_events, 0)
+
+
     def test_apply_homeostasis_penalties_reduces_health_above_thresholds(self) -> None:
         world = SpiderWorld(seed=9, lizard_move_interval=999999)
         world.reset(seed=9)
@@ -281,6 +327,18 @@ class PhysiologyModuleTest(unittest.TestCase):
 
         self.assertAlmostEqual(world.state.momentum, 0.0)
         self.assertTrue(diagnostics["momentum_reset"])
+
+    def test_apply_restoration_resting_reduces_hunger_by_idle_costs(self) -> None:
+        world = SpiderWorld(seed=3, lizard_move_interval=999999)
+        world.reset(seed=3)
+        world.state.hunger = 0.6
+
+        apply_restoration(world, "RESTING", night=True, shelter_role="deep")
+
+        expected = 0.6 - (
+            world.reward_config["base_hunger_cost"] + world.reward_config["idle_hunger_cost"]
+        )
+        self.assertAlmostEqual(world.state.hunger, expected)
 
     def test_apply_restoration_deep_sleep_keeps_momentum_zero(self) -> None:
         world = SpiderWorld(seed=3, lizard_move_interval=999999)

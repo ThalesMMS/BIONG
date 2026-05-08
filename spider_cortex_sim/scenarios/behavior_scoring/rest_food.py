@@ -155,6 +155,74 @@ def _score_open_field_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, ob
         behavior_metrics=behavior_metrics,
     )
 
+def _score_continuous_survival_canonical(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+) -> BehavioralEpisodeScore:
+    evaluation = build_continuous_survival_evaluation(
+        stats=stats,
+        trace=trace,
+        day_length=18,
+        night_length=12,
+        target_days=10,
+        scenario_name="continuous_survival_canonical",
+        reward_profile="ecological",
+    )
+    checks = (
+        build_behavior_check(
+            CONTINUOUS_SURVIVAL_CHECKS[0],
+            passed=bool(
+                int(evaluation["completed_day_night_cycles"]) >= 2
+                and float(evaluation["final_health"]) > 0.0
+                and float(evaluation["final_hunger"]) < 0.95
+                and float(evaluation["final_fatigue"]) < 0.95
+                and float(evaluation["final_sleep_debt"]) < 0.95
+            ),
+            value={
+                "completed_day_night_cycles": int(evaluation["completed_day_night_cycles"]),
+                "final_health": float(evaluation["final_health"]),
+                "final_hunger": float(evaluation["final_hunger"]),
+                "final_fatigue": float(evaluation["final_fatigue"]),
+                "final_sleep_debt": float(evaluation["final_sleep_debt"]),
+            },
+        ),
+        build_behavior_check(
+            CONTINUOUS_SURVIVAL_CHECKS[1],
+            passed=bool(
+                int(evaluation["food_eaten"]) >= 2
+                and int(evaluation["shelter_exits"]) >= 2
+                and int(evaluation["shelter_returns"]) >= 1
+            ),
+            value={
+                "food_eaten": int(evaluation["food_eaten"]),
+                "shelter_exits": int(evaluation["shelter_exits"]),
+                "shelter_returns": int(evaluation["shelter_returns"]),
+            },
+        ),
+        build_behavior_check(
+            CONTINUOUS_SURVIVAL_CHECKS[2],
+            passed=bool(
+                evaluation["rest_cycle_detected"]
+                and int(evaluation["predator_threat_exposure"]) > 0
+            ),
+            value={
+                "rest_cycle_detected": bool(evaluation["rest_cycle_detected"]),
+                "predator_threat_exposure": int(evaluation["predator_threat_exposure"]),
+            },
+        ),
+        build_behavior_check(
+            CONTINUOUS_SURVIVAL_CHECKS[3],
+            passed=int(evaluation["predator_contacts"]) <= 1,
+            value=int(evaluation["predator_contacts"]),
+        ),
+    )
+    return build_behavior_score(
+        stats=stats,
+        objective="Validate repeated long-run foraging, rest, and low-contact survival under canonical ecology.",
+        checks=checks,
+        behavior_metrics=dict(evaluation),
+    )
+
 def _score_exposed_day_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
     """
     Score an exposed-day foraging episode and attach trace-derived diagnostics and a failure-mode label.
@@ -298,12 +366,14 @@ def _score_sleep_vs_exploration_conflict(
         trace (Sequence[Dict[str, object]]): Execution trace of messages and states produced during the episode.
 
     Returns:
-        BehavioralEpisodeScore: Score object containing the scenario objective, the three checks above, and behavior_metrics including:
+        BehavioralEpisodeScore: Score object containing the scenario objective, the checks above, and behavior_metrics including:
             - `sleep_pressure_tick_count`: count of ticks meeting sleep-pressure criteria,
             - `sleep_priority_rate`: fraction of those ticks where `sleep` was the winning valence,
             - `mean_visual_gate_under_sleep`: mean visual gate value during sleep-pressure ticks,
             - `sleep_events`: number of sleep events recorded,
-            - `sleep_debt_reduction`: amount of sleep-debt reduced from the scenario initial value.
+            - `sleep_debt_reduction`: amount of sleep-debt reduced from the scenario initial value,
+            - `recovery_tick`: first daytime tick where acute sleep pressure has cleared,
+            - `post_recovery_movement_tick`: first movement tick after recovery.
     """
     payloads = _trace_action_selection_payloads(trace)
     sleepy_payloads: list[Dict[str, object]] = []
@@ -348,16 +418,97 @@ def _score_sleep_vs_exploration_conflict(
         for payload in sleep_priority_gate_payloads
         if (visual_gate := _payload_float(payload, "module_gates", "visual_cortex")) is not None
     ]
-    sleep_priority = bool(
-        len(sleepy_payloads) >= 1 and sleep_priority_rate >= CONFLICT_PASS_RATE
+    state_sleepy_ticks = 0
+    state_sleeping_ticks = 0
+    state_still_ticks = 0
+    state_reference_position: tuple[int, int] | None = None
+    for item in trace:
+        state = item.get("state")
+        if not isinstance(state, Mapping):
+            continue
+        fatigue = _float_or_none(state.get("fatigue"))
+        sleep_debt = _float_or_none(state.get("sleep_debt"))
+        if (
+            state.get("is_night") is not True
+            or fatigue is None
+            or sleep_debt is None
+            or fatigue < 0.6
+            or sleep_debt < 0.6
+        ):
+            continue
+        state_sleepy_ticks += 1
+        if state.get("sleep_phase") in {"SETTLING", "RESTING", "DEEP_SLEEP"}:
+            state_sleeping_ticks += 1
+        position = _state_position(state)
+        if state_reference_position is None:
+            state_reference_position = position
+        if position is not None and position == state_reference_position:
+            state_still_ticks += 1
+    state_sleep_priority_rate = float(
+        state_sleeping_ticks / max(1, state_sleepy_ticks)
     )
-    exploration_suppressed = bool(
-        len(sleep_priority_gate_payloads) >= 1
-        and exploration_suppressed_rate >= CONFLICT_PASS_RATE
+    state_exploration_suppressed_rate = float(
+        state_still_ticks / max(1, state_sleepy_ticks)
     )
+    if sleepy_payloads:
+        sleep_priority = bool(
+            len(sleepy_payloads) >= 1 and sleep_priority_rate >= CONFLICT_PASS_RATE
+        )
+    else:
+        sleep_priority_rate = state_sleep_priority_rate
+        sleep_priority = bool(
+            state_sleepy_ticks >= 1 and state_sleep_priority_rate >= CONFLICT_PASS_RATE
+        )
+    if sleep_priority_gate_payloads:
+        exploration_suppressed = bool(
+            len(sleep_priority_gate_payloads) >= 1
+            and exploration_suppressed_rate >= CONFLICT_PASS_RATE
+        )
+    else:
+        exploration_suppressed_rate = state_exploration_suppressed_rate
+        exploration_suppressed = bool(
+            state_sleepy_ticks >= 1
+            and state_exploration_suppressed_rate >= CONFLICT_PASS_RATE
+        )
     resting_behavior = bool(
         stats.sleep_events > 0
         or stats.final_sleep_debt <= (SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT - 0.12)
+    )
+    recovery_tick: int | None = None
+    recovery_position: tuple[int, int] | None = None
+    post_recovery_movement_tick: int | None = None
+    left_shelter_after_recovery = False
+    for index, item in enumerate(trace):
+        state = item.get("state")
+        if not isinstance(state, Mapping):
+            continue
+        tick = _trace_tick(item, state, index)
+        position = _state_position(state)
+        if recovery_tick is None:
+            fatigue = _float_or_none(state.get("fatigue"))
+            sleep_debt = _float_or_none(state.get("sleep_debt"))
+            if (
+                state.get("is_night") is False
+                and fatigue is not None
+                and sleep_debt is not None
+                and fatigue <= 0.05
+                and sleep_debt <= 0.30
+            ):
+                recovery_tick = tick
+                recovery_position = position
+            continue
+        if state.get("shelter_role") == "outside":
+            left_shelter_after_recovery = True
+        if (
+            recovery_position is not None
+            and position is not None
+            and position != recovery_position
+        ):
+            post_recovery_movement_tick = tick
+            break
+    reactivates_after_recovery = bool(
+        recovery_tick is not None
+        and (post_recovery_movement_tick is not None or left_shelter_after_recovery)
     )
     checks = (
         build_behavior_check(SLEEP_VS_EXPLORATION_CONFLICT_CHECKS[0], passed=sleep_priority, value=sleep_priority),
@@ -376,6 +527,15 @@ def _score_sleep_vs_exploration_conflict(
                 ),
             },
         ),
+        build_behavior_check(
+            SLEEP_VS_EXPLORATION_CONFLICT_CHECKS[3],
+            passed=reactivates_after_recovery,
+            value={
+                "recovery_tick": recovery_tick,
+                "post_recovery_movement_tick": post_recovery_movement_tick,
+                "left_shelter_after_recovery": left_shelter_after_recovery,
+            },
+        ),
     )
     return build_behavior_score(
         stats=stats,
@@ -388,14 +548,20 @@ def _score_sleep_vs_exploration_conflict(
             "mean_visual_gate_under_sleep": float(
                 sum(visual_gates_under_sleep) / max(1, len(visual_gates_under_sleep))
             ),
+            "state_sleep_priority_rate": state_sleep_priority_rate,
+            "state_exploration_suppressed_rate": state_exploration_suppressed_rate,
             "sleep_events": int(stats.sleep_events),
             "sleep_debt_reduction": float(
                 max(0.0, SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT - stats.final_sleep_debt)
             ),
+            "recovery_tick": recovery_tick,
+            "post_recovery_movement_tick": post_recovery_movement_tick,
+            "left_shelter_after_recovery": left_shelter_after_recovery,
         },
     )
 
 __all__ = [
+    "_score_continuous_survival_canonical",
     "_score_exposed_day_foraging",
     "_score_food_deprivation",
     "_score_night_rest",

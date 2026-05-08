@@ -1109,7 +1109,7 @@ def detect_missing_experiments(
 
     shaping = _mapping_or_empty(unified_ladder_report.get("reward_shaping_sensitivity"))
     missing_profiles = sorted(
-        {"classic", "ecological", "austere"}
+        {"classic", "ecological", "ecological_v2", "survival_balance", "austere"}
         - {str(item) for item in shaping.get("profiles_available", [])}
     )
     if missing_profiles:

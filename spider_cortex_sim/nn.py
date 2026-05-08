@@ -390,6 +390,12 @@ class MotorCache:
     h: Array
 
 
+@dataclass
+class DeepMotorCache:
+    x: Array
+    hidden_states: tuple[Array, ...]
+
+
 class MotorNetwork:
     """Motor network with a corrective policy head and a value critic head."""
 
@@ -611,6 +617,235 @@ class TrueMonolithicNetwork(MotorNetwork):
             output_dim=output_dim,
             rng=rng,
             name=name,
+        )
+
+
+class DeepTrueMonolithicNetwork:
+    """Direct policy+value MLP with configurable hidden sizes for diagnostic control."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_sizes: tuple[int, ...],
+        output_dim: int,
+        rng: np.random.Generator,
+        name: str = "true_monolithic_policy",
+    ) -> None:
+        if not hidden_sizes:
+            raise ValueError("hidden_sizes must contain at least one layer.")
+        self.input_dim = int(input_dim)
+        self.hidden_sizes = tuple(int(size) for size in hidden_sizes)
+        if any(size <= 0 for size in self.hidden_sizes):
+            raise ValueError("hidden_sizes must contain only positive integers.")
+        self.hidden_dim = int(self.hidden_sizes[-1])
+        self.output_dim = int(output_dim)
+        self.name = name
+        self.hidden_weights = []
+        self.hidden_biases = []
+        prev_dim = self.input_dim
+        for hidden_dim in self.hidden_sizes:
+            self.hidden_weights.append(
+                rng.normal(0.0, _weight_scale(prev_dim), size=(hidden_dim, prev_dim))
+            )
+            self.hidden_biases.append(np.zeros(hidden_dim, dtype=float))
+            prev_dim = hidden_dim
+        self.W2_policy = rng.normal(
+            0.0,
+            _weight_scale(self.hidden_dim),
+            size=(self.output_dim, self.hidden_dim),
+        )
+        self.b2_policy = np.zeros(self.output_dim, dtype=float)
+        self.W2_value = rng.normal(
+            0.0,
+            _weight_scale(self.hidden_dim),
+            size=(1, self.hidden_dim),
+        )
+        self.b2_value = np.zeros(1, dtype=float)
+        self.cache: Optional[DeepMotorCache] = None
+
+    def forward(self, x: Array, *, store_cache: bool = True) -> tuple[Array, float]:
+        x = np.nan_to_num(np.asarray(x, dtype=float), nan=0.0, posinf=1.0, neginf=-1.0)
+        hidden_states: list[Array] = []
+        current = x
+        for weight, bias in zip(self.hidden_weights, self.hidden_biases):
+            current = np.tanh(weight @ current + bias)
+            hidden_states.append(current)
+        policy_logits = np.clip(
+            np.nan_to_num(
+                self.W2_policy @ current + self.b2_policy,
+                nan=0.0,
+                posinf=20.0,
+                neginf=-20.0,
+            ),
+            -20.0,
+            20.0,
+        )
+        value = float(
+            np.nan_to_num(
+                (self.W2_value @ current + self.b2_value)[0],
+                nan=0.0,
+                posinf=20.0,
+                neginf=-20.0,
+            )
+        )
+        if store_cache:
+            self.cache = DeepMotorCache(x=x, hidden_states=tuple(hidden_states))
+        return policy_logits, value
+
+    def backward(
+        self,
+        grad_policy_logits: Array,
+        grad_value: float,
+        lr: float,
+        grad_clip: float = 5.0,
+    ) -> Array:
+        if self.cache is None:
+            raise RuntimeError("Deep true monolithic network backward called without cache.")
+        grad_policy_logits = _clip_grad_logits(grad_policy_logits, grad_clip)
+        grad_value = float(np.clip(grad_value, -grad_clip, grad_clip))
+        x = self.cache.x
+        hidden_states = list(self.cache.hidden_states)
+        final_hidden = hidden_states[-1]
+        grad_W2_policy = np.outer(grad_policy_logits, final_hidden)
+        grad_b2_policy = grad_policy_logits
+        grad_W2_value = grad_value * final_hidden.reshape(1, -1)
+        grad_b2_value = np.array([grad_value], dtype=float)
+        grad_hidden = (
+            self.W2_policy.T @ grad_policy_logits
+            + self.W2_value.T[:, 0] * grad_value
+        )
+        grad_inputs: Array = np.zeros(self.input_dim, dtype=float)
+        for layer_idx in range(len(hidden_states) - 1, -1, -1):
+            hidden = hidden_states[layer_idx]
+            prev_activation = x if layer_idx == 0 else hidden_states[layer_idx - 1]
+            dz = grad_hidden * (1.0 - hidden**2)
+            grad_inputs = self.hidden_weights[layer_idx].T @ dz
+            grad_weight = np.outer(dz, prev_activation)
+            grad_bias = dz
+            self.hidden_weights[layer_idx] -= lr * grad_weight
+            self.hidden_biases[layer_idx] -= lr * grad_bias
+            grad_hidden = grad_inputs
+        self.W2_policy -= lr * grad_W2_policy
+        self.b2_policy -= lr * grad_b2_policy
+        self.W2_value -= lr * grad_W2_value
+        self.b2_value -= lr * grad_b2_value
+        return grad_inputs
+
+    def value_only(self, x: Array) -> float:
+        _, value = self.forward(x, store_cache=False)
+        return value
+
+    def state_dict(self) -> dict[str, object]:
+        state: dict[str, object] = {
+            "name": self.name,
+            "input_dim": self.input_dim,
+            "hidden_dim": self.hidden_dim,
+            "hidden_sizes": list(self.hidden_sizes),
+            "output_dim": self.output_dim,
+            "W2_policy": self.W2_policy.copy(),
+            "b2_policy": self.b2_policy.copy(),
+            "W2_value": self.W2_value.copy(),
+            "b2_value": self.b2_value.copy(),
+        }
+        for idx, (weight, bias) in enumerate(zip(self.hidden_weights, self.hidden_biases), start=1):
+            state[f"W{idx}"] = weight.copy()
+            state[f"b{idx}"] = bias.copy()
+        return state
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        expected_keys = {
+            "name",
+            "input_dim",
+            "hidden_dim",
+            "hidden_sizes",
+            "output_dim",
+            "W2_policy",
+            "b2_policy",
+            "W2_value",
+            "b2_value",
+        }
+        for idx in range(1, len(self.hidden_sizes) + 1):
+            expected_keys.add(f"W{idx}")
+            expected_keys.add(f"b{idx}")
+        _validate_state_dict(
+            state,
+            expected_keys=expected_keys,
+            expected_metadata={
+                "name": self.name,
+                "input_dim": self.input_dim,
+                "hidden_dim": self.hidden_dim,
+                "hidden_sizes": list(self.hidden_sizes),
+                "output_dim": self.output_dim,
+            },
+            name=self.name,
+        )
+        prev_dim = self.input_dim
+        new_hidden_weights: list[Array] = []
+        new_hidden_biases: list[Array] = []
+        for idx, hidden_dim in enumerate(self.hidden_sizes, start=1):
+            new_hidden_weights.append(
+                _coerce_state_array(
+                    state,
+                    f"W{idx}",
+                    (hidden_dim, prev_dim),
+                    name=self.name,
+                )
+            )
+            new_hidden_biases.append(
+                _coerce_state_array(
+                    state,
+                    f"b{idx}",
+                    (hidden_dim,),
+                    name=self.name,
+                )
+            )
+            prev_dim = hidden_dim
+        self.hidden_weights = new_hidden_weights
+        self.hidden_biases = new_hidden_biases
+        self.W2_policy = _coerce_state_array(
+            state,
+            "W2_policy",
+            (self.output_dim, self.hidden_dim),
+            name=self.name,
+        )
+        self.b2_policy = _coerce_state_array(
+            state,
+            "b2_policy",
+            (self.output_dim,),
+            name=self.name,
+        )
+        self.W2_value = _coerce_state_array(
+            state,
+            "W2_value",
+            (1, self.hidden_dim),
+            name=self.name,
+        )
+        self.b2_value = _coerce_state_array(
+            state,
+            "b2_value",
+            (1,),
+            name=self.name,
+        )
+        self.cache = None
+
+    def parameter_norm(self) -> float:
+        return _parameter_norm_of(
+            *self.hidden_weights,
+            *self.hidden_biases,
+            self.W2_policy,
+            self.b2_policy,
+            self.W2_value,
+            self.b2_value,
+        )
+
+    def count_parameters(self) -> int:
+        hidden_total = sum(weight.size + bias.size for weight, bias in zip(self.hidden_weights, self.hidden_biases))
+        return int(
+            hidden_total
+            + self.W2_policy.size
+            + self.b2_policy.size
+            + self.W2_value.size
+            + self.b2_value.size
         )
 
 

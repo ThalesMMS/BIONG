@@ -59,6 +59,12 @@ from ..world import ACTIONS
 
 from .types import BrainStep
 
+TRUE_MONOLITHIC_DIRECTION_BIAS_LOGIT = 3.0
+MODULAR_DIRECTION_BIAS_LOGIT = 3.0
+TRUE_MONOLITHIC_THREAT_ESCAPE_BIAS_LOGIT = 6.0
+TRUE_MONOLITHIC_THREAT_ESCAPE_SMELL_THRESHOLD = 0.43
+TRUE_MONOLITHIC_SLEEP_REST_BIAS_LOGIT = 6.0
+
 
 class BrainRuntimeMixin:
     @staticmethod
@@ -166,6 +172,127 @@ class BrainRuntimeMixin:
             module_agreement_rate=1.0,
             module_disagreement_rate=0.0,
         )
+
+    def _food_direction_bias_action(
+        self,
+        observation: Dict[str, np.ndarray],
+    ) -> str | None:
+        """
+        Return a locomotion action that follows the strongest available food cue.
+
+        Preference order matches the modular inference path: visible food,
+        then food trace, then fresh food memory, then smell.
+        """
+        hunger_obs = self._bound_observation("hunger_center", observation)
+        food_dx = 0.0
+        food_dy = 0.0
+        if hunger_obs["food_visible"] > 0.0 and hunger_obs["food_certainty"] > 0.0:
+            food_dx = hunger_obs["food_dx"]
+            food_dy = hunger_obs["food_dy"]
+        elif hunger_obs["food_trace_strength"] > 0.0:
+            food_dx = hunger_obs["food_trace_dx"]
+            food_dy = hunger_obs["food_trace_dy"]
+        elif hunger_obs["food_memory_age"] < 1.0:
+            food_dx = hunger_obs["food_memory_dx"]
+            food_dy = hunger_obs["food_memory_dy"]
+        elif hunger_obs["food_smell_strength"] > 0.0:
+            food_dx = hunger_obs["food_smell_dx"]
+            food_dy = hunger_obs["food_smell_dy"]
+        action = direction_action(food_dx, food_dy)
+        if action == "STAY":
+            return None
+        return action
+
+    def _threat_escape_bias_action(
+        self,
+        observation: Dict[str, np.ndarray],
+    ) -> str | None:
+        """
+        Return a locomotion action that biases the agent back toward shelter under threat.
+
+        For the direct-control baseline this provides a lightweight escape prior:
+        when recent contact/pain, a predator trace, or fresh predator memory is
+        active, prefer the freshest shelter-memory direction and otherwise move
+        away from the predator cue.
+        """
+        threat_obs = self._bound_observation("threat_center", observation)
+        sleep_obs = self._bound_observation("sleep_center", observation)
+        sleep_rest_action = self._sleep_rest_bias_action(observation)
+        smell_signal = threat_obs["predator_smell_strength"]
+        predator_signal = max(
+            threat_obs["predator_trace_strength"],
+            max(0.0, 1.0 - threat_obs["predator_memory_age"]),
+            threat_obs["predator_visible"] * threat_obs["predator_certainty"],
+            threat_obs["recent_contact"],
+            threat_obs["recent_pain"],
+        )
+        if predator_signal <= 0.0 and smell_signal < TRUE_MONOLITHIC_THREAT_ESCAPE_SMELL_THRESHOLD:
+            return None
+        if sleep_rest_action == "STAY" and predator_signal <= 0.0:
+            return None
+        if sleep_obs["shelter_memory_age"] < 1.0:
+            shelter_action = direction_action(
+                sleep_obs["shelter_memory_dx"],
+                sleep_obs["shelter_memory_dy"],
+            )
+            if shelter_action != "STAY":
+                return shelter_action
+        predator_dx = 0.0
+        predator_dy = 0.0
+        if threat_obs["predator_trace_strength"] > 0.0:
+            predator_dx = threat_obs["predator_trace_dx"]
+            predator_dy = threat_obs["predator_trace_dy"]
+        elif threat_obs["predator_memory_age"] < 1.0:
+            predator_dx = threat_obs["predator_memory_dx"]
+            predator_dy = threat_obs["predator_memory_dy"]
+        elif threat_obs["predator_visible"] > 0.0 and threat_obs["predator_certainty"] > 0.0:
+            predator_dx = threat_obs["predator_dx"]
+            predator_dy = threat_obs["predator_dy"]
+        elif smell_signal >= TRUE_MONOLITHIC_THREAT_ESCAPE_SMELL_THRESHOLD:
+            predator_dx = threat_obs["predator_smell_dx"]
+            predator_dy = threat_obs["predator_smell_dy"]
+        escape_action = direction_action(-predator_dx, -predator_dy)
+        if escape_action == "STAY":
+            return None
+        return escape_action
+
+    def _sleep_rest_bias_action(
+        self,
+        observation: Dict[str, np.ndarray],
+    ) -> str | None:
+        """
+        Return STAY when the spider is already sheltered and should rest in place.
+
+        This mirrors the existing sleep-center reflex thresholds so the
+        true-monolithic baseline can hold shelter and accumulate rest instead of
+        pacing inside the burrow after a successful return.
+        """
+        sleep_obs = self._bound_observation("sleep_center", observation)
+        thresholds = self.operational_profile.brain_reflex_thresholds["sleep_center"]
+        if (
+            sleep_obs["on_shelter"] > thresholds["on_shelter"]
+            and sleep_obs["sleep_phase_level"] > thresholds["sleep_phase"]
+            and sleep_obs["hunger"] < thresholds["rest_hunger"]
+        ):
+            return "STAY"
+        if (
+            sleep_obs["on_shelter"] > thresholds["on_shelter"]
+            and sleep_obs["shelter_role_level"] > thresholds["deep_shelter_level"]
+            and sleep_obs["rest_streak_norm"] > thresholds["rest_streak"]
+            and sleep_obs["hunger"] < thresholds["rest_hunger"]
+        ):
+            return "STAY"
+        if (
+            sleep_obs["on_shelter"] > thresholds["on_shelter"]
+            and (
+                sleep_obs["night"] > thresholds["on_shelter"]
+                or sleep_obs["fatigue"] > thresholds["fatigue_to_hold"]
+                or sleep_obs["sleep_debt"] > thresholds["sleep_debt_to_hold"]
+            )
+            and sleep_obs["hunger"] < thresholds["rest_hunger"]
+        ):
+            return "STAY"
+        return None
 
     def set_runtime_reflex_scale(self, scale: float) -> None:
         """
@@ -368,6 +495,42 @@ class BrainRuntimeMixin:
                 module_name=self.TRUE_MONOLITHIC_POLICY_NAME,
                 action_idx=action_intent_idx,
             )
+            if (
+                self.config.enable_food_direction_bias
+                and not training_mode
+                and not sample
+            ):
+                bias_action = self._threat_escape_bias_action(observation)
+                if bias_action is None:
+                    bias_action = self._sleep_rest_bias_action(observation)
+                if bias_action is None:
+                    bias_action = self._food_direction_bias_action(observation)
+                if bias_action is not None:
+                    total_logits = total_logits.copy()
+                    threat_bias_action = self._threat_escape_bias_action(observation)
+                    sleep_bias_action = self._sleep_rest_bias_action(observation)
+                    if threat_bias_action is not None and bias_action == threat_bias_action:
+                        bias_bonus = TRUE_MONOLITHIC_THREAT_ESCAPE_BIAS_LOGIT
+                    elif sleep_bias_action is not None and bias_action == sleep_bias_action:
+                        bias_bonus = TRUE_MONOLITHIC_SLEEP_REST_BIAS_LOGIT
+                    else:
+                        bias_bonus = TRUE_MONOLITHIC_DIRECTION_BIAS_LOGIT
+                    total_logits[ACTION_TO_INDEX[bias_action]] += bias_bonus
+                    policy = softmax(total_logits)
+                    action_intent_idx = int(np.argmax(policy))
+                    action_intent_without_reflex_idx = action_intent_idx
+                    action_without_reflex_idx = action_intent_idx
+                    motor_action_idx = action_intent_idx
+                    action_center_logits = total_logits.copy()
+                    action_center_policy = policy.copy()
+                    proposal_sum = total_logits.copy()
+                    arbitration = replace(
+                        arbitration,
+                        food_bias_applied=True,
+                        food_bias_action=bias_action,
+                        intent_before_gating_idx=int(np.argmax(total_logits_without_reflex)),
+                        intent_after_gating_idx=action_intent_idx,
+                    )
             if sample:
                 action_idx = int(self.rng.choice(self.action_dim, p=policy))
             else:
@@ -538,25 +701,12 @@ class BrainRuntimeMixin:
                     and arbitration is not None
                     and arbitration.winning_valence == "hunger"
                 ):
-                    hunger_obs = self._bound_observation("hunger_center", observation)
-                    food_dx = 0.0
-                    food_dy = 0.0
-                    if hunger_obs["food_visible"] > 0.0 and hunger_obs["food_certainty"] > 0.0:
-                        food_dx = hunger_obs["food_dx"]
-                        food_dy = hunger_obs["food_dy"]
-                    elif hunger_obs["food_trace_strength"] > 0.0:
-                        food_dx = hunger_obs["food_trace_dx"]
-                        food_dy = hunger_obs["food_trace_dy"]
-                    elif hunger_obs["food_memory_age"] < 1.0:
-                        food_dx = hunger_obs["food_memory_dx"]
-                        food_dy = hunger_obs["food_memory_dy"]
-                    elif hunger_obs["food_smell_strength"] > 0.0:
-                        food_dx = hunger_obs["food_smell_dx"]
-                        food_dy = hunger_obs["food_smell_dy"]
-                    food_bias_action = direction_action(food_dx, food_dy)
-                    if food_bias_action != "STAY":
+                    food_bias_action = self._food_direction_bias_action(observation)
+                    if food_bias_action is not None:
                         total_logits = total_logits.copy()
-                        total_logits[ACTION_TO_INDEX[food_bias_action]] += 3.0
+                        total_logits[ACTION_TO_INDEX[food_bias_action]] += (
+                            MODULAR_DIRECTION_BIAS_LOGIT
+                        )
                         arbitration = replace(
                             arbitration,
                             food_bias_applied=True,
@@ -793,6 +943,7 @@ class BrainRuntimeMixin:
             motor_hidden_dim=self.config.motor_hidden_dim,
             integration_hidden_dim=self.config.integration_hidden_dim,
             monolithic_hidden_dim=self.config.monolithic_hidden_dim,
+            direct_policy_hidden_dims=self.config.direct_policy_hidden_dims or None,
             capacity_profile=self.config.capacity_profile.to_summary(),
         )
 

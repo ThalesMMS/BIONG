@@ -19,6 +19,7 @@ from .scoring_checks import (
     PREDATOR_EDGE_CHECKS,
     ENTRANCE_AMBUSH_CHECKS,
     OPEN_FIELD_FORAGING_CHECKS,
+    CONTINUOUS_SURVIVAL_CHECKS,
     SHELTER_BLOCKADE_CHECKS,
     RECOVER_AFTER_FAILED_CHASE_CHECKS,
     CORRIDOR_GAUNTLET_CHECKS,
@@ -38,6 +39,7 @@ from .scoring_behaviors import (
     _score_predator_edge,
     _score_entrance_ambush,
     _score_open_field_foraging,
+    _score_continuous_survival_canonical,
     _score_shelter_blockade,
     _score_recover_after_failed_chase,
     _score_corridor_gauntlet,
@@ -53,6 +55,7 @@ from .scoring_behaviors import (
 
 __all__ = [
     'CONFLICT_PASS_RATE',
+    'CONTINUOUS_SURVIVAL_CHECKS',
     'CORRIDOR_GAUNTLET_CHECKS',
     'ENTRANCE_AMBUSH_CHECKS',
     'EXPOSED_DAY_FORAGING_CHECKS',
@@ -81,6 +84,7 @@ __all__ = [
     '_module_share_for_type',
     '_progress_band',
     '_score_corridor_gauntlet',
+    '_score_continuous_survival_canonical',
     '_score_entrance_ambush',
     '_score_exposed_day_foraging',
     '_score_food_deprivation',

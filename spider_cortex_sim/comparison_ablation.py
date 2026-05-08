@@ -29,6 +29,7 @@ from .noise import (
 from .operational_profiles import OperationalProfile
 from .scenarios import SCENARIO_NAMES, get_scenario
 from .simulation import SpiderSimulation
+from .training_regimes import TrainingRegimeSpec
 
 from .comparison_behavior import build_ablation_deltas
 from .comparison_noise import with_noise_profile_metadata
@@ -57,6 +58,7 @@ def compare_ablation_suite(
     module_dropout: float = 0.05,
     capacity_profile: str | CapacityProfile | None = None,
     reward_profile: str = "classic",
+    food_smell_range: int | None = None,
     map_template: str = "central_burrow",
     operational_profile: str | OperationalProfile | None = None,
     noise_profile: str | NoiseConfig | None = None,
@@ -69,6 +71,7 @@ def compare_ablation_suite(
     checkpoint_selection_config: CheckpointSelectionConfig | None = None,
     checkpoint_interval: int | None = None,
     checkpoint_dir: str | Path | None = None,
+    training_regime: str | TrainingRegimeSpec | None = None,
 ) -> tuple[Dict[str, object], List[Dict[str, object]]]:
     """
     Compare ablation variants by optionally training them and evaluating behavior suites, returning per-variant aggregated payloads and flattened CSV-ready rows.
@@ -155,6 +158,7 @@ def compare_ablation_suite(
                 module_lr=module_lr,
                 motor_lr=motor_lr,
                 module_dropout=config.module_dropout,
+                food_smell_range=food_smell_range,
                 operational_profile=operational_profile,
                 noise_profile=resolved_noise_profile,
                 reward_profile=reward_profile,
@@ -188,6 +192,7 @@ def compare_ablation_suite(
                     checkpoint_dir=run_checkpoint_dir,
                     checkpoint_scenario_names=scenario_names,
                     selection_scenario_episodes=budget.selection_scenario_episodes,
+                    training_regime=training_regime,
                 )
             stats_histories, behavior_histories, _ = sim._execute_behavior_suite(
                 names=scenario_names,

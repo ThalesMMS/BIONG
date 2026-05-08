@@ -106,12 +106,23 @@ def compute_predator_threat(
     from ..perception import smell_gradient
 
     cfg = world.operational_profile.reward
+    shelter_role = world.shelter_role_at(world.spider_pos())
     predator_smell_strength_now, _, _, _ = smell_gradient(
         world,
         [world.lizard_pos()],
         radius=world.predator_smell_range,
         apply_noise=False,
     )
+    smell_only_interior_shelter = (
+        shelter_role in {"inside", "deep"}
+        and world.state.recent_contact <= cfg["predator_threat_contact_threshold"]
+        and world.state.recent_pain <= cfg["predator_threat_recent_pain_threshold"]
+        and not prev_predator_visible
+        and prev_predator_dist > cfg["predator_threat_distance_threshold"]
+        and predator_smell_strength_now > cfg["predator_threat_smell_threshold"]
+    )
+    if smell_only_interior_shelter:
+        return False
     return (
         world.state.recent_contact > cfg["predator_threat_contact_threshold"]
         or world.state.recent_pain > cfg["predator_threat_recent_pain_threshold"]

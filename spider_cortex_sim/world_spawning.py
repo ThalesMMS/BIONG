@@ -120,6 +120,20 @@ class WorldSpawningMixin:
         Returns:
             tuple[int, int]: Coordinates (x, y) of the selected food spawn cell.
         """
+        scenario_food_cells = tuple(
+            getattr(self, "_scenario_food_spawn_cells", ()) or ()
+        )
+        if scenario_food_cells:
+            candidates = [
+                cell
+                for cell in scenario_food_cells
+                if cell not in self.food_positions and cell != self.spider_pos()
+            ]
+            if candidates:
+                return self._random_spawn_cell(
+                    candidates,
+                    min_spider_distance=1,
+                )
         candidates = [
             cell
             for cell in self.map_template.food_spawn_cells

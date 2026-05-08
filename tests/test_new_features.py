@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 # ---------------------------------------------------------------------------
 # Metrics package compatibility imports
@@ -100,6 +101,7 @@ from spider_cortex_sim.reward.profiles import REWARD_PROFILES as _REWARD_PROFILE
 from spider_cortex_sim.reward.shaping import SHAPING_DISPOSITIONS as _SHAPING_DISPOSITIONS_direct
 from spider_cortex_sim.reward.computation import empty_reward_components as _empty_rc_direct
 from spider_cortex_sim.reward.audit import reward_component_audit as _audit_direct
+from spider_cortex_sim.continuous_survival import build_continuous_survival_evaluation
 
 
 class MetricsPackageCompatibilityImportTest(unittest.TestCase):
@@ -201,6 +203,152 @@ class RewardPackageCompatibilityImportTest(unittest.TestCase):
         self.assertIsInstance(MINIMAL_SHAPING_SURVIVAL_THRESHOLD, float)
         self.assertGreater(MINIMAL_SHAPING_SURVIVAL_THRESHOLD, 0.0)
         self.assertLessEqual(MINIMAL_SHAPING_SURVIVAL_THRESHOLD, 1.0)
+
+
+class ContinuousSurvivalMetricTest(unittest.TestCase):
+    def test_build_continuous_survival_evaluation(self) -> None:
+        stats = SimpleNamespace(
+            steps=300,
+            final_health=1.0,
+            final_hunger=0.4,
+            final_fatigue=0.3,
+            final_sleep_debt=0.2,
+            food_eaten=2,
+            sleep_events=1,
+            predator_contacts=1,
+            predator_escapes=3,
+            shelter_entries=4,
+            night_ticks=120,
+            night_shelter_occupancy_rate=0.8,
+            night_stillness_rate=0.5,
+            night_role_distribution={"deep": 0.2},
+        )
+        trace = [
+            {
+                "state": {
+                    "x": 1,
+                    "y": 1,
+                    "hunger": 0.8,
+                    "fatigue": 0.7,
+                    "sleep_debt": 0.6,
+                    "shelter_role": "deep",
+                    "predator_motion_salience": 0.0,
+                    "predator_trace": {"strength": 0.0},
+                    "predator_memory": {"target": None},
+                },
+                "prev_state": {
+                    "x": 1,
+                    "y": 1,
+                    "food_positions": [(5, 5)],
+                },
+            },
+            {
+                "state": {
+                    "x": 2,
+                    "y": 1,
+                    "shelter_role": "outside",
+                    "predator_motion_salience": 0.4,
+                    "predator_trace": {"strength": 0.2},
+                    "predator_memory": {"target": [4, 4]},
+                }
+            },
+            {
+                "state": {
+                    "x": 1,
+                    "y": 1,
+                    "shelter_role": "inside",
+                    "predator_motion_salience": 0.0,
+                    "predator_trace": {"strength": 0.0},
+                    "predator_memory": {"target": None},
+                }
+            },
+        ]
+
+        evaluation = build_continuous_survival_evaluation(
+            stats=stats,
+            trace=trace,
+            day_length=18,
+            night_length=12,
+            target_days=10,
+            scenario_name="continuous_survival_canonical",
+            reward_profile="ecological",
+        )
+
+        self.assertEqual(evaluation["ticks_per_day"], 30)
+        self.assertEqual(evaluation["completed_day_night_cycles"], 10)
+        self.assertTrue(evaluation["continuous_survival_passed"])
+        self.assertTrue(evaluation["food_cycle_detected"])
+        self.assertTrue(evaluation["rest_cycle_detected"])
+        self.assertIn("deep_shelter_occupancy_rate", evaluation)
+        self.assertTrue(evaluation["started_in_shelter"])
+        self.assertEqual(evaluation["shelter_exits"], 1)
+        self.assertEqual(evaluation["shelter_returns"], 1)
+        self.assertEqual(evaluation["predator_threat_exposure"], 1)
+        self.assertEqual(evaluation["initial_food_distance"], 8.0)
+        self.assertEqual(evaluation["continuous_survival_tier"], 2)
+
+    def test_predator_smell_counts_as_threat_exposure(self) -> None:
+        stats = SimpleNamespace(
+            steps=30,
+            final_health=0.5,
+            final_hunger=0.5,
+            final_fatigue=0.4,
+            final_sleep_debt=0.3,
+            food_eaten=1,
+            sleep_events=0,
+            predator_contacts=0,
+            predator_escapes=0,
+            shelter_entries=1,
+            night_ticks=0,
+            night_shelter_occupancy_rate=0.0,
+            night_stillness_rate=0.0,
+            night_role_distribution={"deep": 0.0},
+        )
+        trace = [
+            {
+                "state": {
+                    "x": 1,
+                    "y": 1,
+                    "hunger": 0.8,
+                    "fatigue": 0.7,
+                    "sleep_debt": 0.6,
+                    "shelter_role": "deep",
+                    "predator_motion_salience": 0.0,
+                    "predator_smell_strength": 0.0,
+                    "predator_trace": {"strength": 0.0},
+                    "predator_memory": {"target": None},
+                },
+                "prev_state": {
+                    "x": 1,
+                    "y": 1,
+                    "food_positions": [(5, 5)],
+                },
+            },
+            {
+                "state": {
+                    "x": 2,
+                    "y": 1,
+                    "shelter_role": "outside",
+                    "predator_motion_salience": 0.0,
+                    "predator_smell_strength": 0.25,
+                    "predator_trace": {"strength": 0.0},
+                    "predator_memory": {"target": None},
+                }
+            },
+        ]
+
+        evaluation = build_continuous_survival_evaluation(
+            stats=stats,
+            trace=trace,
+            day_length=18,
+            night_length=12,
+            target_days=10,
+            scenario_name="continuous_survival_canonical",
+            reward_profile="ecological",
+        )
+
+        self.assertEqual(evaluation["predator_threat_exposure"], 1)
+        self.assertEqual(evaluation["continuous_survival_tier"], 2)
 
 
 class SubmoduleDirectImportTest(unittest.TestCase):

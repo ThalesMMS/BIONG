@@ -46,6 +46,7 @@ from .interfaces import (
 )
 from .modules import MODULE_HIDDEN_DIMS, CorticalModuleBank, ModuleResult, ReflexDecision
 from .nn import (
+    DeepTrueMonolithicNetwork,
     ArbitrationNetwork,
     MotorNetwork,
     ProposalNetwork,
@@ -216,7 +217,7 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         self.current_reflex_scale = float(self.config.reflex_scale)
         self.module_bank: CorticalModuleBank | None = None
         self.monolithic_policy: ProposalNetwork | None = None
-        self.true_monolithic_policy: TrueMonolithicNetwork | None = None
+        self.true_monolithic_policy: TrueMonolithicNetwork | DeepTrueMonolithicNetwork | None = None
         self.action_center: MotorNetwork | None = None
         self.motor_cortex: ProposalNetwork | None = None
         self.arbitration_network: ArbitrationNetwork | None = None
@@ -278,13 +279,27 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
             )
         else:
             monolithic_input_dim = sum(spec.input_dim for spec in MODULE_INTERFACES)
-            self.true_monolithic_policy = TrueMonolithicNetwork(
-                input_dim=monolithic_input_dim,
-                hidden_dim=monolithic_hidden_dim,
-                output_dim=self.action_dim,
-                rng=self.rng,
-                name=self.TRUE_MONOLITHIC_POLICY_NAME,
-            )
+            if len(self.config.direct_policy_hidden_dims) > 1:
+                self.true_monolithic_policy = DeepTrueMonolithicNetwork(
+                    input_dim=monolithic_input_dim,
+                    hidden_sizes=self.config.direct_policy_hidden_dims,
+                    output_dim=self.action_dim,
+                    rng=self.rng,
+                    name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                )
+            else:
+                direct_hidden_dim = (
+                    int(self.config.direct_policy_hidden_dims[0])
+                    if self.config.direct_policy_hidden_dims
+                    else monolithic_hidden_dim
+                )
+                self.true_monolithic_policy = TrueMonolithicNetwork(
+                    input_dim=monolithic_input_dim,
+                    hidden_dim=direct_hidden_dim,
+                    output_dim=self.action_dim,
+                    rng=self.rng,
+                    name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                )
         if not self.config.is_true_monolithic:
             arbitration_input_dim = arbitration_evidence_input_dim(
                 arbitration_evidence_fields=self.ARBITRATION_EVIDENCE_FIELDS,

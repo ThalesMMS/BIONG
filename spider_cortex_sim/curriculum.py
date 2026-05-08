@@ -6,8 +6,11 @@ from typing import Dict, Sequence
 
 CURRICULUM_PROFILE_NAMES: tuple[str, ...] = (
     "none",
+    "a0_easy_ramp_v1",
     "ecological_v1",
     "ecological_v2",
+    "ecological_v3",
+    "survival_balance",
 )
 CURRICULUM_COLUMNS: tuple[str, ...] = (
     "training_regime",
@@ -192,7 +195,42 @@ def resolve_curriculum_profile(
         return []
     budgets = resolve_curriculum_phase_budgets(total_episodes)
 
-    if profile_name == "ecological_v1":
+    if profile_name == "a0_easy_ramp_v1":
+        phase_specs = (
+            (
+                "phase_1_easy_loop",
+                "food_approach",
+                ("continuous_survival_easy_v1",),
+                ("continuous_survival_easy_v1",),
+                0.5,
+                (),
+            ),
+            (
+                "phase_2_medium_loop",
+                "corridor_navigation+hunger_commitment",
+                ("continuous_survival_medium_v1",),
+                ("continuous_survival_medium_v1",),
+                0.5,
+                (),
+            ),
+            (
+                "phase_3_canonical_transfer",
+                "corridor_navigation+hunger_commitment",
+                ("continuous_survival_canonical",),
+                ("continuous_survival_canonical",),
+                0.5,
+                (),
+            ),
+            (
+                "phase_4_canonical_repetition",
+                "corridor_navigation+hunger_commitment",
+                ("continuous_survival_canonical", "food_deprivation"),
+                ("continuous_survival_canonical", "food_deprivation"),
+                0.5,
+                (),
+            ),
+        )
+    elif profile_name == "ecological_v1":
         phase_specs = (
             (
                 "phase_1_night_rest_predator_edge",
@@ -225,6 +263,103 @@ def resolve_curriculum_profile(
                 ("corridor_gauntlet", "food_deprivation"),
                 0.5,
                 (),
+            ),
+        )
+    elif profile_name == "survival_balance":
+        phase_specs = (
+            (
+                "phase_1_rest_safety_awareness",
+                "predator_response",
+                ("night_rest", "predator_edge"),
+                ("night_rest", "predator_edge"),
+                1.0,
+                tuple(SUBSKILL_CHECK_MAPPINGS["predator_response"]),
+            ),
+            (
+                "phase_2_food_commitment",
+                "food_approach",
+                ("food_deprivation", "open_field_foraging"),
+                ("food_deprivation", "open_field_foraging"),
+                1.0,
+                tuple(SUBSKILL_CHECK_MAPPINGS["food_approach"]),
+            ),
+            (
+                "phase_3_rest_vs_exploration",
+                "shelter_exit+predator_response",
+                ("sleep_vs_exploration_conflict", "night_rest"),
+                ("sleep_vs_exploration_conflict", "night_rest"),
+                0.75,
+                (
+                    *SUBSKILL_CHECK_MAPPINGS["predator_response"],
+                    *SUBSKILL_CHECK_MAPPINGS["shelter_exit"],
+                ),
+            ),
+            (
+                "phase_4_corridor_hunger_survival",
+                "corridor_navigation+hunger_commitment",
+                ("corridor_gauntlet", "food_deprivation"),
+                ("corridor_gauntlet", "food_deprivation"),
+                0.75,
+                (
+                    *SUBSKILL_CHECK_MAPPINGS["corridor_navigation"],
+                    *SUBSKILL_CHECK_MAPPINGS["hunger_commitment"],
+                ),
+            ),
+        )
+    elif profile_name == "ecological_v3":
+        phase_specs = (
+            (
+                "phase_1_shelter_safety_predator_awareness",
+                "predator_response",
+                ("night_rest", "predator_edge", "entrance_ambush"),
+                ("predator_edge",),
+                1.0,
+                tuple(SUBSKILL_CHECK_MAPPINGS["predator_response"]),
+            ),
+            (
+                "phase_2_shelter_exit_commitment",
+                "shelter_exit",
+                ("entrance_ambush", "shelter_blockade", "food_deprivation"),
+                ("food_deprivation",),
+                1.0,
+                tuple(SUBSKILL_CHECK_MAPPINGS["shelter_exit"]),
+            ),
+            (
+                "phase_3_food_approach_under_exposure",
+                "food_approach",
+                (
+                    "food_deprivation",
+                    "open_field_foraging",
+                    "exposed_day_foraging",
+                    "food_vs_predator_conflict",
+                ),
+                (
+                    "food_deprivation",
+                    "open_field_foraging",
+                    "exposed_day_foraging",
+                ),
+                1.0,
+                tuple(SUBSKILL_CHECK_MAPPINGS["food_approach"]),
+            ),
+            (
+                "phase_4_reactivation_under_threat",
+                "corridor_navigation+hunger_commitment",
+                (
+                    "corridor_gauntlet",
+                    "food_vs_predator_conflict",
+                    "sleep_vs_exploration_conflict",
+                    "food_deprivation",
+                ),
+                (
+                    "corridor_gauntlet",
+                    "food_deprivation",
+                    "food_vs_predator_conflict",
+                ),
+                1.0,
+                (
+                    *SUBSKILL_CHECK_MAPPINGS["corridor_navigation"],
+                    *SUBSKILL_CHECK_MAPPINGS["hunger_commitment"],
+                ),
             ),
         )
     else:

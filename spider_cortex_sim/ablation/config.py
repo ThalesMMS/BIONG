@@ -130,6 +130,7 @@ class BrainAblationConfig:
     capacity_profile_name: str = "current"
     capacity_profile: str | CapacityProfile | None = None
     module_hidden_dims: dict[str, int] = field(default_factory=dict)
+    direct_policy_hidden_dims: tuple[int, ...] = ()
     action_center_hidden_dim: int | None = None
     arbitration_hidden_dim: int | None = None
     motor_hidden_dim: int | None = None
@@ -226,6 +227,22 @@ class BrainAblationConfig:
                 name: int(hidden_dim)
                 for name, hidden_dim in sorted(normalized_module_hidden_dims.items())
             },
+        )
+        direct_policy_hidden_dims = tuple(
+            int(hidden_dim) for hidden_dim in tuple(self.direct_policy_hidden_dims)
+        )
+        if direct_policy_hidden_dims and architecture != "true_monolithic":
+            raise ValueError(
+                "direct_policy_hidden_dims is only supported for true_monolithic architectures."
+            )
+        if any(hidden_dim <= 0 for hidden_dim in direct_policy_hidden_dims):
+            raise ValueError(
+                "direct_policy_hidden_dims must contain only positive integers."
+            )
+        object.__setattr__(
+            self,
+            "direct_policy_hidden_dims",
+            direct_policy_hidden_dims,
         )
         legacy_integration_hidden_dim = (
             None
@@ -449,6 +466,8 @@ class BrainAblationConfig:
         Returns:
             int: Sum of all module hidden dimensions.
         """
+        if self.direct_policy_hidden_dims:
+            return int(sum(self.direct_policy_hidden_dims))
         return int(sum(self.module_hidden_dims.values()))
 
     def to_summary(self) -> Dict[str, object]:
@@ -479,6 +498,7 @@ class BrainAblationConfig:
                 - capacity_profile_version: str | int
                 - capacity_scale_factor: float
                 - module_hidden_dims: dict[str, int]
+                - direct_policy_hidden_dims: list[int]
                 - action_center_hidden_dim: int
                 - arbitration_hidden_dim: int
                 - motor_hidden_dim: int
@@ -509,6 +529,7 @@ class BrainAblationConfig:
             "capacity_profile_version": resolved_capacity_profile.version,
             "capacity_scale_factor": resolved_capacity_profile.scale_factor,
             "module_hidden_dims": dict(self.module_hidden_dims),
+            "direct_policy_hidden_dims": list(self.direct_policy_hidden_dims),
             "action_center_hidden_dim": int(self.action_center_hidden_dim or 0),
             "arbitration_hidden_dim": int(self.arbitration_hidden_dim or 0),
             "motor_hidden_dim": int(self.motor_hidden_dim or 0),
@@ -603,6 +624,9 @@ class BrainAblationConfig:
             module_reflex_scales=dict(summary.get("module_reflex_scales", {}) or {}),
             capacity_profile_name=capacity_profile_name,
             module_hidden_dims=dict(summary.get("module_hidden_dims", {}) or {}),
+            direct_policy_hidden_dims=tuple(
+                summary.get("direct_policy_hidden_dims", ()) or ()
+            ),
             action_center_hidden_dim=summary.get(
                 "action_center_hidden_dim",
                 legacy_integration_hidden_dim,

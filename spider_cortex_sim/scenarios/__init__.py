@@ -8,6 +8,7 @@ from . import specs as _specs
 from . import trace as _trace
 from .scoring import (
     CONFLICT_PASS_RATE,
+    CONTINUOUS_SURVIVAL_CHECKS,
     CORRIDOR_GAUNTLET_CHECKS,
     ENTRANCE_AMBUSH_CHECKS,
     EXPOSED_DAY_FORAGING_CHECKS,
@@ -36,6 +37,7 @@ from .scoring import (
     _module_share_for_type,
     _progress_band,
     _score_corridor_gauntlet,
+    _score_continuous_survival_canonical,
     _score_entrance_ambush,
     _score_exposed_day_foraging,
     _score_food_deprivation,
@@ -77,6 +79,10 @@ from .setup import (
     _two_shelter_tradeoff,
     _visual_hunter_open_field,
     _visual_olfactory_pincer,
+    _continuous_survival_bootstrap,
+    _continuous_survival_canonical,
+    _continuous_survival_easy_v1,
+    _continuous_survival_medium_v1,
 )
 from .specs import (
     FAST_VISUAL_HUNTER_PROFILE,
@@ -159,6 +165,76 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         score_episode=_score_night_rest,
         expected_owner_modules=("sleep_center",),
     ),
+    "continuous_survival_bootstrap": ScenarioSpec(
+        name="continuous_survival_bootstrap",
+        description="Bootstrap a long-run survival loop with food immediately available in shelter.",
+        objective="Confirm that the policy can sustain a 10-day continuous run once feeding is no longer blocked by discovery.",
+        behavior_checks=NIGHT_REST_CHECKS,
+        diagnostic_focus=(
+            "Immediate feeding access, deep shelter retention, and a long enough episode horizon "
+            "to observe the full continuous-survival loop."
+        ),
+        success_interpretation="Success requires survival, at least one feeding cycle, and continued night shelter use.",
+        failure_interpretation="Failure suggests the policy cannot maintain the loop even when food is immediately available.",
+        budget_note="This bootstrap is intentionally scaffolded to validate the long-horizon runner before tightening food access again.",
+        max_steps=300,
+        map_template="central_burrow",
+        setup=_continuous_survival_bootstrap,
+        score_episode=_score_night_rest,
+        expected_owner_modules=("sleep_center", "hunger_center"),
+    ),
+    "continuous_survival_canonical": ScenarioSpec(
+        name="continuous_survival_canonical",
+        description="Non-bootstrap long-run survival with food outside shelter and an active predator.",
+        objective="Validate a continuous 10-day survival rollout without food-in-shelter scaffolding.",
+        behavior_checks=CONTINUOUS_SURVIVAL_CHECKS,
+        diagnostic_focus=(
+            "Requires repeated shelter exit/return cycles, reacquiring food outside shelter, and managing an active predator "
+            "over a long uninterrupted rollout."
+        ),
+        success_interpretation="Success requires repeated off-shelter foraging cycles, real rest, and survival under non-trivial ecology.",
+        failure_interpretation="Failure indicates the policy still depends on scaffolded access, single-cycle static sheltering, or weak threat handling.",
+        budget_note="Use this scenario for acceptance-oriented long runs; keep bootstrap only for diagnostics and curriculum.",
+        max_steps=300,
+        map_template="central_burrow",
+        setup=_continuous_survival_canonical,
+        score_episode=_score_continuous_survival_canonical,
+        expected_owner_modules=("sleep_center", "hunger_center", "threat_center"),
+    ),
+    "continuous_survival_easy_v1": ScenarioSpec(
+        name="continuous_survival_easy_v1",
+        description="Forgiving non-bootstrap long-run survival for A0 learnability diagnostics.",
+        objective="Measure whether a direct controller can learn two full forage/rest cycles under indulgent ecology.",
+        behavior_checks=CONTINUOUS_SURVIVAL_CHECKS,
+        diagnostic_focus=(
+            "Closer food, slower predator pressure, and enough rollout horizon to observe leave-eat-return-rest-leave-again."
+        ),
+        success_interpretation="Diagnostic success requires repeated cycles, real rest, and survival without shelter bootstrap food.",
+        failure_interpretation="Failure suggests learnability remains blocked even after simplifying control and ecology.",
+        budget_note="Diagnostic only; do not use this easier scenario as final acceptance evidence.",
+        max_steps=432,
+        map_template="central_burrow",
+        setup=_continuous_survival_easy_v1,
+        score_episode=_score_continuous_survival_canonical,
+        expected_owner_modules=("sleep_center", "hunger_center", "threat_center"),
+    ),
+    "continuous_survival_medium_v1": ScenarioSpec(
+        name="continuous_survival_medium_v1",
+        description="Intermediate non-bootstrap long-run survival between easy learnability and canonical acceptance.",
+        objective="Check whether the easy-stage controller survives a tighter ecology before returning to canonical conditions.",
+        behavior_checks=CONTINUOUS_SURVIVAL_CHECKS,
+        diagnostic_focus=(
+            "Intermediate food distance and predator pressure that still requires repeated cycles but leaves less slack than easy."
+        ),
+        success_interpretation="Diagnostic success indicates the learned loop is starting to transfer beyond the indulgent setup.",
+        failure_interpretation="Failure indicates the learned loop is brittle and has not yet hardened toward canonical ecology.",
+        budget_note="Diagnostic bridge only; keep canonical acceptance separate.",
+        max_steps=360,
+        map_template="central_burrow",
+        setup=_continuous_survival_medium_v1,
+        score_episode=_score_continuous_survival_canonical,
+        expected_owner_modules=("sleep_center", "hunger_center", "threat_center"),
+    ),
     "predator_edge": ScenarioSpec(
         name="predator_edge",
         description="Predator appears at the edge of the visual field.",
@@ -240,7 +316,7 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         success_interpretation="Success requires the predator's deterministic transition and episode survival.",
         failure_interpretation="Failure indicates a predator FSM regression or a lethal outcome for the spider.",
         budget_note="Short regression scenario for the predator FSM, less sensitive to training budget.",
-        max_steps=14,
+        max_steps=18,
         map_template="entrance_funnel",
         setup=_recover_after_failed_chase,
         score_episode=_score_recover_after_failed_chase,
@@ -417,11 +493,11 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         description="Safe night with high fatigue and sleep debt, but residual exploration is still possible.",
         objective="Validate that sleep overrides residual exploration when the context is safe and homeostatic pressure is high.",
         behavior_checks=SLEEP_VS_EXPLORATION_CONFLICT_CHECKS,
-        diagnostic_focus="Sleep-versus-exploration arbitration, reduced exploration gates, and useful shelter rest.",
-        success_interpretation="Success requires sleep priority, suppressed residual exploration, and observable rest.",
-        failure_interpretation="Failure suggests residual exploration still dominates despite strong sleep pressure.",
+        diagnostic_focus="Sleep-versus-exploration arbitration, reduced exploration gates, useful shelter rest, and recovery without oversleep.",
+        success_interpretation="Success requires sleep priority, suppressed residual exploration, observable rest, and movement resuming after recovery.",
+        failure_interpretation="Failure suggests either residual exploration still dominates under sleep pressure or the spider oversleeps after recovery.",
         budget_note="Short homeostatic-conflict scenario for validating the semantics of sleep gating.",
-        max_steps=14,
+        max_steps=18,
         map_template="central_burrow",
         setup=_sleep_vs_exploration_conflict,
         score_episode=_score_sleep_vs_exploration_conflict,

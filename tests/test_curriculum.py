@@ -20,8 +20,21 @@ class CurriculumModuleTest(unittest.TestCase):
 
     def test_curriculum_profile_names_contains_required_values(self) -> None:
         self.assertIn("none", CURRICULUM_PROFILE_NAMES)
+        self.assertIn("a0_easy_ramp_v1", CURRICULUM_PROFILE_NAMES)
         self.assertIn("ecological_v1", CURRICULUM_PROFILE_NAMES)
         self.assertIn("ecological_v2", CURRICULUM_PROFILE_NAMES)
+        self.assertIn("ecological_v3", CURRICULUM_PROFILE_NAMES)
+        self.assertIn("survival_balance", CURRICULUM_PROFILE_NAMES)
+
+    def test_resolve_curriculum_profile_a0_easy_ramp_contains_easy_medium_and_canonical(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="a0_easy_ramp_v1",
+            total_episodes=12,
+        )
+        self.assertEqual(len(phases), 4)
+        self.assertEqual(phases[0].training_scenarios, ("continuous_survival_easy_v1",))
+        self.assertEqual(phases[1].training_scenarios, ("continuous_survival_medium_v1",))
+        self.assertIn("continuous_survival_canonical", phases[2].training_scenarios)
 
     def test_curriculum_focus_scenarios_are_expected_four(self) -> None:
         expected = {
@@ -352,6 +365,61 @@ class CurriculumModuleTest(unittest.TestCase):
                 *SUBSKILL_CHECK_MAPPINGS["hunger_commitment"],
             ),
         )
+
+    def test_resolve_curriculum_profile_ecological_v2_phase4_includes_continuous_survival(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="ecological_v2", total_episodes=12
+        )
+        self.assertIn("corridor_gauntlet", phases[3].training_scenarios)
+        self.assertIn("food_deprivation", phases[3].training_scenarios)
+        self.assertNotIn("continuous_survival_canonical", phases[3].training_scenarios)
+
+    def test_resolve_curriculum_profile_ecological_v3_returns_four_phases(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="ecological_v3", total_episodes=12
+        )
+        self.assertEqual(len(phases), 4)
+
+    def test_resolve_curriculum_profile_ecological_v3_phase_names(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="ecological_v3", total_episodes=12
+        )
+        self.assertEqual(
+            [phase.name for phase in phases],
+            [
+                "phase_1_shelter_safety_predator_awareness",
+                "phase_2_shelter_exit_commitment",
+                "phase_3_food_approach_under_exposure",
+                "phase_4_reactivation_under_threat",
+            ],
+        )
+
+    def test_resolve_curriculum_profile_ecological_v3_targets_tradeoff_scenarios(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="ecological_v3", total_episodes=12
+        )
+        self.assertIn("food_vs_predator_conflict", phases[2].training_scenarios)
+        self.assertIn("food_vs_predator_conflict", phases[3].training_scenarios)
+        self.assertIn("sleep_vs_exploration_conflict", phases[3].training_scenarios)
+
+    def test_resolve_curriculum_profile_survival_balance_returns_four_phases(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="survival_balance", total_episodes=12
+        )
+        self.assertEqual(len(phases), 4)
+
+    def test_resolve_curriculum_profile_survival_balance_includes_food_and_rest(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="survival_balance", total_episodes=12
+        )
+        flattened = {
+            scenario
+            for phase in phases
+            for scenario in phase.training_scenarios
+        }
+        self.assertIn("night_rest", flattened)
+        self.assertIn("food_deprivation", flattened)
+        self.assertIn("open_field_foraging", flattened)
 
     # ---------------------------------------------------------------------------
     # Promotion-check criteria evaluation

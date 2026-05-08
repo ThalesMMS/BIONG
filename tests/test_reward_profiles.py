@@ -75,13 +75,32 @@ class RewardProfileModuleTest(unittest.TestCase):
     def test_reward_profiles_has_classic_and_ecological(self) -> None:
         self.assertIn("classic", REWARD_PROFILES)
         self.assertIn("ecological", REWARD_PROFILES)
+        self.assertIn("ecological_v2", REWARD_PROFILES)
+        self.assertIn("ecological_easy_v1", REWARD_PROFILES)
+        self.assertIn("ecological_medium_v1", REWARD_PROFILES)
+        self.assertIn("survival_balance", REWARD_PROFILES)
         self.assertIn("austere", REWARD_PROFILES)
 
     def test_reward_profiles_ecological_stricter_penalties(self) -> None:
         classic = REWARD_PROFILES["classic"]
         ecological = REWARD_PROFILES["ecological"]
+        ecological_v2 = REWARD_PROFILES["ecological_v2"]
+        survival_balance = REWARD_PROFILES["survival_balance"]
         self.assertGreater(ecological["hunger_pressure"], classic["hunger_pressure"])
         self.assertGreater(ecological["fatigue_pressure"], classic["fatigue_pressure"])
+        self.assertGreater(ecological_v2["food_progress"], ecological["food_progress"])
+        self.assertGreater(
+            ecological_v2["day_exploration_hungry"],
+            ecological["day_exploration_hungry"],
+        )
+        self.assertGreater(
+            survival_balance["shelter_progress"],
+            ecological_v2["shelter_progress"],
+        )
+        self.assertGreater(
+            survival_balance["night_shelter_bonus"],
+            ecological_v2["night_shelter_bonus"],
+        )
 
     def test_austere_profile_zeroes_progress_guidance_terms(self) -> None:
         """
@@ -133,11 +152,19 @@ class AustereProfileStructureTest(unittest.TestCase):
             set(REWARD_PROFILES["ecological"].keys()),
         )
 
+    def test_austere_profile_has_same_keys_as_ecological_v2(self) -> None:
+        self.assertEqual(
+            set(REWARD_PROFILES["austere"].keys()),
+            set(REWARD_PROFILES["ecological_v2"].keys()),
+        )
+
     def test_all_three_profiles_have_identical_key_sets(self) -> None:
         classic_keys = set(REWARD_PROFILES["classic"].keys())
         ecological_keys = set(REWARD_PROFILES["ecological"].keys())
+        ecological_v2_keys = set(REWARD_PROFILES["ecological_v2"].keys())
         austere_keys = set(REWARD_PROFILES["austere"].keys())
         self.assertEqual(classic_keys, ecological_keys)
+        self.assertEqual(classic_keys, ecological_v2_keys)
         self.assertEqual(classic_keys, austere_keys)
 
     def test_austere_predator_escape_stay_penalty_is_zero(self) -> None:
@@ -171,9 +198,17 @@ class AustereProfileStructureTest(unittest.TestCase):
         """
         Assert that the module registers exactly the expected reward profile names.
         
-        Checks that the set of keys in REWARD_PROFILES is precisely {"classic", "ecological", "austere"}.
+        Checks that the set of keys in REWARD_PROFILES is precisely the canonical classic/ecological/austere profiles plus the A0-easy diagnostics.
         """
-        expected = {"classic", "ecological", "austere"}
+        expected = {
+            "classic",
+            "ecological",
+            "ecological_v2",
+            "ecological_easy_v1",
+            "ecological_medium_v1",
+            "survival_balance",
+            "austere",
+        }
         self.assertEqual(set(REWARD_PROFILES.keys()), expected)
 
     def test_austere_profile_all_values_are_finite(self) -> None:

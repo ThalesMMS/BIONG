@@ -144,6 +144,7 @@ class SpiderSimulation(SimulationEpisodeMixin, SimulationCheckpointMixin, Simula
         food_count: int = 4,
         day_length: int = 18,
         night_length: int = 12,
+        food_smell_range: int | None = None,
         max_steps: int = 120,
         seed: int = 0,
         gamma: float = 0.96,
@@ -255,6 +256,11 @@ class SpiderSimulation(SimulationEpisodeMixin, SimulationCheckpointMixin, Simula
             food_count=food_count,
             day_length=day_length,
             night_length=night_length,
+            food_smell_range=(
+                int(food_smell_range)
+                if food_smell_range is not None
+                else 10
+            ),
             seed=seed,
             reward_profile=reward_profile,
             map_template=map_template,

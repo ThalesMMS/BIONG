@@ -506,6 +506,14 @@ class SimulationEpisodeMixin:
             )
 
             if capture_trace:
+                state_snapshot = self.world.state_dict()
+                threat_snapshot = self.brain._bound_observation(
+                    "threat_center",
+                    next_brain_observation,
+                )
+                state_snapshot["predator_smell_strength"] = float(
+                    threat_snapshot["predator_smell_strength"]
+                )
                 item: Dict[str, object] = {
                     "episode": episode_index,
                     "seed": episode_seed,
@@ -522,7 +530,7 @@ class SimulationEpisodeMixin:
                     "slept": bool(info.get("slept")),
                     "predator_contact": bool(info.get("predator_contact")),
                     "predator_escape": bool(info.get("predator_escape")),
-                    "state": self.world.state_dict(),
+                    "state": state_snapshot,
                     "reward": float(reward),
                     "reward_components": info["reward_components"],
                     "predator_transition": info.get("predator_transition"),

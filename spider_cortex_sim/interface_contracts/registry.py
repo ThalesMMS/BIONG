@@ -169,6 +169,7 @@ def architecture_signature(
     motor_hidden_dim: int | None = None,
     integration_hidden_dim: int | None = None,
     monolithic_hidden_dim: int | None = None,
+    direct_policy_hidden_dims: Sequence[int] | None = None,
     capacity_profile: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """
@@ -327,6 +328,7 @@ def architecture_signature(
         or motor_hidden_dim is not None
         or integration_hidden_dim is not None
         or monolithic_hidden_dim is not None
+        or direct_policy_hidden_dims is not None
     ):
         capacity_payload: dict[str, object] = {}
         if capacity_profile is not None:
@@ -350,6 +352,10 @@ def architecture_signature(
             capacity_payload["integration_hidden_dim"] = int(integration_hidden_dim)
         if monolithic_hidden_dim is not None:
             capacity_payload["monolithic_hidden_dim"] = int(monolithic_hidden_dim)
+        if direct_policy_hidden_dims is not None:
+            capacity_payload["direct_policy_hidden_dims"] = [
+                int(hidden_dim) for hidden_dim in direct_policy_hidden_dims
+            ]
         payload["capacity"] = capacity_payload
     if proposal_backend == "true_monolithic":
         payload["direct_policy"] = {
@@ -360,6 +366,10 @@ def architecture_signature(
         }
         if monolithic_hidden_dim is not None:
             payload["direct_policy"]["hidden_dim"] = int(monolithic_hidden_dim)
+        if direct_policy_hidden_dims is not None:
+            payload["direct_policy"]["hidden_sizes"] = [
+                int(hidden_dim) for hidden_dim in direct_policy_hidden_dims
+            ]
     else:
         payload["arbitration_network"] = {
             "learned": bool(learned_arbitration),

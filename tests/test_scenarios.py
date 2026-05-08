@@ -41,6 +41,10 @@ class ScenarioRegressionTest(ScenarioWorldHelpers, unittest.TestCase):
                 "visual_hunter_open_field",
                 "food_vs_predator_conflict",
                 "sleep_vs_exploration_conflict",
+                "continuous_survival_bootstrap",
+                "continuous_survival_easy_v1",
+                "continuous_survival_medium_v1",
+                "continuous_survival_canonical",
             },
         )
 
@@ -324,7 +328,12 @@ class ConflictScenarioMetadataTest(unittest.TestCase):
                 self.assertEqual(scenario.map_template, expected_map)
                 self.assertGreater(scenario.max_steps, 0)
                 self.assertLessEqual(scenario.max_steps, 24)
-                self.assertEqual(len(scenario.behavior_checks), 3)
+                expected_checks = 4 if name == "sleep_vs_exploration_conflict" else 3
+                self.assertEqual(len(scenario.behavior_checks), expected_checks)
+
+    def test_sleep_vs_exploration_conflict_metadata_uses_extended_window(self) -> None:
+        scenario = get_scenario("sleep_vs_exploration_conflict")
+        self.assertEqual(scenario.max_steps, 18)
 
 class MultiPredatorScenarioMetadataTest(unittest.TestCase):
     """Tests for the new predator-specialization scenarios."""

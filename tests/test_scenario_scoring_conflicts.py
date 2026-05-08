@@ -157,7 +157,29 @@ class ScoreFunctionConflictTest(ScoreFunctionTestBase):
                         "threat": {"predator_visible": 0.0},
                     },
                 }
-            )
+            ),
+            {
+                "tick": 10,
+                "state": {
+                    "x": 5,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "shelter_role": "entrance",
+                },
+            },
+            {
+                "tick": 11,
+                "state": {
+                    "x": 6,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "shelter_role": "outside",
+                },
+            },
         ]
         score = spec.score_episode(stats, trace)
         self.assertTrue(score.success)
@@ -191,10 +213,33 @@ class ScoreFunctionConflictTest(ScoreFunctionTestBase):
                     },
                 }
             ),
+            {
+                "tick": 10,
+                "state": {
+                    "x": 5,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "shelter_role": "entrance",
+                },
+            },
+            {
+                "tick": 11,
+                "state": {
+                    "x": 6,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "shelter_role": "outside",
+                },
+            },
         ]
         score = spec.score_episode(stats, trace)
         self.assertFalse(score.checks["sleep_priority"].passed)
         self.assertTrue(score.checks["exploration_suppressed_under_sleep_pressure"].passed)
+        self.assertTrue(score.checks["reactivates_after_recovery"].passed)
         self.assertAlmostEqual(score.behavior_metrics["sleep_priority_rate"], 0.5)
         self.assertAlmostEqual(score.behavior_metrics["exploration_suppressed_rate"], 1.0)
 
@@ -238,11 +283,11 @@ class ScoreFunctionConflictTest(ScoreFunctionTestBase):
             self.assertIs(payload["guards_applied"], False)
         self.assertIn("threat_priority_rate", score.behavior_metrics)
 
-    def test_sleep_vs_exploration_conflict_passes_with_learned_arbitration_trace(self) -> None:
+    def test_sleep_vs_exploration_conflict_reports_oversleep_with_learned_arbitration_trace(self) -> None:
         """
-        Verify the sleep-vs-exploration conflict scenario succeeds and produces action-selection trace diagnostics when using learned arbitration.
+        Verify the sleep-vs-exploration conflict scenario still emits action-selection diagnostics and now flags post-recovery oversleep when movement never resumes.
 
-        Asserts that at least one action-selection payload is present and each payload contains a `winning_valence` key and a `module_gates` dictionary, and that the resulting score reports a `sleep_priority_rate` of at least 0.8 and overall success.
+        Asserts that at least one action-selection payload is present and each payload contains a `winning_valence` key and a `module_gates` dictionary, and that the resulting score reports a `sleep_priority_rate` of at least 0.8 while failing the new post-recovery reactivation check.
         """
         score, trace = self._run_conflict_scenario(
             "sleep_vs_exploration_conflict",
@@ -254,7 +299,10 @@ class ScoreFunctionConflictTest(ScoreFunctionTestBase):
         for payload in payloads:
             self._assert_learned_arbitration_payload_contract(payload)
         self.assertGreaterEqual(score.behavior_metrics["sleep_priority_rate"], 0.8)
-        self.assertTrue(score.success, msg=str(score.behavior_metrics))
+        self.assertFalse(score.success, msg=str(score.behavior_metrics))
+        self.assertEqual(score.behavior_metrics["recovery_tick"], 10)
+        self.assertIsNone(score.behavior_metrics["post_recovery_movement_tick"])
+        self.assertFalse(score.checks["reactivates_after_recovery"].passed)
 
     def test_learned_and_fixed_arbitration_conflict_diagnostics(self) -> None:
         scenarios = {
@@ -472,7 +520,9 @@ class SleepVsExplorationConflictScoringEdgeCasesTest(unittest.TestCase):
         stats = _make_episode_stats(scenario="sleep_vs_exploration_conflict")
         score = spec.score_episode(stats, [])
         for key in ("sleep_pressure_tick_count", "sleep_priority_rate",
-                    "mean_visual_gate_under_sleep", "sleep_events", "sleep_debt_reduction"):
+                    "mean_visual_gate_under_sleep", "sleep_events", "sleep_debt_reduction",
+                    "state_sleep_priority_rate", "state_exploration_suppressed_rate",
+                    "recovery_tick", "post_recovery_movement_tick", "left_shelter_after_recovery"):
             self.assertIn(key, score.behavior_metrics)
 
     def test_exploration_suppressed_requires_both_visual_and_sensory_below_threshold(self) -> None:
@@ -542,6 +592,142 @@ class SleepVsExplorationConflictScoringEdgeCasesTest(unittest.TestCase):
         self.assertIsInstance(score.behavior_metrics["mean_visual_gate_under_sleep"], float)
         self.assertIsInstance(score.behavior_metrics["sleep_pressure_tick_count"], int)
 
+    def test_state_fallback_passes_sleep_checks_without_action_selection_payloads(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=3,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT - 0.2,
+        )
+        trace = [
+            {
+                "tick": 0,
+                "state": {
+                    "x": 5,
+                    "y": 5,
+                    "is_night": True,
+                    "fatigue": 0.9,
+                    "sleep_debt": 0.92,
+                    "sleep_phase": "SETTLING",
+                    "shelter_role": "entrance",
+                },
+            },
+            {
+                "tick": 1,
+                "state": {
+                    "x": 5,
+                    "y": 5,
+                    "is_night": True,
+                    "fatigue": 0.8,
+                    "sleep_debt": 0.84,
+                    "sleep_phase": "RESTING",
+                    "shelter_role": "entrance",
+                },
+            },
+            {
+                "tick": 10,
+                "state": {
+                    "x": 5,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "sleep_phase": "AWAKE",
+                    "shelter_role": "entrance",
+                },
+            },
+            {
+                "tick": 11,
+                "state": {
+                    "x": 6,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "sleep_phase": "AWAKE",
+                    "shelter_role": "outside",
+                },
+            },
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertTrue(score.checks["sleep_priority"].passed)
+        self.assertTrue(score.checks["exploration_suppressed_under_sleep_pressure"].passed)
+        self.assertTrue(score.checks["reactivates_after_recovery"].passed)
+        self.assertEqual(score.behavior_metrics["sleep_pressure_tick_count"], 0)
+        self.assertGreaterEqual(score.behavior_metrics["state_sleep_priority_rate"], 0.8)
+
+    def test_reactivates_after_recovery_requires_post_recovery_movement(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=2,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT - 0.2,
+        )
+        trace = [
+            {
+                "tick": 10,
+                "state": {
+                    "x": 5,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "shelter_role": "entrance",
+                },
+            },
+            {
+                "tick": 11,
+                "state": {
+                    "x": 5,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "shelter_role": "entrance",
+                },
+            },
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertFalse(score.checks["reactivates_after_recovery"].passed)
+        self.assertEqual(score.behavior_metrics["recovery_tick"], 10)
+        self.assertIsNone(score.behavior_metrics["post_recovery_movement_tick"])
+
+    def test_reactivates_after_recovery_passes_with_post_recovery_movement(self) -> None:
+        spec = get_scenario("sleep_vs_exploration_conflict")
+        stats = _make_episode_stats(
+            scenario="sleep_vs_exploration_conflict",
+            sleep_events=2,
+            final_sleep_debt=SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT - 0.2,
+        )
+        trace = [
+            {
+                "tick": 10,
+                "state": {
+                    "x": 5,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "shelter_role": "entrance",
+                },
+            },
+            {
+                "tick": 11,
+                "state": {
+                    "x": 6,
+                    "y": 5,
+                    "is_night": False,
+                    "fatigue": 0.03,
+                    "sleep_debt": 0.28,
+                    "shelter_role": "outside",
+                },
+            },
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertTrue(score.checks["reactivates_after_recovery"].passed)
+        self.assertEqual(score.behavior_metrics["recovery_tick"], 10)
+        self.assertEqual(score.behavior_metrics["post_recovery_movement_tick"], 11)
+
 class ConflictCheckSpecNamesTest(unittest.TestCase):
     """Tests that check spec names for conflict scenarios are correct."""
 
@@ -556,6 +742,7 @@ class ConflictCheckSpecNamesTest(unittest.TestCase):
         self.assertIn("sleep_priority", names)
         self.assertIn("exploration_suppressed_under_sleep_pressure", names)
         self.assertIn("resting_behavior_emerges", names)
+        self.assertIn("reactivates_after_recovery", names)
 
     def test_food_vs_predator_expected_values_are_meaningful(self) -> None:
         for spec in FOOD_VS_PREDATOR_CONFLICT_CHECKS:

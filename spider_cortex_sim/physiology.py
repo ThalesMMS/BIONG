@@ -216,6 +216,9 @@ def apply_restoration(
     """
     cfg = world.reward_config
     momentum_before = float(world.state.momentum)
+    resting_hunger_relief = float(
+        cfg["base_hunger_cost"] + cfg["idle_hunger_cost"]
+    )
     if sleep_phase == "RESTING":
         if shelter_role == "entrance":
             fatigue_restore = 0.12 if night else 0.06
@@ -226,11 +229,13 @@ def apply_restoration(
         world.state.fatigue = max(0.0, world.state.fatigue - fatigue_restore)
         world.state.sleep_debt = max(0.0, world.state.sleep_debt - debt_restore)
         world.state.health = min(1.0, world.state.health + (0.04 if night else 0.01))
+        world.state.hunger = max(0.0, world.state.hunger - resting_hunger_relief)
     elif sleep_phase == "DEEP_SLEEP":
         world.state.fatigue = max(0.0, world.state.fatigue - 0.34)
         debt_restore = cfg["sleep_debt_deep_night"] if night else cfg["sleep_debt_deep_day"]
         world.state.sleep_debt = max(0.0, world.state.sleep_debt - debt_restore)
         world.state.health = min(1.0, world.state.health + 0.05)
+        world.state.hunger = max(0.0, world.state.hunger - resting_hunger_relief)
     elif sleep_phase == "SETTLING":
         settle_restore = 0.10 if night else 0.05
         world.state.fatigue = max(0.0, world.state.fatigue - settle_restore)
@@ -305,20 +310,22 @@ def resolve_autonomic_behaviors(
             )
         return
 
-    if action_name != "STAY":
+    moved = action_name.startswith("MOVE_")
+    if moved:
         reset_sleep_state(world)
         if tick_context is not None:
             tick_context.record_event(
                 "autonomic",
-                "sleep_reset_non_stay",
+                "sleep_reset_move",
                 action=action_name,
             )
 
     fatigue_before = world.state.fatigue
     shelter_role = world.shelter_role_at(world.spider_pos())
+    sleep_thresholds = world.operational_profile.brain_reflex_thresholds["sleep_center"]
     can_attempt_rest = (
-        action_name == "STAY"
-        and world.state.hunger < (0.62 if world.reward_profile == "classic" else 0.55)
+        not moved
+        and world.state.hunger < sleep_thresholds["rest_hunger"]
         and not predator_threat
         and shelter_role != "outside"
         and (night or fatigue_before > 0.25 or world.state.rest_streak > 0 or world.state.sleep_debt > 0.28)

@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Sequence
 
 from ..perception import has_line_of_sight, visibility_confidence, visible_range
-from ..predator import LizardState, OLFACTORY_HUNTER_PROFILE, VISUAL_HUNTER_PROFILE
+from ..predator import (
+    LizardState,
+    OLFACTORY_HUNTER_PROFILE,
+    PredatorProfile,
+    VISUAL_HUNTER_PROFILE,
+)
 from ..world import SpiderWorld
 from .specs import (
     FAST_VISUAL_HUNTER_PROFILE,
@@ -227,6 +232,92 @@ def _open_field_foraging_food_cell(
     )
 
 
+def _continuous_survival_food_cell(
+    world: SpiderWorld,
+    deep: tuple[int, int],
+) -> tuple[int, int]:
+    """
+    Choose the first continuous-survival food target with a shallow exit route.
+
+    The first meal still starts outside shelter, but it is biased toward the
+    right-hand corridor so the initial long-run attempt measures foraging
+    continuity rather than a forced diagonal detour immediately after leaving
+    deep shelter.
+    """
+    candidates = [
+        cell
+        for cell in world.map_template.food_spawn_cells
+        if cell[0] > deep[0]
+        and cell[1] == deep[1]
+        and 4 <= world.manhattan(cell, deep) <= 6
+        and _open_field_foraging_has_initial_food_signal(world, deep, cell)
+    ]
+    if candidates:
+        return min(
+            candidates,
+            key=lambda cell: (
+                world.manhattan(cell, deep),
+                cell[0],
+            ),
+        )
+    return _open_field_foraging_food_cell(world, deep)
+
+
+def _continuous_survival_food_corridor(
+    world: SpiderWorld,
+    deep: tuple[int, int],
+) -> tuple[tuple[int, int], ...]:
+    """
+    Return the external corridor food cells used by the canonical long-run scenario.
+
+    Keeping the respawn set narrow makes the second and third foraging legs
+    diagnostically comparable while still requiring repeated excursions out of
+    shelter.
+    """
+    candidates = [
+        cell
+        for cell in world.map_template.food_spawn_cells
+        if cell[0] > deep[0]
+        and cell[1] == deep[1]
+        and 4 <= world.manhattan(cell, deep) <= 6
+    ]
+    if candidates:
+        return tuple(sorted(candidates, key=lambda cell: (cell[0], cell[1])))
+    return ( _continuous_survival_food_cell(world, deep), )
+
+
+def _continuous_survival_predator_cell(
+    world: SpiderWorld,
+    *,
+    excluded: set[tuple[int, int]],
+    corridor_food_cells: tuple[tuple[int, int], ...],
+) -> tuple[int, int]:
+    """
+    Choose an active predator spawn near the outer food corridor.
+
+    The target is close enough to create real threat exposure on the foraging
+    lane, but still outside shelter and not directly on the food cells.
+    """
+    anchor = corridor_food_cells[-1]
+    candidates = [
+        cell
+        for cell in world.map_template.lizard_spawn_cells
+        if cell not in excluded
+        and world.is_lizard_walkable(cell)
+        and world.manhattan(cell, anchor) >= 3
+    ]
+    if candidates:
+        return min(
+            candidates,
+            key=lambda cell: (
+                world.manhattan(cell, anchor),
+                abs(cell[1] - anchor[1]),
+                -cell[0],
+            ),
+        )
+    return _safe_distinct_lizard_cell(world, excluded)
+
+
 def _teleport_spider(
     world: SpiderWorld,
     position: tuple[int, int],
@@ -267,6 +358,144 @@ def _night_rest(world: SpiderWorld) -> None:
     world.state.rest_streak = 0
     lx, ly = _safe_lizard_cell(world)
     world.lizard = LizardState(x=lx, y=ly, mode="PATROL")
+    world.refresh_memory(initial=True)
+
+
+def _continuous_survival_bootstrap(world: SpiderWorld) -> None:
+    """
+    Bootstrap the long-run survival scenario with immediate access to food.
+
+    The setup starts from the night-rest shelter position, places food directly
+    on the spider's initial cell, and reduces the hunger/fatigue/debt pressure
+    enough to let the policy demonstrate a full 10-day loop before the next
+    tightening pass.
+    """
+    _night_rest(world)
+    world.food_positions = [world.spider_pos()]
+    world.state.hunger = 0.52
+    world.state.fatigue = 0.22
+    world.state.sleep_debt = 0.20
+
+
+def _continuous_survival_canonical(world: SpiderWorld) -> None:
+    """
+    Configure a non-bootstrap long-run survival scenario.
+
+    The spider starts in deep shelter at night, but food is placed outside the
+    shelter with an active predator positioned on a distinct walkable cell so
+    the rollout must actually perform foraging and risk management.
+    """
+    deep = _first_cell(
+        world.shelter_deep_cells
+        or world.shelter_interior_cells
+        or world.shelter_entrance_cells
+    )
+    world.tick = 2
+    _teleport_spider(world, deep)
+    corridor_food_cells = _continuous_survival_food_corridor(world, deep)
+    world._scenario_food_spawn_cells = corridor_food_cells
+    food = corridor_food_cells[0]
+    world.food_positions = [food]
+    world.state.hunger = 0.88
+    world.state.fatigue = 0.24
+    world.state.sleep_debt = 0.22
+    world.state.heading_dx, world.state.heading_dy = world._heading_toward(
+        food,
+        origin=deep,
+    )
+    lx, ly = _continuous_survival_predator_cell(
+        world,
+        excluded={food, deep},
+        corridor_food_cells=corridor_food_cells,
+    )
+    world.lizard = LizardState(
+        x=lx,
+        y=ly,
+        mode="PATROL",
+        profile=VISUAL_HUNTER_PROFILE,
+    )
+    world.refresh_memory(initial=True)
+
+
+def _continuous_survival_easy_v1(world: SpiderWorld) -> None:
+    """Configure a forgiving but non-bootstrap learnability scenario."""
+    deep = _first_cell(
+        world.shelter_deep_cells
+        or world.shelter_interior_cells
+        or world.shelter_entrance_cells
+    )
+    world.tick = max(2, world.day_length - 16)
+    _teleport_spider(world, deep)
+    corridor_food_cells = tuple(_continuous_survival_food_corridor(world, deep))
+    easy_food = corridor_food_cells[0]
+    world._scenario_food_spawn_cells = corridor_food_cells[:2]
+    world.food_positions = [easy_food]
+    world.state.hunger = 0.72
+    world.state.fatigue = 0.18
+    world.state.sleep_debt = 0.18
+    world.state.heading_dx, world.state.heading_dy = world._heading_toward(
+        easy_food,
+        origin=deep,
+    )
+    lx, ly = _continuous_survival_predator_cell(
+        world,
+        excluded={easy_food, deep},
+        corridor_food_cells=corridor_food_cells,
+    )
+    world.lizard = LizardState(
+        x=lx,
+        y=ly,
+        mode="PATROL",
+        profile=PredatorProfile(
+            name="visual_hunter_easy",
+            vision_range=4,
+            smell_range=2,
+            detection_style="visual",
+            move_interval=4,
+            detection_threshold=0.60,
+        ),
+    )
+    world.refresh_memory(initial=True)
+
+
+def _continuous_survival_medium_v1(world: SpiderWorld) -> None:
+    """Configure an intermediate non-bootstrap learnability scenario."""
+    deep = _first_cell(
+        world.shelter_deep_cells
+        or world.shelter_interior_cells
+        or world.shelter_entrance_cells
+    )
+    world.tick = 2
+    _teleport_spider(world, deep)
+    corridor_food_cells = tuple(_continuous_survival_food_corridor(world, deep))
+    medium_food = corridor_food_cells[min(1, len(corridor_food_cells) - 1)]
+    world._scenario_food_spawn_cells = corridor_food_cells[:2]
+    world.food_positions = [medium_food]
+    world.state.hunger = 0.80
+    world.state.fatigue = 0.20
+    world.state.sleep_debt = 0.20
+    world.state.heading_dx, world.state.heading_dy = world._heading_toward(
+        medium_food,
+        origin=deep,
+    )
+    lx, ly = _continuous_survival_predator_cell(
+        world,
+        excluded={medium_food, deep},
+        corridor_food_cells=corridor_food_cells,
+    )
+    world.lizard = LizardState(
+        x=lx,
+        y=ly,
+        mode="PATROL",
+        profile=PredatorProfile(
+            name="visual_hunter_medium",
+            vision_range=5,
+            smell_range=2,
+            detection_style="visual",
+            move_interval=3,
+            detection_threshold=0.52,
+        ),
+    )
     world.refresh_memory(initial=True)
 
 
@@ -620,19 +849,36 @@ def _sleep_vs_exploration_conflict(world: SpiderWorld) -> None:
     """
     Create a night-time scenario that biases behavior toward sleep rather than exploration.
 
-    Teleports the spider to the shelter entrance, advances the world clock to night, sets low hunger, high fatigue, and an elevated sleep debt, places a distant food spawn to discourage foraging, spawns a non-threatening patrol predator at a safe patrol cell, and refreshes the world's memory.
+    Teleports the spider to the shelter entrance, advances the world clock to night, sets low hunger, high fatigue, and an elevated sleep debt, places a reachable corridor food target that becomes useful only after rest, spawns a non-threatening patrol predator at a safe patrol cell, and refreshes the world's memory.
     """
     entrance = _first_cell(world.shelter_entrance_cells or world.shelter_interior_cells)
-    far_food = sorted(
-        world.map_template.food_spawn_cells,
-        key=lambda cell: -world.manhattan(cell, entrance),
-    )[0]
+    corridor_food_candidates = sorted(
+        (
+            cell
+            for cell in world.map_template.food_spawn_cells
+            if cell[0] > entrance[0]
+            and cell[1] == entrance[1]
+            and 3 <= world.manhattan(cell, entrance) <= 5
+        ),
+        key=lambda cell: (
+            world.manhattan(cell, entrance),
+            cell[0],
+        ),
+    )
+    target_food = (
+        corridor_food_candidates[0]
+        if corridor_food_candidates
+        else sorted(
+            world.map_template.food_spawn_cells,
+            key=lambda cell: -world.manhattan(cell, entrance),
+        )[0]
+    )
     world.tick = world.day_length + 1
     _teleport_spider(world, entrance)
     world.state.hunger = 0.12
     world.state.fatigue = 0.94
     world.state.sleep_debt = SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT
-    world.food_positions = [far_food]
+    world.food_positions = [target_food]
     lx, ly = _safe_lizard_cell(world)
     world.lizard = LizardState(x=lx, y=ly, mode="PATROL")
     world.refresh_memory(initial=True)

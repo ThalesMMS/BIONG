@@ -233,6 +233,7 @@ class WorldNavigationMixin:
         self._last_predator_visible = False
         self._predator_threat_episode_active = False
         self._predator_escape_bonus_pending = False
+        self._scenario_food_spawn_cells = None
         self.food_positions = []
         for _ in range(self.food_count):
             self.food_positions.append(self._random_food_cell())

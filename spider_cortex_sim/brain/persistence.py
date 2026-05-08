@@ -131,6 +131,7 @@ class BrainPersistenceMixin:
                 "type": "direct_policy",
                 "input_dim": mono_sd["input_dim"],
                 "hidden_dim": mono_sd["hidden_dim"],
+                "hidden_sizes": list(mono_sd.get("hidden_sizes", [mono_sd["hidden_dim"]])),
                 "output_dim": mono_sd["output_dim"],
                 "parameter_count": int(
                     parameter_counts_by_network.get(self.TRUE_MONOLITHIC_POLICY_NAME, 0)
@@ -328,6 +329,9 @@ class BrainPersistenceMixin:
                 arrays["name"] = name
                 arrays["input_dim"] = mod_meta["input_dim"]
                 arrays["hidden_dim"] = mod_meta["hidden_dim"]
+                hidden_sizes = mod_meta.get("hidden_sizes")
+                if hidden_sizes is not None:
+                    arrays["hidden_sizes"] = hidden_sizes
                 arrays["output_dim"] = mod_meta["output_dim"]
                 bank_state[name] = arrays
 
@@ -344,6 +348,9 @@ class BrainPersistenceMixin:
             monolithic_name = self.TRUE_MONOLITHIC_POLICY_NAME
             if monolithic_name not in bank_state:
                 raise KeyError("Incompatible save: true monolithic weights are missing.")
-            self.true_monolithic_policy.load_state_dict(bank_state[monolithic_name])
+            direct_state = dict(bank_state[monolithic_name])
+            if not hasattr(self.true_monolithic_policy, "hidden_sizes"):
+                direct_state.pop("hidden_sizes", None)
+            self.true_monolithic_policy.load_state_dict(direct_state)
 
         return loaded
