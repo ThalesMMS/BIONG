@@ -7,6 +7,9 @@ from typing import Dict, Sequence
 CURRICULUM_PROFILE_NAMES: tuple[str, ...] = (
     "none",
     "a0_easy_ramp_v1",
+    "a0_post_rest_continuation_v1",
+    "a0_post_rest_continuation_v2",
+    "a0_post_rest_continuation_dense_v1",
     "ecological_v1",
     "ecological_v2",
     "ecological_v3",
@@ -113,6 +116,40 @@ SUBSKILL_CHECK_MAPPINGS: Dict[str, tuple[PromotionCheckCriteria, ...]] = {
         PromotionCheckCriteria(
             scenario="food_deprivation",
             check_name="survives_deprivation",
+            required_pass_rate=1.0,
+        ),
+    ),
+    "post_rest_continuation": (
+        PromotionCheckCriteria(
+            scenario="continuous_survival_post_rest_inside_v1",
+            check_name="post_rest_exit_committed",
+            required_pass_rate=1.0,
+        ),
+        PromotionCheckCriteria(
+            scenario="continuous_survival_post_rest_inside_v1",
+            check_name="post_rest_food_reacquired",
+            required_pass_rate=1.0,
+        ),
+        PromotionCheckCriteria(
+            scenario="continuous_survival_post_rest_entrance_v1",
+            check_name="post_rest_exit_committed",
+            required_pass_rate=1.0,
+        ),
+        PromotionCheckCriteria(
+            scenario="continuous_survival_post_rest_entrance_v1",
+            check_name="post_rest_food_reacquired",
+            required_pass_rate=1.0,
+        ),
+    ),
+    "late_cycle_return_rest": (
+        PromotionCheckCriteria(
+            scenario="continuous_survival_return_after_late_forage_v1",
+            check_name="late_cycle_return_completed",
+            required_pass_rate=1.0,
+        ),
+        PromotionCheckCriteria(
+            scenario="continuous_survival_re_rest_after_return_v1",
+            check_name="late_cycle_re_rest_started",
             required_pass_rate=1.0,
         ),
     ),
@@ -228,6 +265,196 @@ def resolve_curriculum_profile(
                 ("continuous_survival_canonical", "food_deprivation"),
                 0.5,
                 (),
+            ),
+        )
+    elif profile_name == "a0_post_rest_continuation_v1":
+        phase_specs = (
+            (
+                "phase_1_easy_loop",
+                "food_approach",
+                ("continuous_survival_easy_v1",),
+                ("continuous_survival_easy_v1",),
+                0.5,
+                (),
+            ),
+            (
+                "phase_2_post_rest_handoff",
+                "post_rest_continuation",
+                (
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                ),
+                (
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                ),
+                0.5,
+                tuple(SUBSKILL_CHECK_MAPPINGS["post_rest_continuation"]),
+            ),
+            (
+                "phase_3_medium_transfer",
+                "corridor_navigation+hunger_commitment",
+                (
+                    "continuous_survival_medium_v1",
+                    "continuous_survival_canonical",
+                ),
+                (
+                    "continuous_survival_medium_v1",
+                    "continuous_survival_canonical",
+                ),
+                0.5,
+                (),
+            ),
+            (
+                "phase_4_canonical_with_continuation",
+                "corridor_navigation+hunger_commitment",
+                (
+                    "continuous_survival_canonical",
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                ),
+                (
+                    "continuous_survival_canonical",
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                ),
+                0.5,
+                (),
+            ),
+        )
+    elif profile_name == "a0_post_rest_continuation_v2":
+        phase_specs = (
+            (
+                "phase_1_easy_loop",
+                "food_approach",
+                ("continuous_survival_easy_v1",),
+                ("continuous_survival_easy_v1",),
+                0.5,
+                (),
+            ),
+            (
+                "phase_2_post_rest_handoff",
+                "post_rest_continuation",
+                (
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                ),
+                (
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                ),
+                0.5,
+                tuple(SUBSKILL_CHECK_MAPPINGS["post_rest_continuation"]),
+            ),
+            (
+                "phase_3_late_cycle_return_rest",
+                "late_cycle_return_rest",
+                (
+                    "continuous_survival_return_after_late_forage_v1",
+                    "continuous_survival_re_rest_after_return_v1",
+                    "continuous_survival_medium_v1",
+                    "continuous_survival_canonical",
+                ),
+                (
+                    "continuous_survival_return_after_late_forage_v1",
+                    "continuous_survival_re_rest_after_return_v1",
+                    "continuous_survival_canonical",
+                ),
+                0.5,
+                tuple(SUBSKILL_CHECK_MAPPINGS["late_cycle_return_rest"]),
+            ),
+            (
+                "phase_4_canonical_with_full_continuation",
+                "corridor_navigation+hunger_commitment",
+                (
+                    "continuous_survival_canonical",
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                    "continuous_survival_return_after_late_forage_v1",
+                    "continuous_survival_re_rest_after_return_v1",
+                ),
+                (
+                    "continuous_survival_canonical",
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                    "continuous_survival_return_after_late_forage_v1",
+                    "continuous_survival_re_rest_after_return_v1",
+                ),
+                0.5,
+                (
+                    *SUBSKILL_CHECK_MAPPINGS["late_cycle_return_rest"],
+                    PromotionCheckCriteria(
+                        scenario="continuous_survival_canonical",
+                        check_name="repeated_foraging_cycle",
+                        required_pass_rate=1.0,
+                    ),
+                ),
+            ),
+        )
+    elif profile_name == "a0_post_rest_continuation_dense_v1":
+        phase_specs = (
+            (
+                "phase_1_easy_loop",
+                "food_approach",
+                ("continuous_survival_easy_v1",),
+                ("continuous_survival_easy_v1",),
+                0.5,
+                (),
+            ),
+            (
+                "phase_2_post_rest_handoff",
+                "post_rest_continuation",
+                (
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                ),
+                (
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                ),
+                0.5,
+                tuple(SUBSKILL_CHECK_MAPPINGS["post_rest_continuation"]),
+            ),
+            (
+                "phase_3_late_cycle_return_rest",
+                "late_cycle_return_rest",
+                (
+                    "continuous_survival_return_after_late_forage_v1",
+                    "continuous_survival_re_rest_after_return_v1",
+                ),
+                (
+                    "continuous_survival_return_after_late_forage_v1",
+                    "continuous_survival_re_rest_after_return_v1",
+                ),
+                0.5,
+                tuple(SUBSKILL_CHECK_MAPPINGS["late_cycle_return_rest"]),
+            ),
+            (
+                "phase_4_canonical_with_dense_continuation",
+                "corridor_navigation+hunger_commitment",
+                (
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                    "continuous_survival_return_after_late_forage_v1",
+                    "continuous_survival_re_rest_after_return_v1",
+                    "continuous_survival_canonical",
+                ),
+                (
+                    "continuous_survival_post_rest_inside_v1",
+                    "continuous_survival_post_rest_entrance_v1",
+                    "continuous_survival_return_after_late_forage_v1",
+                    "continuous_survival_re_rest_after_return_v1",
+                    "continuous_survival_canonical",
+                ),
+                0.5,
+                (
+                    *SUBSKILL_CHECK_MAPPINGS["late_cycle_return_rest"],
+                    PromotionCheckCriteria(
+                        scenario="continuous_survival_canonical",
+                        check_name="repeated_foraging_cycle",
+                        required_pass_rate=1.0,
+                    ),
+                ),
             ),
         )
     elif profile_name == "ecological_v1":

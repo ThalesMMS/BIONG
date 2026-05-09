@@ -223,6 +223,162 @@ def _score_continuous_survival_canonical(
         behavior_metrics=dict(evaluation),
     )
 
+
+def _continuous_survival_evaluation_for_scenario(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+    *,
+    scenario_name: str,
+) -> dict[str, object]:
+    return build_continuous_survival_evaluation(
+        stats=stats,
+        trace=trace,
+        day_length=18,
+        night_length=12,
+        target_days=10,
+        scenario_name=scenario_name,
+        reward_profile="ecological",
+    )
+
+
+def _trace_final_shelter_role(trace: Sequence[Dict[str, object]]) -> str | None:
+    for item in reversed(trace):
+        if not isinstance(item, Mapping):
+            continue
+        state = item.get("state", {})
+        if not isinstance(state, Mapping):
+            continue
+        role = state.get("shelter_role")
+        if isinstance(role, str):
+            return role
+    return None
+
+
+def _score_continuous_survival_post_rest_continuation(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+) -> BehavioralEpisodeScore:
+    evaluation = _continuous_survival_evaluation_for_scenario(
+        stats,
+        trace,
+        scenario_name="continuous_survival_post_rest_continuation",
+    )
+    checks = (
+        build_behavior_check(
+            POST_REST_CONTINUATION_CHECKS[0],
+            passed=int(evaluation["shelter_exits"]) >= 1,
+            value=int(evaluation["shelter_exits"]),
+        ),
+        build_behavior_check(
+            POST_REST_CONTINUATION_CHECKS[1],
+            passed=int(evaluation["food_eaten"]) >= 1,
+            value=int(evaluation["food_eaten"]),
+        ),
+        build_behavior_check(
+            POST_REST_CONTINUATION_CHECKS[2],
+            passed=int(evaluation["shelter_returns"]) >= 1,
+            value=int(evaluation["shelter_returns"]),
+        ),
+    )
+    return build_behavior_score(
+        stats=stats,
+        objective="Validate reopening a recovered post-rest shelter state into a full forage-return continuation.",
+        checks=checks,
+        behavior_metrics=dict(evaluation),
+    )
+
+
+def _score_continuous_survival_return_after_late_forage(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+) -> BehavioralEpisodeScore:
+    evaluation = _continuous_survival_evaluation_for_scenario(
+        stats,
+        trace,
+        scenario_name="continuous_survival_return_after_late_forage_v1",
+    )
+    final_shelter_role = _trace_final_shelter_role(trace)
+    final_shelter_role_sheltered = bool(
+        final_shelter_role in {"entrance", "inside", "deep"}
+    )
+    checks = (
+        build_behavior_check(
+            LATE_FORAGE_RETURN_CHECKS[0],
+            passed=int(evaluation["shelter_returns"]) >= 1,
+            value=int(evaluation["shelter_returns"]),
+        ),
+        build_behavior_check(
+            LATE_FORAGE_RETURN_CHECKS[1],
+            passed=final_shelter_role_sheltered,
+            value=final_shelter_role,
+        ),
+        build_behavior_check(
+            LATE_FORAGE_RETURN_CHECKS[2],
+            passed=bool(
+                float(evaluation["final_health"]) > 0.0
+                and int(evaluation["predator_contacts"]) <= 1
+            ),
+            value={
+                "final_health": float(evaluation["final_health"]),
+                "predator_contacts": int(evaluation["predator_contacts"]),
+            },
+        ),
+    )
+    behavior_metrics = dict(evaluation)
+    behavior_metrics["final_shelter_role"] = final_shelter_role
+    return build_behavior_score(
+        stats=stats,
+        objective="Validate closing a later forage leg by returning to shelter safely.",
+        checks=checks,
+        behavior_metrics=behavior_metrics,
+    )
+
+
+def _score_continuous_survival_re_rest_after_return(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+) -> BehavioralEpisodeScore:
+    evaluation = _continuous_survival_evaluation_for_scenario(
+        stats,
+        trace,
+        scenario_name="continuous_survival_re_rest_after_return_v1",
+    )
+    checks = (
+        build_behavior_check(
+            RE_REST_AFTER_RETURN_CHECKS[0],
+            passed=bool(
+                int(evaluation["sleep_events"]) >= 1
+                or float(evaluation["sleep_debt_delta"]) > 0.0
+            ),
+            value={
+                "sleep_events": int(evaluation["sleep_events"]),
+                "sleep_debt_delta": float(evaluation["sleep_debt_delta"]),
+            },
+        ),
+        build_behavior_check(
+            RE_REST_AFTER_RETURN_CHECKS[1],
+            passed=int(evaluation["shelter_exits"]) == 0,
+            value=int(evaluation["shelter_exits"]),
+        ),
+        build_behavior_check(
+            RE_REST_AFTER_RETURN_CHECKS[2],
+            passed=bool(
+                float(evaluation["final_health"]) > 0.0
+                and int(evaluation["predator_contacts"]) <= 1
+            ),
+            value={
+                "final_health": float(evaluation["final_health"]),
+                "predator_contacts": int(evaluation["predator_contacts"]),
+            },
+        ),
+    )
+    return build_behavior_score(
+        stats=stats,
+        objective="Validate settling back into rest after a later return-to-shelter transition.",
+        checks=checks,
+        behavior_metrics=dict(evaluation),
+    )
+
 def _score_exposed_day_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
     """
     Score an exposed-day foraging episode and attach trace-derived diagnostics and a failure-mode label.
@@ -562,6 +718,9 @@ def _score_sleep_vs_exploration_conflict(
 
 __all__ = [
     "_score_continuous_survival_canonical",
+    "_score_continuous_survival_post_rest_continuation",
+    "_score_continuous_survival_re_rest_after_return",
+    "_score_continuous_survival_return_after_late_forage",
     "_score_exposed_day_foraging",
     "_score_food_deprivation",
     "_score_night_rest",

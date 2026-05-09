@@ -10,7 +10,11 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
-from spider_cortex_sim.ablations import BrainAblationConfig, canonical_ablation_configs
+from spider_cortex_sim.ablations import (
+    BrainAblationConfig,
+    canonical_ablation_configs,
+    resolve_ablation_configs,
+)
 from spider_cortex_sim.agent import BrainStep, SpiderBrain
 from spider_cortex_sim.curriculum import (
     CurriculumPhaseDefinition,
@@ -464,6 +468,1023 @@ class SpiderTrainingCurriculumTest(SpiderTrainingTestBase):
                     }
                 }
             },
+        )
+
+    def test_train_curriculum_replays_failed_check_scenario_within_phase(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=10)
+        criteria = PromotionCheckCriteria(
+            scenario="food_deprivation",
+            check_name="hunger_reduced",
+            required_pass_rate=1.0,
+        )
+        phase = CurriculumPhaseDefinition(
+            name="phase_hunger_replay",
+            training_scenarios=("food_deprivation", "open_field_foraging"),
+            promotion_scenarios=("food_deprivation",),
+            success_threshold=0.0,
+            max_episodes=3,
+            min_episodes=1,
+            skill_name="hunger_commitment",
+            promotion_check_specs=(criteria,),
+        )
+        scenario_calls: list[str] = []
+
+        def fake_run_episode(
+            episode_index: int,
+            *,
+            training: bool,
+            sample: bool,
+            render: bool,
+            capture_trace: bool,
+            debug_trace: bool,
+            scenario_name: str | None = None,
+        ):
+            del episode_index, training, sample, render, capture_trace, debug_trace
+            scenario_calls.append(str(scenario_name))
+            return self._fake_run_episode(
+                0,
+                training=True,
+                sample=True,
+                render=False,
+                capture_trace=False,
+                debug_trace=False,
+                scenario_name=scenario_name,
+            )
+
+        fail_payload = {
+            "summary": {
+                "scenario_success_rate": 1.0,
+                "episode_success_rate": 1.0,
+            },
+            "suite": {
+                "food_deprivation": {
+                    "checks": {
+                        "hunger_reduced": {"pass_rate": 0.0},
+                    },
+                }
+            },
+        }
+        pass_payload = {
+            "summary": {
+                "scenario_success_rate": 0.0,
+                "episode_success_rate": 0.0,
+            },
+            "suite": {
+                "food_deprivation": {
+                    "checks": {
+                        "hunger_reduced": {"pass_rate": 1.0},
+                    },
+                }
+            },
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim, "run_episode", side_effect=fake_run_episode
+        ), mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            side_effect=[(fail_payload, [], []), (pass_payload, [], [])],
+        ):
+            sim._execute_training_schedule(
+                episodes=3,
+                curriculum_profile="ecological_v1",
+            )
+
+        self.assertEqual(scenario_calls[:2], ["food_deprivation", "food_deprivation"])
+        curriculum = sim._latest_curriculum_summary
+        self.assertIsNotNone(curriculum)
+        phase_record = curriculum["phases"][0]
+        self.assertEqual(
+            phase_record["scenario_sequence"][:2],
+            ["food_deprivation", "food_deprivation"],
+        )
+        self.assertEqual(
+            phase_record["adaptive_replay_updates"],
+            [{"after_episode": 1, "failed_scenarios": ["food_deprivation"]}],
+        )
+
+    def test_execute_training_schedule_records_probe_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="post_rest_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 2
+        probe_dataset.to_summary.return_value = {
+            "episodes": 1,
+            "episode_ids": [1],
+            "samples": 2,
+            "teacher_metadata": {"source": "scripted_direct_policy_post_rest_probe"},
+            "targets": {"final_policy": 2, "action_center": 2, "valence": 0, "local_proposals": 0},
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.25}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe.assert_called_once()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(len(phase_record["probe_distillation_updates"]), 1)
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["status"],
+            "applied",
+        )
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_post_rest_inside_v1",
+        )
+
+    def test_execute_training_schedule_prefers_probe_sequence_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_sequence_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="late_cycle_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_return_after_late_forage_v1",),
+            promotion_scenarios=("continuous_survival_return_after_late_forage_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 6
+        probe_dataset.to_summary.return_value = {
+            "episodes": 1,
+            "episode_ids": [1],
+            "samples": 6,
+            "teacher_metadata": {"source": "scripted_direct_policy_post_rest_probe_sequence"},
+            "targets": {"final_policy": 6, "action_center": 6, "valence": 0, "local_proposals": 0},
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_sequence_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe_sequence, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.2}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe_sequence.assert_called_once()
+        collect_probe.assert_not_called()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_return_after_late_forage_v1",
+        )
+
+    def test_execute_training_schedule_prefers_probe_family_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_family_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="late_cycle_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 24
+        probe_dataset.to_summary.return_value = {
+            "episodes": 2,
+            "episode_ids": [1, 2],
+            "samples": 24,
+            "teacher_metadata": {
+                "source": "scripted_direct_policy_post_rest_probe_family"
+            },
+            "targets": {
+                "final_policy": 24,
+                "action_center": 24,
+                "valence": 0,
+                "local_proposals": 0,
+            },
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_family_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe_family, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_sequence_distillation_rollout",
+        ) as collect_probe_sequence, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.15}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe_family.assert_called_once()
+        collect_probe_sequence.assert_not_called()
+        collect_probe.assert_not_called()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_post_rest_inside_v1",
+        )
+
+    def test_execute_training_schedule_prefers_probe_handoff_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_handoff_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="late_cycle_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 24
+        probe_dataset.to_summary.return_value = {
+            "episodes": 2,
+            "episode_ids": [1, 2],
+            "samples": 24,
+            "teacher_metadata": {
+                "source": "scripted_direct_policy_post_rest_probe_handoff"
+            },
+            "targets": {
+                "final_policy": 24,
+                "action_center": 24,
+                "valence": 0,
+                "local_proposals": 0,
+            },
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_handoff_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe_handoff, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_family_distillation_rollout",
+        ) as collect_probe_family, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_sequence_distillation_rollout",
+        ) as collect_probe_sequence, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.12}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe_handoff.assert_called_once()
+        collect_probe_family.assert_not_called()
+        collect_probe_sequence.assert_not_called()
+        collect_probe.assert_not_called()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_post_rest_inside_v1",
+        )
+
+    def test_execute_training_schedule_prefers_probe_trajectory_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_trajectory_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="late_cycle_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 24
+        probe_dataset.to_summary.return_value = {
+            "episodes": 2,
+            "episode_ids": [1, 2],
+            "samples": 24,
+            "teacher_metadata": {
+                "source": "redirected_direct_policy_post_rest_probe_trajectory"
+            },
+            "targets": {
+                "final_policy": 24,
+                "action_center": 24,
+                "valence": 0,
+                "local_proposals": 0,
+            },
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trajectory_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe_trajectory, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_handoff_distillation_rollout",
+        ) as collect_probe_handoff, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_family_distillation_rollout",
+        ) as collect_probe_family, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_sequence_distillation_rollout",
+        ) as collect_probe_sequence, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.11}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe_trajectory.assert_called_once()
+        collect_probe_handoff.assert_not_called()
+        collect_probe_family.assert_not_called()
+        collect_probe_sequence.assert_not_called()
+        collect_probe.assert_not_called()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_post_rest_inside_v1",
+        )
+
+    def test_execute_training_schedule_prefers_probe_cycle_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_cycle_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="late_cycle_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 24
+        probe_dataset.to_summary.return_value = {
+            "episodes": 2,
+            "episode_ids": [1, 2],
+            "samples": 24,
+            "teacher_metadata": {
+                "source": "redirected_direct_policy_post_rest_probe_cycle"
+            },
+            "targets": {
+                "final_policy": 24,
+                "action_center": 24,
+                "valence": 0,
+                "local_proposals": 0,
+            },
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_cycle_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe_cycle, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trajectory_distillation_rollout",
+        ) as collect_probe_trajectory, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_handoff_distillation_rollout",
+        ) as collect_probe_handoff, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_family_distillation_rollout",
+        ) as collect_probe_family, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_sequence_distillation_rollout",
+        ) as collect_probe_sequence, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.10}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe_cycle.assert_called_once()
+        collect_probe_trajectory.assert_not_called()
+        collect_probe_handoff.assert_not_called()
+        collect_probe_family.assert_not_called()
+        collect_probe_sequence.assert_not_called()
+        collect_probe.assert_not_called()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_post_rest_inside_v1",
+        )
+
+    def test_execute_training_schedule_prefers_probe_trace_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_trace_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="late_cycle_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 32
+        probe_dataset.to_summary.return_value = {
+            "episodes": 2,
+            "episode_ids": [1, 2],
+            "samples": 32,
+            "teacher_metadata": {
+                "source": "redirected_direct_policy_post_rest_probe_trace"
+            },
+            "targets": {
+                "final_policy": 32,
+                "action_center": 32,
+                "valence": 0,
+                "local_proposals": 0,
+            },
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trace_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe_trace, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_cycle_distillation_rollout",
+        ) as collect_probe_cycle, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trajectory_distillation_rollout",
+        ) as collect_probe_trajectory, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_handoff_distillation_rollout",
+        ) as collect_probe_handoff, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_family_distillation_rollout",
+        ) as collect_probe_family, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_sequence_distillation_rollout",
+        ) as collect_probe_sequence, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.08}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe_trace.assert_called_once()
+        collect_probe_cycle.assert_not_called()
+        collect_probe_trajectory.assert_not_called()
+        collect_probe_handoff.assert_not_called()
+        collect_probe_family.assert_not_called()
+        collect_probe_sequence.assert_not_called()
+        collect_probe.assert_not_called()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_post_rest_inside_v1",
+        )
+
+    def test_execute_training_schedule_prefers_probe_rollout_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_rollout_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="late_cycle_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 18
+        probe_dataset.to_summary.return_value = {
+            "episodes": 2,
+            "episode_ids": [1, 2],
+            "samples": 18,
+            "teacher_metadata": {
+                "source": "redirected_direct_policy_post_rest_probe_rollout"
+            },
+            "targets": {
+                "final_policy": 18,
+                "action_center": 18,
+                "valence": 0,
+                "local_proposals": 0,
+            },
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_rollout_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe_rollout, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trace_distillation_rollout",
+        ) as collect_probe_trace, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_cycle_distillation_rollout",
+        ) as collect_probe_cycle, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trajectory_distillation_rollout",
+        ) as collect_probe_trajectory, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_handoff_distillation_rollout",
+        ) as collect_probe_handoff, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_family_distillation_rollout",
+        ) as collect_probe_family, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_sequence_distillation_rollout",
+        ) as collect_probe_sequence, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.07}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe_rollout.assert_called_once()
+        collect_probe_trace.assert_not_called()
+        collect_probe_cycle.assert_not_called()
+        collect_probe_trajectory.assert_not_called()
+        collect_probe_handoff.assert_not_called()
+        collect_probe_family.assert_not_called()
+        collect_probe_sequence.assert_not_called()
+        collect_probe.assert_not_called()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_post_rest_inside_v1",
+        )
+
+    def test_execute_training_schedule_prefers_probe_frontier_teacher_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_frontier_teacher_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="late_cycle_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 22
+        probe_dataset.to_summary.return_value = {
+            "episodes": 2,
+            "episode_ids": [1, 2],
+            "samples": 22,
+            "teacher_metadata": {
+                "source": "checkpoint_direct_policy_post_rest_probe_frontier_teacher"
+            },
+            "targets": {
+                "final_policy": 22,
+                "action_center": 22,
+                "valence": 0,
+                "local_proposals": 0,
+            },
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_frontier_teacher_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe_frontier, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_rollout_distillation_rollout",
+        ) as collect_probe_rollout, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trace_distillation_rollout",
+        ) as collect_probe_trace, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_cycle_distillation_rollout",
+        ) as collect_probe_cycle, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trajectory_distillation_rollout",
+        ) as collect_probe_trajectory, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_handoff_distillation_rollout",
+        ) as collect_probe_handoff, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_family_distillation_rollout",
+        ) as collect_probe_family, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_sequence_distillation_rollout",
+        ) as collect_probe_sequence, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.05}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe_frontier.assert_called_once()
+        collect_probe_rollout.assert_not_called()
+        collect_probe_trace.assert_not_called()
+        collect_probe_cycle.assert_not_called()
+        collect_probe_trajectory.assert_not_called()
+        collect_probe_handoff.assert_not_called()
+        collect_probe_family.assert_not_called()
+        collect_probe_sequence.assert_not_called()
+        collect_probe.assert_not_called()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_post_rest_inside_v1",
+        )
+
+    def test_execute_training_schedule_prefers_probe_replayable_teacher_distillation_updates(self) -> None:
+        sim = SpiderSimulation(
+            seed=13,
+            max_steps=10,
+            brain_config=resolve_ablation_configs(
+                [
+                    "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_replayable_teacher_distill_option_replay_policy"
+                ],
+                module_dropout=0.0,
+            )[0],
+        )
+        phase = CurriculumPhaseDefinition(
+            name="late_cycle_phase",
+            skill_name="post_rest_continuation",
+            training_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_scenarios=("continuous_survival_post_rest_inside_v1",),
+            promotion_check_specs=(),
+            success_threshold=1.0,
+            min_episodes=1,
+            max_episodes=1,
+        )
+        probe_dataset = mock.MagicMock()
+        probe_dataset.__len__.return_value = 22
+        probe_dataset.to_summary.return_value = {
+            "episodes": 1,
+            "episode_ids": [1],
+            "samples": 22,
+            "teacher_metadata": {
+                "source": "stateful_direct_policy_post_rest_probe_replayable_teacher"
+            },
+            "targets": {
+                "final_policy": 22,
+                "action_center": 22,
+                "valence": 0,
+                "local_proposals": 0,
+            },
+        }
+        with mock.patch.object(
+            SpiderSimulation,
+            "_resolve_curriculum_profile",
+            return_value=[phase],
+        ), mock.patch.object(
+            sim,
+            "run_episode",
+            side_effect=self._fake_run_episode,
+        ), mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_replayable_teacher_distillation_rollout",
+            return_value=probe_dataset,
+        ) as collect_probe_replayable, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_frontier_teacher_distillation_rollout",
+        ) as collect_probe_frontier, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_rollout_distillation_rollout",
+        ) as collect_probe_rollout, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trace_distillation_rollout",
+        ) as collect_probe_trace, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_cycle_distillation_rollout",
+        ) as collect_probe_cycle, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_trajectory_distillation_rollout",
+        ) as collect_probe_trajectory, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_handoff_distillation_rollout",
+        ) as collect_probe_handoff, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_family_distillation_rollout",
+        ) as collect_probe_family, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_sequence_distillation_rollout",
+        ) as collect_probe_sequence, mock.patch.object(
+            sim,
+            "collect_direct_policy_probe_distillation_rollout",
+        ) as collect_probe, mock.patch.object(
+            sim,
+            "_execute_distillation_phase",
+            return_value={"final_epoch": {"mean_total_loss": 0.05}},
+        ) as execute_probe, mock.patch.object(
+            sim,
+            "evaluate_behavior_suite",
+            return_value=(
+                {"summary": {"scenario_success_rate": 1.0, "episode_success_rate": 1.0}},
+                [],
+                [],
+            ),
+        ):
+            sim._execute_training_schedule(
+                episodes=1,
+                curriculum_profile="ecological_v1",
+            )
+
+        collect_probe_replayable.assert_called_once()
+        collect_probe_frontier.assert_not_called()
+        collect_probe_rollout.assert_not_called()
+        collect_probe_trace.assert_not_called()
+        collect_probe_cycle.assert_not_called()
+        collect_probe_trajectory.assert_not_called()
+        collect_probe_handoff.assert_not_called()
+        collect_probe_family.assert_not_called()
+        collect_probe_sequence.assert_not_called()
+        collect_probe.assert_not_called()
+        execute_probe.assert_called_once()
+        phase_record = sim._latest_curriculum_summary["phases"][0]
+        self.assertEqual(
+            phase_record["probe_distillation_updates"][0]["scenario_name"],
+            "continuous_survival_post_rest_inside_v1",
         )
 
     def test_train_curriculum_final_phase_absorbs_carried_budget(self) -> None:

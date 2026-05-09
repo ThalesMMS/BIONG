@@ -364,6 +364,9 @@ class WorldNavigationMixin:
         return terrain_at(self.map_template, pos)
 
     def is_walkable(self, pos: Tuple[int, int]) -> bool:
+        x, y = int(pos[0]), int(pos[1])
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return False
         return self.terrain_at(pos) != BLOCKED
 
     def is_lizard_walkable(self, pos: Tuple[int, int]) -> bool:

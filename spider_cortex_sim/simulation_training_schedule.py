@@ -74,7 +74,7 @@ from .curriculum import (
     resolve_curriculum_profile,
     validate_curriculum_profile,
 )
-from .distillation import DistillationConfig, DistillationDataset
+from .distillation import DistillationConfig, DistillationDataset, DistillationLossConfig
 from .export import (
     compact_aggregate,
     compact_behavior_payload,
@@ -107,6 +107,84 @@ from .simulation_helpers import EXPERIMENT_OF_RECORD_REGIME, CAPABILITY_PROBE_SC
 
 
 class SimulationTrainingScheduleMixin:
+    _DIRECT_POLICY_PROBE_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+    )
+    _DIRECT_POLICY_PROBE_SEQUENCE_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+        "continuous_survival_return_after_late_forage_v1",
+        "continuous_survival_re_rest_after_return_v1",
+    )
+    _DIRECT_POLICY_PROBE_FAMILY_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+        "continuous_survival_return_after_late_forage_v1",
+        "continuous_survival_re_rest_after_return_v1",
+    )
+    _DIRECT_POLICY_PROBE_HANDOFF_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+        "continuous_survival_return_after_late_forage_v1",
+        "continuous_survival_re_rest_after_return_v1",
+    )
+    _DIRECT_POLICY_PROBE_TRAJECTORY_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+        "continuous_survival_return_after_late_forage_v1",
+        "continuous_survival_re_rest_after_return_v1",
+    )
+    _DIRECT_POLICY_PROBE_CYCLE_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+        "continuous_survival_return_after_late_forage_v1",
+        "continuous_survival_re_rest_after_return_v1",
+    )
+    _DIRECT_POLICY_PROBE_TRACE_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+        "continuous_survival_return_after_late_forage_v1",
+        "continuous_survival_re_rest_after_return_v1",
+    )
+    _DIRECT_POLICY_PROBE_ROLLOUT_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+        "continuous_survival_return_after_late_forage_v1",
+        "continuous_survival_re_rest_after_return_v1",
+    )
+    _DIRECT_POLICY_PROBE_FRONTIER_TEACHER_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+        "continuous_survival_return_after_late_forage_v1",
+        "continuous_survival_re_rest_after_return_v1",
+    )
+    _DIRECT_POLICY_PROBE_REPLAYABLE_TEACHER_DISTILLATION_SCENARIOS = (
+        "continuous_survival_post_rest_inside_v1",
+        "continuous_survival_post_rest_entrance_v1",
+        "continuous_survival_return_after_late_forage_v1",
+        "continuous_survival_re_rest_after_return_v1",
+    )
+
+    @staticmethod
+    def _failed_training_scenarios_for_phase(
+        phase: CurriculumPhaseDefinition,
+        check_results: Dict[str, object],
+    ) -> list[str]:
+        training_scenarios = {
+            str(name)
+            for name in phase.training_scenarios
+        }
+        failed: list[str] = []
+        for scenario_name, scenario_results in check_results.items():
+            if str(scenario_name) not in training_scenarios:
+                continue
+            if not isinstance(scenario_results, dict):
+                continue
+            if any(not bool(result.get("passed", False)) for result in scenario_results.values()):
+                failed.append(str(scenario_name))
+        return failed
+
     def _execute_distillation_phase(
         self,
         *,
@@ -214,6 +292,585 @@ class SimulationTrainingScheduleMixin:
             "loss": distillation_config.loss.to_summary(),
             "history": epoch_summaries,
             "final_epoch": dict(epoch_summaries[-1]),
+        }
+
+    def _maybe_execute_direct_policy_probe_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_distillation",
+                False,
+            )
+        ):
+            return None
+        if str(scenario_name) not in self._DIRECT_POLICY_PROBE_DISTILLATION_SCENARIOS:
+            return None
+        dataset = self.collect_direct_policy_probe_distillation_rollout(
+            scenario_name=str(scenario_name),
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="scripted_direct_policy_post_rest_probe",
+                distillation_epochs=1,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=2.0,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
+        }
+
+    def _maybe_execute_direct_policy_probe_sequence_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_sequence_distillation",
+                False,
+            )
+        ):
+            return None
+        if (
+            str(scenario_name)
+            not in self._DIRECT_POLICY_PROBE_SEQUENCE_DISTILLATION_SCENARIOS
+        ):
+            return None
+        dataset = self.collect_direct_policy_probe_sequence_distillation_rollout(
+            scenario_name=str(scenario_name),
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="scripted_direct_policy_post_rest_probe_sequence",
+                distillation_epochs=2,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=2.5,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
+        }
+
+    def _maybe_execute_direct_policy_probe_family_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_family_distillation",
+                False,
+            )
+        ):
+            return None
+        if (
+            str(scenario_name)
+            not in self._DIRECT_POLICY_PROBE_FAMILY_DISTILLATION_SCENARIOS
+        ):
+            return None
+        dataset = self.collect_direct_policy_probe_family_distillation_rollout(
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="scripted_direct_policy_post_rest_probe_family",
+                distillation_epochs=2,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=3.0,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
+        }
+
+    def _maybe_execute_direct_policy_probe_handoff_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_handoff_distillation",
+                False,
+            )
+        ):
+            return None
+        if (
+            str(scenario_name)
+            not in self._DIRECT_POLICY_PROBE_HANDOFF_DISTILLATION_SCENARIOS
+        ):
+            return None
+        dataset = self.collect_direct_policy_probe_handoff_distillation_rollout(
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="scripted_direct_policy_post_rest_probe_handoff",
+                distillation_epochs=2,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=3.0,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
+        }
+
+    def _maybe_execute_direct_policy_probe_trajectory_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_trajectory_distillation",
+                False,
+            )
+        ):
+            return None
+        if (
+            str(scenario_name)
+            not in self._DIRECT_POLICY_PROBE_TRAJECTORY_DISTILLATION_SCENARIOS
+        ):
+            return None
+        dataset = self.collect_direct_policy_probe_trajectory_distillation_rollout(
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="redirected_direct_policy_post_rest_probe_trajectory",
+                distillation_epochs=2,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=3.0,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
+        }
+
+    def _maybe_execute_direct_policy_probe_cycle_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_cycle_distillation",
+                False,
+            )
+        ):
+            return None
+        if (
+            str(scenario_name)
+            not in self._DIRECT_POLICY_PROBE_CYCLE_DISTILLATION_SCENARIOS
+        ):
+            return None
+        dataset = self.collect_direct_policy_probe_cycle_distillation_rollout(
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="redirected_direct_policy_post_rest_probe_cycle",
+                distillation_epochs=2,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=3.0,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
+        }
+
+    def _maybe_execute_direct_policy_probe_trace_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_trace_distillation",
+                False,
+            )
+        ):
+            return None
+        if (
+            str(scenario_name)
+            not in self._DIRECT_POLICY_PROBE_TRACE_DISTILLATION_SCENARIOS
+        ):
+            return None
+        dataset = self.collect_direct_policy_probe_trace_distillation_rollout(
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="redirected_direct_policy_post_rest_probe_trace",
+                distillation_epochs=2,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=3.5,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
+        }
+
+    def _maybe_execute_direct_policy_probe_rollout_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_rollout_distillation",
+                False,
+            )
+        ):
+            return None
+        if (
+            str(scenario_name)
+            not in self._DIRECT_POLICY_PROBE_ROLLOUT_DISTILLATION_SCENARIOS
+        ):
+            return None
+        dataset = self.collect_direct_policy_probe_rollout_distillation_rollout(
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="redirected_direct_policy_post_rest_probe_rollout",
+                distillation_epochs=2,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=3.5,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
+        }
+
+    def _maybe_execute_direct_policy_probe_frontier_teacher_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_frontier_teacher_distillation",
+                False,
+            )
+        ):
+            return None
+        if (
+            str(scenario_name)
+            not in self._DIRECT_POLICY_PROBE_FRONTIER_TEACHER_DISTILLATION_SCENARIOS
+        ):
+            return None
+        dataset = self.collect_direct_policy_probe_frontier_teacher_distillation_rollout(
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="checkpoint_direct_policy_post_rest_probe_frontier_teacher",
+                distillation_epochs=2,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=3.5,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
+        }
+
+    def _maybe_execute_direct_policy_probe_replayable_teacher_distillation(
+        self,
+        *,
+        scenario_name: str,
+        after_episode: int,
+    ) -> Dict[str, object] | None:
+        if not bool(
+            getattr(
+                self.brain.config,
+                "direct_policy_post_rest_probe_replayable_teacher_distillation",
+                False,
+            )
+        ):
+            return None
+        if (
+            str(scenario_name)
+            not in self._DIRECT_POLICY_PROBE_REPLAYABLE_TEACHER_DISTILLATION_SCENARIOS
+        ):
+            return None
+        dataset = self.collect_direct_policy_probe_replayable_teacher_distillation_rollout(
+            episodes=1,
+            episode_start=int(after_episode),
+        )
+        if len(dataset) <= 0:
+            return {
+                "after_episode": int(after_episode),
+                "scenario_name": str(scenario_name),
+                "samples": 0,
+                "status": "no_teacher_samples",
+            }
+        run_summary = self._execute_distillation_phase(
+            dataset=dataset,
+            distillation_config=DistillationConfig(
+                teacher_checkpoint="stateful_direct_policy_post_rest_probe_replayable_teacher",
+                distillation_epochs=2,
+                temperature=1.0,
+                module_lr=float(self.brain.module_lr),
+                motor_lr=float(self.brain.motor_lr),
+                arbitration_lr=float(self.brain.arbitration_lr),
+                shuffle=False,
+                match_local_proposals=False,
+                loss=DistillationLossConfig(
+                    final_policy_weight=3.5,
+                    action_center_weight=0.0,
+                    valence_weight=0.0,
+                    proposal_weight=0.0,
+                ),
+            ),
+        )
+        self.brain.reset_hidden_states()
+        return {
+            "after_episode": int(after_episode),
+            "scenario_name": str(scenario_name),
+            "status": "applied",
+            "dataset": dataset.to_summary(),
+            "final_epoch": dict(run_summary["final_epoch"]),
         }
 
     def _set_training_regime_metadata(
@@ -419,6 +1076,9 @@ class SimulationTrainingScheduleMixin:
                 "final_metrics": {},
                 "final_check_results": {},
                 "promotion_reason": "",
+                "scenario_sequence": [],
+                "adaptive_replay_updates": [],
+                "probe_distillation_updates": [],
             }
             if allocated_episodes <= 0 or completed_episodes >= total_episodes:
                 phase_record["status"] = "skipped_no_budget"
@@ -426,12 +1086,17 @@ class SimulationTrainingScheduleMixin:
                 continue
 
             promoted = False
+            adaptive_replay_queue: list[str] = []
             for local_episode in range(allocated_episodes):
                 if completed_episodes >= total_episodes:
                     break
-                scenario_name = phase.training_scenarios[
-                    local_episode % len(phase.training_scenarios)
-                ]
+                if adaptive_replay_queue:
+                    scenario_name = adaptive_replay_queue.pop(0)
+                else:
+                    scenario_name = phase.training_scenarios[
+                        local_episode % len(phase.training_scenarios)
+                    ]
+                phase_record["scenario_sequence"].append(str(scenario_name))
                 self._set_training_episode_reflex_scale(
                     episode_index=completed_episodes,
                     total_episodes=total_episodes,
@@ -451,6 +1116,79 @@ class SimulationTrainingScheduleMixin:
                 training_history.append(stats)
                 completed_episodes += 1
                 phase_record["episodes_executed"] = int(local_episode + 1)
+                probe_distillation_update = (
+                    self._maybe_execute_direct_policy_probe_replayable_teacher_distillation(
+                        scenario_name=str(scenario_name),
+                        after_episode=completed_episodes,
+                    )
+                )
+                if probe_distillation_update is None:
+                    probe_distillation_update = (
+                    self._maybe_execute_direct_policy_probe_frontier_teacher_distillation(
+                        scenario_name=str(scenario_name),
+                        after_episode=completed_episodes,
+                    )
+                    )
+                if probe_distillation_update is None:
+                    probe_distillation_update = (
+                    self._maybe_execute_direct_policy_probe_rollout_distillation(
+                        scenario_name=str(scenario_name),
+                        after_episode=completed_episodes,
+                    )
+                    )
+                if probe_distillation_update is None:
+                    probe_distillation_update = (
+                    self._maybe_execute_direct_policy_probe_trace_distillation(
+                        scenario_name=str(scenario_name),
+                        after_episode=completed_episodes,
+                    )
+                    )
+                if probe_distillation_update is None:
+                    probe_distillation_update = (
+                        self._maybe_execute_direct_policy_probe_cycle_distillation(
+                            scenario_name=str(scenario_name),
+                            after_episode=completed_episodes,
+                        )
+                    )
+                if probe_distillation_update is None:
+                    probe_distillation_update = (
+                    self._maybe_execute_direct_policy_probe_trajectory_distillation(
+                        scenario_name=str(scenario_name),
+                        after_episode=completed_episodes,
+                    )
+                    )
+                if probe_distillation_update is None:
+                    probe_distillation_update = (
+                    self._maybe_execute_direct_policy_probe_handoff_distillation(
+                        scenario_name=str(scenario_name),
+                        after_episode=completed_episodes,
+                    )
+                    )
+                if probe_distillation_update is None:
+                    probe_distillation_update = (
+                    self._maybe_execute_direct_policy_probe_family_distillation(
+                        scenario_name=str(scenario_name),
+                        after_episode=completed_episodes,
+                    )
+                    )
+                if probe_distillation_update is None:
+                    probe_distillation_update = (
+                        self._maybe_execute_direct_policy_probe_sequence_distillation(
+                            scenario_name=str(scenario_name),
+                            after_episode=completed_episodes,
+                        )
+                    )
+                if probe_distillation_update is None:
+                    probe_distillation_update = (
+                        self._maybe_execute_direct_policy_probe_distillation(
+                            scenario_name=str(scenario_name),
+                            after_episode=completed_episodes,
+                        )
+                    )
+                if probe_distillation_update is not None:
+                    phase_record["probe_distillation_updates"].append(
+                        probe_distillation_update
+                    )
                 if checkpoint_callback is not None:
                     checkpoint_callback(completed_episodes)
                 if promoted or local_episode + 1 < phase.min_episodes:
@@ -498,6 +1236,21 @@ class SimulationTrainingScheduleMixin:
                     check["check_results"] = check_results
                     check["promotion_criteria_passed"] = bool(promotion_passed)
                     check["promotion_reason"] = promotion_reason
+                    if not promotion_passed:
+                        failed_scenarios = self._failed_training_scenarios_for_phase(
+                            phase,
+                            check_results,
+                        )
+                        adaptive_replay_queue = list(failed_scenarios)
+                        if failed_scenarios:
+                            phase_record["adaptive_replay_updates"].append(
+                                {
+                                    "after_episode": int(completed_episodes),
+                                    "failed_scenarios": list(failed_scenarios),
+                                }
+                            )
+                    else:
+                        adaptive_replay_queue = []
                 else:
                     promotion_passed = (
                         check["scenario_success_rate"] >= phase.success_threshold
@@ -505,6 +1258,7 @@ class SimulationTrainingScheduleMixin:
                     check["check_results"] = {}
                     check["promotion_criteria_passed"] = bool(promotion_passed)
                     check["promotion_reason"] = "threshold_fallback"
+                    adaptive_replay_queue = []
                 phase_record["promotion_checks"].append(check)
                 phase_record["final_metrics"] = dict(check)
                 phase_record["final_check_results"] = dict(check["check_results"])

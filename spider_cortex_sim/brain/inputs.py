@@ -11,6 +11,16 @@ from ..interfaces import (
     MODULE_INTERFACES,
     MOTOR_CONTEXT_INTERFACE,
 )
+from ..direct_policy_affordances import (
+    AFFORDANCE_SHELTER_ROLE_TO_INDEX,
+    AFFORDANCE_SHELTER_ROLE_NAMES,
+    DIRECT_POLICY_LOCAL_AFFORDANCE_ACTION_NAMES,
+    DIRECT_POLICY_LOCAL_AFFORDANCE_INPUT_DIM,
+    DIRECT_POLICY_LOCAL_GEODESIC_INPUT_DIM,
+    DIRECT_POLICY_LOCAL_TRANSITION_INPUT_DIM,
+    DIRECT_POLICY_LOCAL_TRANSITION_ROLLOUT_INPUT_DIM,
+    DIRECT_POLICY_LOCAL_SPATIAL_INPUT_DIM,
+)
 from ..modules import ModuleResult
 from ..nn import softmax
 from ..noise import _compute_execution_difficulty_core
@@ -26,6 +36,249 @@ class BrainInputMixin:
         """
         if self.module_bank is not None:
             self.module_bank.reset_hidden_states()
+        if self.true_monolithic_policy is not None and hasattr(
+            self.true_monolithic_policy,
+            "reset_hidden_state",
+        ):
+            self.true_monolithic_policy.reset_hidden_state()
+            if hasattr(self.true_monolithic_policy, "reset_event_memory"):
+                self.true_monolithic_policy.reset_event_memory()
+            self._direct_policy_hidden_reset_pending = True
+
+    def snapshot_direct_policy_hidden_state(self) -> np.ndarray | None:
+        if self.true_monolithic_policy is None or not hasattr(
+            self.true_monolithic_policy,
+            "get_hidden_state",
+        ):
+            return None
+        return np.asarray(self.true_monolithic_policy.get_hidden_state(), dtype=float).copy()
+
+    def restore_direct_policy_hidden_state(self, hidden_state: np.ndarray | None) -> None:
+        if hidden_state is None:
+            return
+        if self.true_monolithic_policy is None or not hasattr(
+            self.true_monolithic_policy,
+            "set_hidden_state",
+        ):
+            raise ValueError("Direct policy hidden-state restore requested for non-recurrent policy.")
+        self.true_monolithic_policy.set_hidden_state(hidden_state)
+
+    def snapshot_direct_policy_runtime_state(self) -> dict[str, object] | None:
+        if self.true_monolithic_policy is None:
+            return None
+        if hasattr(self.true_monolithic_policy, "get_runtime_state"):
+            runtime_state = self.true_monolithic_policy.get_runtime_state()
+            return dict(runtime_state) if isinstance(runtime_state, dict) else None
+        hidden_state = self.snapshot_direct_policy_hidden_state()
+        if hidden_state is None:
+            return None
+        return {"hidden_state": hidden_state}
+
+    def restore_direct_policy_runtime_state(
+        self,
+        runtime_state: dict[str, object] | None,
+    ) -> None:
+        if runtime_state is None or self.true_monolithic_policy is None:
+            return
+        if hasattr(self.true_monolithic_policy, "set_runtime_state"):
+            self.true_monolithic_policy.set_runtime_state(dict(runtime_state))
+            return
+        hidden_state = runtime_state.get("hidden_state")
+        if hidden_state is not None:
+            self.restore_direct_policy_hidden_state(
+                np.asarray(hidden_state, dtype=float)
+            )
+
+    def set_direct_policy_event_clock(self, tick: int) -> None:
+        if self.true_monolithic_policy is not None and hasattr(
+            self.true_monolithic_policy,
+            "set_event_clock",
+        ):
+            self.true_monolithic_policy.set_event_clock(int(tick))
+
+    def record_direct_policy_event(
+        self,
+        event_type: str,
+        *,
+        features: np.ndarray,
+        tick: int,
+    ) -> None:
+        if self.true_monolithic_policy is not None and hasattr(
+            self.true_monolithic_policy,
+            "record_event",
+        ):
+            self.true_monolithic_policy.record_event(
+                event_type,
+                features=np.asarray(features, dtype=float),
+                tick=int(tick),
+            )
+
+    def _build_direct_policy_local_affordance_input(
+        self,
+        observation: Dict[str, np.ndarray],
+    ) -> np.ndarray:
+        affordance_input = np.zeros(
+            DIRECT_POLICY_LOCAL_AFFORDANCE_INPUT_DIM,
+            dtype=float,
+        )
+        meta = observation.get("meta")
+        if not isinstance(meta, dict):
+            return affordance_input
+        current_role = str(meta.get("shelter_role", "outside"))
+        current_role_idx = AFFORDANCE_SHELTER_ROLE_TO_INDEX.get(current_role)
+        if current_role_idx is not None:
+            affordance_input[current_role_idx] = 1.0
+        current_role_level = float(meta.get("shelter_role_level", 0.0))
+        local_affordances = meta.get("local_affordances")
+        if not isinstance(local_affordances, dict):
+            return affordance_input
+        offset = len(AFFORDANCE_SHELTER_ROLE_NAMES)
+        for action_name in DIRECT_POLICY_LOCAL_AFFORDANCE_ACTION_NAMES:
+            affordance = local_affordances.get(action_name, {})
+            if not isinstance(affordance, dict):
+                affordance = {}
+            next_role = str(affordance.get("next_role", current_role))
+            next_role_level = float(
+                affordance.get("next_role_level", current_role_level)
+            )
+            affordance_input[offset + 0] = float(bool(affordance.get("blocked", False)))
+            affordance_input[offset + 1] = float(
+                np.clip(next_role_level - current_role_level, -1.0, 1.0)
+            )
+            affordance_input[offset + 2] = float(next_role == "entrance")
+            affordance_input[offset + 3] = float(next_role == "outside")
+            offset += 4
+        return affordance_input
+
+    def _build_direct_policy_local_spatial_input(
+        self,
+        observation: Dict[str, np.ndarray],
+    ) -> np.ndarray:
+        spatial_input = np.zeros(
+            DIRECT_POLICY_LOCAL_SPATIAL_INPUT_DIM,
+            dtype=float,
+        )
+        meta = observation.get("meta")
+        if not isinstance(meta, dict):
+            return spatial_input
+        local_patch = meta.get("local_spatial_patch")
+        if not isinstance(local_patch, dict):
+            return spatial_input
+        offset = 0
+        for key in ("blocked", "shelter_role_level", "food"):
+            values = local_patch.get(key, ())
+            if not isinstance(values, (list, tuple)):
+                values = ()
+            count = min(len(values), 9)
+            if count > 0:
+                spatial_input[offset : offset + count] = np.asarray(
+                    values[:count],
+                    dtype=float,
+                )
+            offset += 9
+        return spatial_input
+
+    def _build_direct_policy_local_transition_input(
+        self,
+        observation: Dict[str, np.ndarray],
+    ) -> np.ndarray:
+        transition_input = np.zeros(
+            DIRECT_POLICY_LOCAL_TRANSITION_INPUT_DIM,
+            dtype=float,
+        )
+        meta = observation.get("meta")
+        if not isinstance(meta, dict):
+            return transition_input
+        transitions = meta.get("local_transition_consequences")
+        if not isinstance(transitions, dict):
+            return transition_input
+        offset = 0
+        for action_name in DIRECT_POLICY_LOCAL_AFFORDANCE_ACTION_NAMES:
+            consequence = transitions.get(action_name, {})
+            if not isinstance(consequence, dict):
+                consequence = {}
+            transition_input[offset + 0] = float(
+                np.clip(consequence.get("food_dist_delta", 0.0), -1.0, 1.0)
+            )
+            transition_input[offset + 1] = float(
+                np.clip(consequence.get("shelter_dist_delta", 0.0), -1.0, 1.0)
+            )
+            transition_input[offset + 2] = float(
+                np.clip(consequence.get("predator_dist_delta", 0.0), -1.0, 1.0)
+            )
+            transition_input[offset + 3] = float(
+                bool(consequence.get("next_cell_has_food", False))
+            )
+            offset += 4
+        return transition_input
+
+    def _build_direct_policy_local_transition_rollout_input(
+        self,
+        observation: Dict[str, np.ndarray],
+    ) -> np.ndarray:
+        rollout_input = np.zeros(
+            DIRECT_POLICY_LOCAL_TRANSITION_ROLLOUT_INPUT_DIM,
+            dtype=float,
+        )
+        meta = observation.get("meta")
+        if not isinstance(meta, dict):
+            return rollout_input
+        rollouts = meta.get("local_transition_rollouts")
+        if not isinstance(rollouts, dict):
+            return rollout_input
+        offset = 0
+        for action_name in DIRECT_POLICY_LOCAL_AFFORDANCE_ACTION_NAMES:
+            rollout = rollouts.get(action_name, {})
+            if not isinstance(rollout, dict):
+                rollout = {}
+            rollout_input[offset + 0] = float(
+                np.clip(rollout.get("best_food_dist_delta", 0.0), -1.0, 1.0)
+            )
+            rollout_input[offset + 1] = float(
+                np.clip(rollout.get("best_shelter_dist_delta", 0.0), -1.0, 1.0)
+            )
+            rollout_input[offset + 2] = float(
+                np.clip(rollout.get("best_predator_dist_delta", 0.0), -1.0, 1.0)
+            )
+            rollout_input[offset + 3] = float(
+                bool(rollout.get("food_reachable_within_two_steps", False))
+            )
+            offset += 4
+        return rollout_input
+
+    def _build_direct_policy_local_geodesic_input(
+        self,
+        observation: Dict[str, np.ndarray],
+    ) -> np.ndarray:
+        geodesic_input = np.zeros(
+            DIRECT_POLICY_LOCAL_GEODESIC_INPUT_DIM,
+            dtype=float,
+        )
+        meta = observation.get("meta")
+        if not isinstance(meta, dict):
+            return geodesic_input
+        geodesics = meta.get("local_geodesic_consequences")
+        if not isinstance(geodesics, dict):
+            return geodesic_input
+        offset = 0
+        for action_name in DIRECT_POLICY_LOCAL_AFFORDANCE_ACTION_NAMES:
+            consequence = geodesics.get(action_name, {})
+            if not isinstance(consequence, dict):
+                consequence = {}
+            geodesic_input[offset + 0] = float(
+                np.clip(consequence.get("exit_geodesic_delta", 0.0), -1.0, 1.0)
+            )
+            geodesic_input[offset + 1] = float(
+                np.clip(consequence.get("deep_geodesic_delta", 0.0), -1.0, 1.0)
+            )
+            geodesic_input[offset + 2] = float(
+                bool(consequence.get("next_on_exit_target", False))
+            )
+            geodesic_input[offset + 3] = float(
+                bool(consequence.get("next_on_deep_target", False))
+            )
+            offset += 4
+        return geodesic_input
 
     def _build_monolithic_observation(self, observation: Dict[str, np.ndarray]) -> np.ndarray:
         """
@@ -41,7 +294,7 @@ class BrainInputMixin:
         Returns:
             np.ndarray: 1-D concatenated float vector containing the sanitized observations for all interfaces.
         """
-        return np.concatenate(
+        monolithic_observation = np.concatenate(
             [
                 np.nan_to_num(
                     np.asarray(observation[spec.observation_key], dtype=float),
@@ -53,6 +306,51 @@ class BrainInputMixin:
             ],
             axis=0,
         )
+        if bool(getattr(self.config, "direct_policy_local_affordance_inputs", False)):
+            monolithic_observation = np.concatenate(
+                [
+                    monolithic_observation,
+                    self._build_direct_policy_local_affordance_input(observation),
+                ],
+                axis=0,
+            )
+        if bool(getattr(self.config, "direct_policy_local_spatial_inputs", False)):
+            monolithic_observation = np.concatenate(
+                [
+                    monolithic_observation,
+                    self._build_direct_policy_local_spatial_input(observation),
+                ],
+                axis=0,
+            )
+        if bool(getattr(self.config, "direct_policy_local_transition_inputs", False)):
+            monolithic_observation = np.concatenate(
+                [
+                    monolithic_observation,
+                    self._build_direct_policy_local_transition_input(observation),
+                ],
+                axis=0,
+            )
+        if bool(
+            getattr(self.config, "direct_policy_local_transition_rollout_inputs", False)
+        ):
+            monolithic_observation = np.concatenate(
+                [
+                    monolithic_observation,
+                    self._build_direct_policy_local_transition_rollout_input(
+                        observation
+                    ),
+                ],
+                axis=0,
+            )
+        if bool(getattr(self.config, "direct_policy_local_geodesic_inputs", False)):
+            monolithic_observation = np.concatenate(
+                [
+                    monolithic_observation,
+                    self._build_direct_policy_local_geodesic_input(observation),
+                ],
+                axis=0,
+            )
+        return monolithic_observation
 
     def _build_action_input(self, module_results: List[ModuleResult], observation: Dict[str, np.ndarray]) -> np.ndarray:
         """
@@ -155,7 +453,11 @@ class BrainInputMixin:
             raise RuntimeError("Monolithic network unavailable for the configured architecture.")
         monolithic_observation = self._build_monolithic_observation(observation)
         if self.config.is_true_monolithic:
-            logits, _ = network.forward(monolithic_observation, store_cache=store_cache)
+            direct_forward = network.forward(
+                monolithic_observation,
+                store_cache=store_cache,
+            )
+            logits = np.asarray(direct_forward[0], dtype=float)
         else:
             logits = network.forward(
                 monolithic_observation,

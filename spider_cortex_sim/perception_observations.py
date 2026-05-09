@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from math import atan2, degrees
@@ -8,6 +9,7 @@ from typing import TYPE_CHECKING, Final, Iterable, Literal, Mapping, Protocol
 import numpy as np
 
 from .interfaces import (
+    ACTION_DELTAS,
     OBSERVATION_DIMS,
     OBSERVATION_INTERFACE_BY_KEY,
     AlertObservation,
@@ -32,6 +34,102 @@ from .perception_trace import trace_view
 
 if TYPE_CHECKING:
     from .world import SpiderWorld
+
+
+def _walkable_geodesic_distances(
+    world: "SpiderWorld",
+    targets: Iterable[tuple[int, int]],
+) -> dict[tuple[int, int], int]:
+    target_cells = {
+        tuple(cell)
+        for cell in targets
+        if world.is_walkable(tuple(cell))
+    }
+    if not target_cells:
+        return {}
+    distances: dict[tuple[int, int], int] = {}
+    frontier: deque[tuple[int, int]] = deque()
+    for cell in target_cells:
+        distances[cell] = 0
+        frontier.append(cell)
+    while frontier:
+        cell = frontier.popleft()
+        next_distance = distances[cell] + 1
+        for dx, dy in ACTION_DELTAS.values():
+            neighbor = (cell[0] + int(dx), cell[1] + int(dy))
+            if not world.is_walkable(neighbor) or neighbor in distances:
+                continue
+            distances[neighbor] = next_distance
+            frontier.append(neighbor)
+    return distances
+
+
+def _exit_corridor_targets(world: "SpiderWorld") -> set[tuple[int, int]]:
+    targets: set[tuple[int, int]] = set()
+    for entrance in world.shelter_entrance_cells:
+        for dx, dy in ACTION_DELTAS.values():
+            neighbor = (entrance[0] + int(dx), entrance[1] + int(dy))
+            if world.is_walkable(neighbor) and neighbor not in world.shelter_cells:
+                targets.add(neighbor)
+    return targets
+
+
+def _deep_shelter_targets(world: "SpiderWorld") -> set[tuple[int, int]]:
+    if world.shelter_deep_cells:
+        return set(world.shelter_deep_cells)
+    if world.shelter_interior_cells:
+        return set(world.shelter_interior_cells)
+    if world.shelter_entrance_cells:
+        return set(world.shelter_entrance_cells)
+    return {world.spider_pos()}
+
+
+def _geodesic_delta(
+    current_distance: int | None,
+    next_distance: int | None,
+) -> float:
+    if current_distance is None or next_distance is None:
+        return 0.0
+    return float(np.clip(float(current_distance - next_distance), -1.0, 1.0))
+
+
+def _cached_local_geodesics(
+    world: "SpiderWorld",
+) -> tuple[
+    set[tuple[int, int]],
+    set[tuple[int, int]],
+    dict[tuple[int, int], int],
+    dict[tuple[int, int], int],
+]:
+    cache_key = (
+        world.map_template_name,
+        world.width,
+        world.height,
+        tuple(sorted(world.shelter_entrance_cells)),
+        tuple(sorted(world.shelter_interior_cells)),
+        tuple(sorted(world.shelter_deep_cells)),
+        tuple(sorted(world.blocked_cells)),
+    )
+    cached = getattr(world, "_direct_policy_local_geodesic_cache", None)
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        return (
+            cached["exit_targets"],
+            cached["deep_targets"],
+            cached["exit_distances"],
+            cached["deep_distances"],
+        )
+    exit_targets = _exit_corridor_targets(world)
+    deep_targets = _deep_shelter_targets(world)
+    exit_distances = _walkable_geodesic_distances(world, exit_targets)
+    deep_distances = _walkable_geodesic_distances(world, deep_targets)
+    world._direct_policy_local_geodesic_cache = {
+        "key": cache_key,
+        "exit_targets": exit_targets,
+        "deep_targets": deep_targets,
+        "exit_distances": exit_distances,
+        "deep_distances": deep_distances,
+    }
+    return exit_targets, deep_targets, exit_distances, deep_distances
 
 def _unpack_trace_view(trace_view: Mapping[str, object]) -> tuple[float, float, float, float, float]:
     """
@@ -991,5 +1089,130 @@ def observe_world(world: "SpiderWorld") -> dict[str, object]:
         "predator_memory_age": world.state.predator_memory.age if world.state.predator_memory.target is not None else None,
         "shelter_memory_age": world.state.shelter_memory.age if world.state.shelter_memory.target is not None else None,
         "escape_memory_age": world.state.escape_memory.age if world.state.escape_memory.target is not None else None,
+    }
+    current_pos = world.spider_pos()
+    local_affordances: dict[str, dict[str, object]] = {}
+    local_transition_consequences: dict[str, dict[str, object]] = {}
+    local_transition_rollouts: dict[str, dict[str, object]] = {}
+    local_geodesic_consequences: dict[str, dict[str, object]] = {}
+    walkable_action_targets: dict[str, tuple[int, int]] = {}
+    (
+        exit_targets,
+        deep_targets,
+        exit_geodesic_distances,
+        deep_geodesic_distances,
+    ) = _cached_local_geodesics(world)
+    current_exit_distance = exit_geodesic_distances.get(current_pos)
+    current_deep_distance = deep_geodesic_distances.get(current_pos)
+    for action_name, (dx, dy) in ACTION_DELTAS.items():
+        next_pos = (current_pos[0] + int(dx), current_pos[1] + int(dy))
+        blocked = not world.is_walkable(next_pos)
+        resolved_pos = current_pos if blocked else next_pos
+        next_role = world.shelter_role_at(resolved_pos)
+        local_affordances[action_name] = {
+            "blocked": bool(blocked),
+            "next_role": next_role,
+            "next_role_level": float(world.shelter_role_level(resolved_pos)),
+        }
+        _, next_food_dist = world.nearest(world.food_positions, origin=resolved_pos)
+        _, next_shelter_dist = world.nearest(world.shelter_cells, origin=resolved_pos)
+        next_predator_dist = min(
+            (world.manhattan(resolved_pos, position) for position in predator_positions),
+            default=NO_TARGET_DISTANCE,
+        )
+        local_transition_consequences[action_name] = {
+            "food_dist_delta": float(np.clip(food_dist - next_food_dist, -1.0, 1.0)),
+            "shelter_dist_delta": float(
+                np.clip(shelter_dist - next_shelter_dist, -1.0, 1.0)
+            ),
+            "predator_dist_delta": float(
+                np.clip(next_predator_dist - diagnostic_predator_dist, -1.0, 1.0)
+            ),
+            "next_cell_has_food": bool((not blocked) and next_pos in world.food_positions),
+        }
+        if not blocked:
+            walkable_action_targets[action_name] = next_pos
+        next_exit_distance = exit_geodesic_distances.get(resolved_pos)
+        next_deep_distance = deep_geodesic_distances.get(resolved_pos)
+        local_geodesic_consequences[action_name] = {
+            "exit_geodesic_delta": _geodesic_delta(
+                current_exit_distance,
+                next_exit_distance,
+            ),
+            "deep_geodesic_delta": _geodesic_delta(
+                current_deep_distance,
+                next_deep_distance,
+            ),
+            "next_on_exit_target": bool((not blocked) and resolved_pos in exit_targets),
+            "next_on_deep_target": bool((not blocked) and resolved_pos in deep_targets),
+        }
+    obs["meta"]["local_affordances"] = local_affordances
+    obs["meta"]["local_transition_consequences"] = local_transition_consequences
+    for action_name in ACTION_DELTAS:
+        first_pos = walkable_action_targets.get(action_name)
+        if first_pos is None:
+            local_transition_rollouts[action_name] = {
+                "best_food_dist_delta": 0.0,
+                "best_shelter_dist_delta": 0.0,
+                "best_predator_dist_delta": 0.0,
+                "food_reachable_within_two_steps": False,
+            }
+            continue
+        best_food_delta = -1.0
+        best_shelter_delta = -1.0
+        best_predator_delta = -1.0
+        food_reachable_within_two_steps = bool(first_pos in world.food_positions)
+        for step_dx, step_dy in ACTION_DELTAS.values():
+            second_pos = (first_pos[0] + int(step_dx), first_pos[1] + int(step_dy))
+            if not world.is_walkable(second_pos):
+                second_pos = first_pos
+            _, second_food_dist = world.nearest(world.food_positions, origin=second_pos)
+            _, second_shelter_dist = world.nearest(
+                world.shelter_cells, origin=second_pos
+            )
+            second_predator_dist = min(
+                (world.manhattan(second_pos, position) for position in predator_positions),
+                default=NO_TARGET_DISTANCE,
+            )
+            best_food_delta = max(
+                best_food_delta,
+                float(np.clip(food_dist - second_food_dist, -1.0, 1.0)),
+            )
+            best_shelter_delta = max(
+                best_shelter_delta,
+                float(np.clip(shelter_dist - second_shelter_dist, -1.0, 1.0)),
+            )
+            best_predator_delta = max(
+                best_predator_delta,
+                float(np.clip(second_predator_dist - diagnostic_predator_dist, -1.0, 1.0)),
+            )
+            food_reachable_within_two_steps = (
+                food_reachable_within_two_steps or second_pos in world.food_positions
+            )
+        local_transition_rollouts[action_name] = {
+            "best_food_dist_delta": best_food_delta,
+            "best_shelter_dist_delta": best_shelter_delta,
+            "best_predator_dist_delta": best_predator_delta,
+            "food_reachable_within_two_steps": bool(food_reachable_within_two_steps),
+        }
+    obs["meta"]["local_transition_rollouts"] = local_transition_rollouts
+    obs["meta"]["local_geodesic_consequences"] = local_geodesic_consequences
+    patch_blocked: list[float] = []
+    patch_shelter_role_level: list[float] = []
+    patch_food: list[float] = []
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            patch_pos = (current_pos[0] + dx, current_pos[1] + dy)
+            patch_blocked.append(float(not world.is_walkable(patch_pos)))
+            if world.is_walkable(patch_pos):
+                patch_shelter_role_level.append(float(world.shelter_role_level(patch_pos)))
+                patch_food.append(float(patch_pos in world.food_positions))
+            else:
+                patch_shelter_role_level.append(0.0)
+                patch_food.append(0.0)
+    obs["meta"]["local_spatial_patch"] = {
+        "blocked": patch_blocked,
+        "shelter_role_level": patch_shelter_role_level,
+        "food": patch_food,
     }
     return obs

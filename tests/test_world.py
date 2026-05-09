@@ -37,6 +37,7 @@ from spider_cortex_sim.world import (
     _refresh_perception_for_active_scan,
     _scan_age_for_heading,
 )
+from spider_cortex_sim.perception_observations import _cached_local_geodesics
 
 from tests.fixtures.world import SpiderWorldTestBase
 
@@ -160,6 +161,31 @@ class SpiderWorldCoreTest(SpiderWorldTestBase):
         self.assertEqual((world.state.heading_dx, world.state.heading_dy), expected)
         self.assertEqual(obs["meta"]["heading"]["dx"], expected[0])
         self.assertEqual(obs["meta"]["heading"]["dy"], expected[1])
+
+    def test_is_walkable_rejects_out_of_bounds_cells(self) -> None:
+        world = SpiderWorld(seed=72, lizard_move_interval=999999)
+
+        self.assertFalse(world.is_walkable((-1, 0)))
+        self.assertFalse(world.is_walkable((0, -1)))
+        self.assertFalse(world.is_walkable((world.width, 0)))
+        self.assertFalse(world.is_walkable((0, world.height)))
+
+    def test_cached_local_geodesics_stay_within_map_bounds(self) -> None:
+        world = SpiderWorld(seed=74, lizard_move_interval=999999)
+        world.reset(seed=74)
+
+        _, _, exit_distances, deep_distances = _cached_local_geodesics(world)
+        traversable = {
+            (x, y)
+            for x in range(world.width)
+            for y in range(world.height)
+            if world.is_walkable((x, y))
+        }
+
+        self.assertLessEqual(len(exit_distances), len(traversable))
+        self.assertLessEqual(len(deep_distances), len(traversable))
+        self.assertTrue(set(exit_distances).issubset(traversable))
+        self.assertTrue(set(deep_distances).issubset(traversable))
 
     def test_successful_move_updates_heading_and_blocked_move_preserves_it(self) -> None:
         world = SpiderWorld(seed=73, lizard_move_interval=999999)

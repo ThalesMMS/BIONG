@@ -4,14 +4,22 @@ from typing import Dict, List
 
 import numpy as np
 
+from ..direct_policy_affordances import (
+    AFFORDANCE_GEOMETRY_TARGET_NAMES,
+    AFFORDANCE_SHELTER_COLUMN_NAMES,
+    AFFORDANCE_SHELTER_POSITION_NAMES,
+    AFFORDANCE_SHELTER_ROLE_NAMES,
+)
+from ..direct_policy_options import OPTION_NAMES, OPTION_TO_INDEX
 from ..distillation.dataset import (
     DistillationConfig,
     DistillationDataset,
     DistillationSample,
     DistillationLossConfig,
 )
-from ..interfaces import ACTION_CONTEXT_INTERFACE
+from ..interfaces import ACTION_CONTEXT_INTERFACE, ACTION_TO_INDEX
 from ..modules import ModuleResult
+from ..phase import PHASE_LABELS, PHASE_TO_INDEX
 from ..nn import one_hot, softmax
 from ..nn_utils import cross_entropy_loss, kl_divergence
 
@@ -19,6 +27,889 @@ from .types import BrainStep
 
 
 class BrainLearningMixin:
+    CONTINUATION_MARGIN = 1.0
+    POST_REST_SEQUENCE_REPLAY_PASSES = 6
+    POST_REST_SEQUENCE_REPLAY_LR_SCALE = 1.0
+
+    @staticmethod
+    def _post_rest_release_sequence_active(decision: BrainStep) -> bool:
+        return bool(
+            decision.teacher_action_target_stage in {
+                "handoff_release",
+                "handoff_hold",
+                "handoff_continue",
+                "handoff_forage_window",
+                "handoff_post_rest_forage",
+            }
+            or decision.teacher_option_target_stage in {
+                "option_reactivate",
+                "option_post_rest_inside",
+                "option_post_rest_forage",
+                "option_forage_window",
+            }
+        )
+
+    @staticmethod
+    def _continuation_auxiliary_weights(decision: BrainStep) -> Dict[str, float]:
+        weights = {
+            "teacher_action": 1.0,
+            "teacher_option": 1.0,
+            "phase": 0.2,
+            "affordance_blocked": 0.1,
+            "affordance_role": 0.1,
+            "geometry": 0.1,
+            "shelter_column": 0.1,
+            "shelter_position": 0.1,
+            "transition_prediction": 0.1,
+            "transition_rollout_prediction": 0.1,
+        }
+        scenario_name = str(decision.scenario_name or "")
+        if scenario_name in {
+            "continuous_survival_post_rest_inside_v1",
+            "continuous_survival_post_rest_entrance_v1",
+        }:
+            weights["teacher_action"] = 3.0
+            weights["teacher_option"] = 3.0
+            weights["phase"] = 0.6
+            weights["affordance_blocked"] = 0.2
+            weights["affordance_role"] = 0.2
+            weights["shelter_position"] = 0.2
+            weights["transition_prediction"] = 0.2
+            weights["transition_rollout_prediction"] = 0.2
+        elif scenario_name == "continuous_survival_return_after_late_forage_v1":
+            weights["phase"] = 0.6
+            weights["affordance_blocked"] = 0.2
+            weights["affordance_role"] = 0.2
+            weights["geometry"] = 0.2
+            weights["shelter_column"] = 0.2
+            weights["shelter_position"] = 0.3
+            weights["transition_prediction"] = 0.2
+            weights["transition_rollout_prediction"] = 0.2
+        elif scenario_name == "continuous_survival_re_rest_after_return_v1":
+            weights["phase"] = 0.6
+            weights["affordance_blocked"] = 0.2
+            weights["affordance_role"] = 0.2
+            weights["geometry"] = 0.2
+            weights["shelter_position"] = 0.2
+            weights["transition_prediction"] = 0.2
+            weights["transition_rollout_prediction"] = 0.2
+        if decision.teacher_action_target_stage in {
+            "handoff_release",
+            "handoff_hold",
+            "handoff_continue",
+            "handoff_forage_window",
+            "handoff_post_rest_forage",
+        }:
+            weights["teacher_action"] = max(weights["teacher_action"], 3.0)
+        if decision.teacher_option_target_stage in {
+            "option_reactivate",
+            "option_post_rest_inside",
+            "option_post_rest_forage",
+            "option_forage_window",
+        }:
+            weights["teacher_option"] = max(weights["teacher_option"], 3.0)
+        if decision.phase_target in {
+            "POST_REST_REACTIVATE",
+            "RECOVERED_IN_SHELTER",
+            "RETURN_AFTER_LATE_FORAGE",
+        }:
+            weights["phase"] = max(weights["phase"], 0.6)
+        return weights
+
+    @staticmethod
+    def _continuation_replay_focus_active(decision: BrainStep) -> bool:
+        continuation_weights = BrainLearningMixin._continuation_auxiliary_weights(
+            decision
+        )
+        if 0 <= int(decision.teacher_action_target_idx):
+            return True
+        if 0 <= int(decision.teacher_option_target_idx):
+            return True
+        if (
+            decision.phase_target_idx >= 0
+            and float(continuation_weights["phase"]) > 0.2
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _weighted_distribution(
+        size: int,
+        weights: Dict[int, float],
+        *,
+        epsilon: float = 1e-3,
+    ) -> np.ndarray:
+        probs = np.full(max(1, int(size)), float(epsilon), dtype=float)
+        for idx, weight in weights.items():
+            index = int(idx)
+            if 0 <= index < probs.size:
+                probs[index] += max(0.0, float(weight))
+        total = float(np.sum(probs))
+        if total <= 0.0 or not np.isfinite(total):
+            return np.full(probs.shape, 1.0 / max(1, probs.size), dtype=float)
+        return probs / total
+
+    def _post_rest_release_sequence_distillation_targets(
+        self,
+        decision: BrainStep,
+    ) -> Dict[str, np.ndarray]:
+        action_stage = str(decision.teacher_action_target_stage or "")
+        option_stage = str(decision.teacher_option_target_stage or "")
+
+        action_weights: Dict[int, float] = {}
+        if action_stage == "handoff_release":
+            action_weights = {
+                int(ACTION_TO_INDEX["MOVE_UP"]): 0.84,
+                int(ACTION_TO_INDEX["STAY"]): 0.08,
+                int(ACTION_TO_INDEX["MOVE_RIGHT"]): 0.06,
+                int(ACTION_TO_INDEX["MOVE_DOWN"]): 0.015,
+                int(ACTION_TO_INDEX["MOVE_LEFT"]): 0.005,
+            }
+        elif action_stage == "handoff_hold":
+            action_weights = {
+                int(ACTION_TO_INDEX["STAY"]): 0.82,
+                int(ACTION_TO_INDEX["MOVE_UP"]): 0.08,
+                int(ACTION_TO_INDEX["MOVE_DOWN"]): 0.06,
+                int(ACTION_TO_INDEX["MOVE_RIGHT"]): 0.03,
+                int(ACTION_TO_INDEX["MOVE_LEFT"]): 0.01,
+            }
+        elif action_stage == "handoff_continue":
+            action_weights = {
+                int(ACTION_TO_INDEX["MOVE_DOWN"]): 0.84,
+                int(ACTION_TO_INDEX["STAY"]): 0.08,
+                int(ACTION_TO_INDEX["MOVE_RIGHT"]): 0.04,
+                int(ACTION_TO_INDEX["MOVE_UP"]): 0.03,
+                int(ACTION_TO_INDEX["MOVE_LEFT"]): 0.01,
+            }
+        elif action_stage in {"handoff_forage_window", "handoff_post_rest_forage"}:
+            action_weights = {
+                int(ACTION_TO_INDEX["MOVE_RIGHT"]): 0.86,
+                int(ACTION_TO_INDEX["STAY"]): 0.07,
+                int(ACTION_TO_INDEX["MOVE_DOWN"]): 0.03,
+                int(ACTION_TO_INDEX["MOVE_UP"]): 0.03,
+                int(ACTION_TO_INDEX["MOVE_LEFT"]): 0.01,
+            }
+
+        option_weights: Dict[int, float] = {}
+        if option_stage in {"option_reactivate", "option_post_rest_inside"}:
+            option_weights = {
+                int(OPTION_TO_INDEX["POST_REST_REACTIVATE"]): 0.82,
+                int(OPTION_TO_INDEX["DEEPEN_IN_SHELTER"]): 0.08,
+                int(OPTION_TO_INDEX["FORAGE"]): 0.05,
+                int(OPTION_TO_INDEX["RETURN_TO_SHELTER"]): 0.03,
+                int(OPTION_TO_INDEX["REST"]): 0.01,
+                int(OPTION_TO_INDEX["ESCAPE"]): 0.01,
+            }
+        elif option_stage in {"option_post_rest_forage", "option_forage_window"}:
+            option_weights = {
+                int(OPTION_TO_INDEX["FORAGE"]): 0.82,
+                int(OPTION_TO_INDEX["POST_REST_REACTIVATE"]): 0.1,
+                int(OPTION_TO_INDEX["RETURN_TO_SHELTER"]): 0.04,
+                int(OPTION_TO_INDEX["DEEPEN_IN_SHELTER"]): 0.02,
+                int(OPTION_TO_INDEX["REST"]): 0.01,
+                int(OPTION_TO_INDEX["ESCAPE"]): 0.01,
+            }
+
+        phase_weights: Dict[int, float] = {}
+        if action_stage in {"handoff_release", "handoff_hold", "handoff_continue"}:
+            phase_weights = {
+                int(PHASE_TO_INDEX["POST_REST_REACTIVATE"]): 0.78,
+                int(PHASE_TO_INDEX["RECOVERED_IN_SHELTER"]): 0.16,
+                int(PHASE_TO_INDEX["RETURNING_TO_SHELTER"]): 0.03,
+                int(PHASE_TO_INDEX["INITIAL_FORAGE"]): 0.02,
+                int(PHASE_TO_INDEX["RESTING"]): 0.01,
+            }
+        elif action_stage in {"handoff_forage_window", "handoff_post_rest_forage"}:
+            phase_weights = {
+                int(PHASE_TO_INDEX["POST_REST_REACTIVATE"]): 0.56,
+                int(PHASE_TO_INDEX["LATE_FORAGE"]): 0.24,
+                int(PHASE_TO_INDEX["INITIAL_FORAGE"]): 0.1,
+                int(PHASE_TO_INDEX["RECOVERED_IN_SHELTER"]): 0.05,
+                int(PHASE_TO_INDEX["RETURN_AFTER_LATE_FORAGE"]): 0.03,
+                int(PHASE_TO_INDEX["RETURNING_TO_SHELTER"]): 0.02,
+            }
+
+        return {
+            "action": self._weighted_distribution(self.action_dim, action_weights),
+            "option": self._weighted_distribution(len(OPTION_NAMES), option_weights),
+            "phase": self._weighted_distribution(len(PHASE_LABELS), phase_weights),
+        }
+
+    @staticmethod
+    def _copy_continuation_targets(
+        source: BrainStep,
+        target: BrainStep,
+    ) -> None:
+        target.scenario_name = source.scenario_name
+        target.phase_target = source.phase_target
+        target.phase_target_idx = int(source.phase_target_idx)
+        target.affordance_blocked_targets = np.asarray(
+            source.affordance_blocked_targets,
+            dtype=float,
+        ).copy()
+        target.affordance_role_targets = np.asarray(
+            source.affordance_role_targets,
+            dtype=int,
+        ).copy()
+        target.geometry_targets = np.asarray(
+            source.geometry_targets,
+            dtype=float,
+        ).copy()
+        target.shelter_column_targets = np.asarray(
+            source.shelter_column_targets,
+            dtype=int,
+        ).copy()
+        target.shelter_position_targets = np.asarray(
+            source.shelter_position_targets,
+            dtype=int,
+        ).copy()
+        target.transition_prediction_targets = np.asarray(
+            source.transition_prediction_targets,
+            dtype=float,
+        ).copy()
+        target.transition_rollout_prediction_targets = np.asarray(
+            source.transition_rollout_prediction_targets,
+            dtype=float,
+        ).copy()
+        target.teacher_action_target_idx = int(source.teacher_action_target_idx)
+        target.teacher_action_target_name = source.teacher_action_target_name
+        target.teacher_action_target_stage = source.teacher_action_target_stage
+        target.teacher_option_target_idx = int(source.teacher_option_target_idx)
+        target.teacher_option_target_name = source.teacher_option_target_name
+        target.teacher_option_target_stage = source.teacher_option_target_stage
+
+    @staticmethod
+    def _continuation_margin_loss_and_grad(
+        logits: np.ndarray,
+        *,
+        target_idx: int,
+        competitor_idx: int,
+        margin: float,
+        scale: float,
+    ) -> tuple[float, np.ndarray]:
+        logits = np.asarray(logits, dtype=float)
+        grad = np.zeros_like(logits, dtype=float)
+        if (
+            logits.size <= 0
+            or target_idx < 0
+            or competitor_idx < 0
+            or target_idx >= logits.size
+            or competitor_idx >= logits.size
+            or target_idx == competitor_idx
+            or scale <= 0.0
+        ):
+            return 0.0, grad
+        gap = float(logits[target_idx] - logits[competitor_idx])
+        shortfall = float(margin - gap)
+        if shortfall <= 0.0:
+            return 0.0, grad
+        grad[target_idx] -= float(scale)
+        grad[competitor_idx] += float(scale)
+        return float(scale * shortfall), grad
+
+    def _true_monolithic_continuation_replay_step(
+        self,
+        source_decision: BrainStep,
+        *,
+        lr_scale: float,
+    ) -> Dict[str, float]:
+        observation = source_decision.observation
+        if not isinstance(observation, dict) or not observation:
+            return {
+                "active": False,
+                "loss": 0.0,
+                "grad_norm": 0.0,
+            }
+        replay_decision = self.act(
+            observation,
+            bus=None,
+            sample=False,
+            policy_mode="normal",
+            training=True,
+        )
+        self._copy_continuation_targets(source_decision, replay_decision)
+        continuation_weights = self._continuation_auxiliary_weights(replay_decision)
+        if bool(
+            getattr(
+                self.config,
+                "direct_policy_post_rest_release_sequence_replay_boost",
+                False,
+            )
+            and self._post_rest_release_sequence_active(replay_decision)
+        ):
+            continuation_weights = dict(continuation_weights)
+            continuation_weights["teacher_action"] = max(
+                float(continuation_weights["teacher_action"]),
+                6.0,
+            )
+            continuation_weights["teacher_option"] = max(
+                float(continuation_weights["teacher_option"]),
+                4.0,
+            )
+            continuation_weights["phase"] = max(
+                float(continuation_weights["phase"]),
+                0.8,
+            )
+        post_rest_sequence_distill_active = bool(
+            getattr(
+                self.config,
+                "direct_policy_post_rest_release_sequence_distill",
+                False,
+            )
+            and self._post_rest_release_sequence_active(replay_decision)
+        )
+        post_rest_sequence_distill_loss = 0.0
+        post_rest_sequence_distill_action_weight = 2.0
+        post_rest_sequence_distill_option_weight = 1.5
+        post_rest_sequence_distill_phase_weight = 1.0
+        sequence_distill_targets = (
+            self._post_rest_release_sequence_distillation_targets(replay_decision)
+            if post_rest_sequence_distill_active
+            else {}
+        )
+        handoff_teacher_grad_logits = np.zeros(self.action_dim, dtype=float)
+        handoff_option_teacher_grad_logits = np.zeros_like(
+            replay_decision.option_logits,
+            dtype=float,
+        )
+        phase_grad_logits = np.zeros_like(replay_decision.phase_logits, dtype=float)
+        affordance_blocked_grad_logits = np.zeros(self.action_dim, dtype=float)
+        affordance_role_grad_logits = np.zeros(0, dtype=float)
+        geometry_grad_logits = np.zeros(0, dtype=float)
+        shelter_column_grad_logits = np.zeros(0, dtype=float)
+        shelter_position_grad_logits = np.zeros(0, dtype=float)
+        total_loss = 0.0
+        continuation_margin_weight = float(
+            getattr(self.config, "direct_policy_continuation_margin_weight", 0.0)
+        )
+        stay_action_idx = int(ACTION_TO_INDEX["STAY"])
+        return_option_idx = int(OPTION_NAMES.index("RETURN_TO_SHELTER"))
+        initial_forage_phase_idx = int(PHASE_LABELS.index("INITIAL_FORAGE"))
+
+        if (
+            self.config.direct_policy_handoff_teacher
+            and 0 <= int(replay_decision.teacher_action_target_idx) < self.action_dim
+            and replay_decision.total_logits.size == self.action_dim
+        ):
+            teacher_target = one_hot(
+                int(replay_decision.teacher_action_target_idx),
+                self.action_dim,
+            )
+            handoff_teacher_weight = float(continuation_weights["teacher_action"])
+            total_loss += handoff_teacher_weight * cross_entropy_loss(
+                replay_decision.total_logits,
+                teacher_target,
+            )
+            handoff_teacher_grad_logits = handoff_teacher_weight * (
+                softmax(replay_decision.total_logits) - teacher_target
+            )
+            if continuation_margin_weight > 0.0:
+                margin_loss, margin_grad = self._continuation_margin_loss_and_grad(
+                    replay_decision.total_logits,
+                    target_idx=int(replay_decision.teacher_action_target_idx),
+                    competitor_idx=stay_action_idx,
+                    margin=self.CONTINUATION_MARGIN,
+                    scale=continuation_margin_weight * handoff_teacher_weight,
+                )
+                total_loss += float(margin_loss)
+                handoff_teacher_grad_logits += margin_grad
+        if (
+            post_rest_sequence_distill_active
+            and replay_decision.total_logits.size == self.action_dim
+        ):
+            action_distill_target = np.asarray(
+                sequence_distill_targets.get("action", ()),
+                dtype=float,
+            )
+            if action_distill_target.size == self.action_dim:
+                post_rest_sequence_distill_loss += (
+                    post_rest_sequence_distill_action_weight
+                    * cross_entropy_loss(
+                        replay_decision.total_logits,
+                        action_distill_target,
+                    )
+                )
+                handoff_teacher_grad_logits += (
+                    post_rest_sequence_distill_action_weight
+                    * (
+                        softmax(replay_decision.total_logits)
+                        - action_distill_target
+                    )
+                )
+        if (
+            self.config.direct_policy_handoff_option_teacher
+            and 0 <= int(replay_decision.teacher_option_target_idx) < len(OPTION_NAMES)
+            and replay_decision.option_logits.size == len(OPTION_NAMES)
+        ):
+            option_teacher_target = one_hot(
+                int(replay_decision.teacher_option_target_idx),
+                len(OPTION_NAMES),
+            )
+            handoff_option_teacher_weight = float(
+                continuation_weights["teacher_option"]
+            )
+            total_loss += handoff_option_teacher_weight * cross_entropy_loss(
+                replay_decision.option_logits,
+                option_teacher_target,
+            )
+            handoff_option_teacher_grad_logits = handoff_option_teacher_weight * (
+                softmax(replay_decision.option_logits) - option_teacher_target
+            )
+            if continuation_margin_weight > 0.0:
+                margin_loss, margin_grad = self._continuation_margin_loss_and_grad(
+                    replay_decision.option_logits,
+                    target_idx=int(replay_decision.teacher_option_target_idx),
+                    competitor_idx=return_option_idx,
+                    margin=self.CONTINUATION_MARGIN,
+                    scale=continuation_margin_weight
+                    * handoff_option_teacher_weight,
+                )
+                total_loss += float(margin_loss)
+                handoff_option_teacher_grad_logits += margin_grad
+        if (
+            post_rest_sequence_distill_active
+            and replay_decision.option_logits.size == len(OPTION_NAMES)
+        ):
+            option_distill_target = np.asarray(
+                sequence_distill_targets.get("option", ()),
+                dtype=float,
+            )
+            if option_distill_target.size == len(OPTION_NAMES):
+                post_rest_sequence_distill_loss += (
+                    post_rest_sequence_distill_option_weight
+                    * cross_entropy_loss(
+                        replay_decision.option_logits,
+                        option_distill_target,
+                    )
+                )
+                handoff_option_teacher_grad_logits += (
+                    post_rest_sequence_distill_option_weight
+                    * (
+                        softmax(replay_decision.option_logits)
+                        - option_distill_target
+                    )
+                )
+        if (
+            self.config.direct_policy_phase_head
+            and replay_decision.phase_target_idx >= 0
+            and replay_decision.phase_logits.size == len(PHASE_LABELS)
+        ):
+            phase_target = one_hot(
+                replay_decision.phase_target_idx,
+                len(PHASE_LABELS),
+            )
+            phase_weight = float(continuation_weights["phase"])
+            total_loss += phase_weight * cross_entropy_loss(
+                replay_decision.phase_logits,
+                phase_target,
+            )
+            phase_grad_logits = phase_weight * (
+                softmax(replay_decision.phase_logits) - phase_target
+            )
+            if continuation_margin_weight > 0.0:
+                margin_loss, margin_grad = self._continuation_margin_loss_and_grad(
+                    replay_decision.phase_logits,
+                    target_idx=int(replay_decision.phase_target_idx),
+                    competitor_idx=initial_forage_phase_idx,
+                    margin=self.CONTINUATION_MARGIN,
+                    scale=continuation_margin_weight * phase_weight,
+                )
+                total_loss += float(margin_loss)
+                phase_grad_logits += margin_grad
+        if (
+            post_rest_sequence_distill_active
+            and replay_decision.phase_logits.size == len(PHASE_LABELS)
+        ):
+            phase_distill_target = np.asarray(
+                sequence_distill_targets.get("phase", ()),
+                dtype=float,
+            )
+            if phase_distill_target.size == len(PHASE_LABELS):
+                post_rest_sequence_distill_loss += (
+                    post_rest_sequence_distill_phase_weight
+                    * cross_entropy_loss(
+                        replay_decision.phase_logits,
+                        phase_distill_target,
+                    )
+                )
+                phase_grad_logits += (
+                    post_rest_sequence_distill_phase_weight
+                    * (
+                        softmax(replay_decision.phase_logits)
+                        - phase_distill_target
+                    )
+                )
+        total_loss += float(post_rest_sequence_distill_loss)
+        if (
+            self.config.direct_policy_affordance_head
+            and replay_decision.affordance_blocked_logits.size == self.action_dim
+            and replay_decision.affordance_blocked_targets.size == self.action_dim
+        ):
+            affordance_blocked_target = np.clip(
+                np.asarray(replay_decision.affordance_blocked_targets, dtype=float),
+                0.0,
+                1.0,
+            )
+            blocked_probs = 1.0 / (
+                1.0
+                + np.exp(
+                    -np.asarray(
+                        replay_decision.affordance_blocked_logits,
+                        dtype=float,
+                    )
+                )
+            )
+            blocked_weight = float(continuation_weights["affordance_blocked"])
+            total_loss += float(
+                blocked_weight
+                * np.mean(
+                    -(
+                        affordance_blocked_target * np.log(blocked_probs + 1e-8)
+                        + (1.0 - affordance_blocked_target)
+                        * np.log(1.0 - blocked_probs + 1e-8)
+                    )
+                )
+            )
+            affordance_blocked_grad_logits = blocked_weight * (
+                blocked_probs - affordance_blocked_target
+            ) / max(1, self.action_dim)
+        affordance_role_dim = len(AFFORDANCE_SHELTER_ROLE_NAMES)
+        expected_affordance_role_size = self.action_dim * affordance_role_dim
+        if (
+            self.config.direct_policy_affordance_head
+            and replay_decision.affordance_role_logits.size
+            == expected_affordance_role_size
+            and replay_decision.affordance_role_targets.size == self.action_dim
+        ):
+            role_weight = float(continuation_weights["affordance_role"])
+            affordance_role_grad_matrix = np.zeros(
+                (self.action_dim, affordance_role_dim),
+                dtype=float,
+            )
+            role_logits_matrix = np.asarray(
+                replay_decision.affordance_role_logits,
+                dtype=float,
+            ).reshape(self.action_dim, affordance_role_dim)
+            role_targets = np.asarray(
+                replay_decision.affordance_role_targets,
+                dtype=int,
+            )
+            role_loss = 0.0
+            for action_idx, role_target_idx in enumerate(role_targets.tolist()):
+                role_target = one_hot(role_target_idx, affordance_role_dim)
+                role_loss += cross_entropy_loss(
+                    role_logits_matrix[action_idx],
+                    role_target,
+                )
+                affordance_role_grad_matrix[action_idx] = (
+                    softmax(role_logits_matrix[action_idx]) - role_target
+                )
+            total_loss += float(role_weight * role_loss / max(1, self.action_dim))
+            affordance_role_grad_logits = (
+                role_weight
+                * affordance_role_grad_matrix.reshape(-1)
+                / max(1, self.action_dim)
+            )
+        geometry_dim = len(AFFORDANCE_GEOMETRY_TARGET_NAMES)
+        expected_geometry_size = self.action_dim * geometry_dim
+        if (
+            self.config.direct_policy_geometry_head
+            and replay_decision.geometry_logits.size == expected_geometry_size
+            and replay_decision.geometry_targets.size == expected_geometry_size
+        ):
+            geometry_targets = np.clip(
+                np.asarray(replay_decision.geometry_targets, dtype=float),
+                0.0,
+                1.0,
+            )
+            geometry_probs = 1.0 / (
+                1.0 + np.exp(-np.asarray(replay_decision.geometry_logits, dtype=float))
+            )
+            geometry_weight = float(continuation_weights["geometry"])
+            total_loss += float(
+                geometry_weight
+                * np.mean(
+                    -(
+                        geometry_targets * np.log(geometry_probs + 1e-8)
+                        + (1.0 - geometry_targets)
+                        * np.log(1.0 - geometry_probs + 1e-8)
+                    )
+                )
+            )
+            geometry_grad_logits = geometry_weight * (
+                geometry_probs - geometry_targets
+            ) / max(1, expected_geometry_size)
+        shelter_column_dim = len(AFFORDANCE_SHELTER_COLUMN_NAMES)
+        expected_shelter_column_size = self.action_dim * shelter_column_dim
+        if (
+            self.config.direct_policy_shelter_column_head
+            and replay_decision.shelter_column_logits.size
+            == expected_shelter_column_size
+            and replay_decision.shelter_column_targets.size == self.action_dim
+        ):
+            shelter_column_weight = float(continuation_weights["shelter_column"])
+            shelter_column_grad_matrix = np.zeros(
+                (self.action_dim, shelter_column_dim),
+                dtype=float,
+            )
+            shelter_column_logits_matrix = np.asarray(
+                replay_decision.shelter_column_logits,
+                dtype=float,
+            ).reshape(self.action_dim, shelter_column_dim)
+            shelter_column_targets = np.asarray(
+                replay_decision.shelter_column_targets,
+                dtype=int,
+            )
+            shelter_column_loss = 0.0
+            for action_idx, column_target_idx in enumerate(
+                shelter_column_targets.tolist()
+            ):
+                shelter_column_target = one_hot(
+                    column_target_idx,
+                    shelter_column_dim,
+                )
+                shelter_column_loss += cross_entropy_loss(
+                    shelter_column_logits_matrix[action_idx],
+                    shelter_column_target,
+                )
+                shelter_column_grad_matrix[action_idx] = (
+                    softmax(shelter_column_logits_matrix[action_idx])
+                    - shelter_column_target
+                )
+            total_loss += float(
+                shelter_column_weight
+                * shelter_column_loss
+                / max(1, self.action_dim)
+            )
+            shelter_column_grad_logits = (
+                shelter_column_weight
+                * shelter_column_grad_matrix.reshape(-1)
+                / max(1, self.action_dim)
+            )
+        shelter_position_dim = len(AFFORDANCE_SHELTER_POSITION_NAMES)
+        expected_shelter_position_size = self.action_dim * shelter_position_dim
+        if (
+            self.config.direct_policy_shelter_position_head
+            and replay_decision.shelter_position_logits.size
+            == expected_shelter_position_size
+            and replay_decision.shelter_position_targets.size == self.action_dim
+        ):
+            shelter_position_weight = float(
+                continuation_weights["shelter_position"]
+            )
+            shelter_position_grad_matrix = np.zeros(
+                (self.action_dim, shelter_position_dim),
+                dtype=float,
+            )
+            shelter_position_logits_matrix = np.asarray(
+                replay_decision.shelter_position_logits,
+                dtype=float,
+            ).reshape(self.action_dim, shelter_position_dim)
+            shelter_position_targets = np.asarray(
+                replay_decision.shelter_position_targets,
+                dtype=int,
+            )
+            shelter_position_loss = 0.0
+            for action_idx, position_target_idx in enumerate(
+                shelter_position_targets.tolist()
+            ):
+                shelter_position_target = one_hot(
+                    position_target_idx,
+                    shelter_position_dim,
+                )
+                shelter_position_loss += cross_entropy_loss(
+                    shelter_position_logits_matrix[action_idx],
+                    shelter_position_target,
+                )
+                shelter_position_grad_matrix[action_idx] = (
+                    softmax(shelter_position_logits_matrix[action_idx])
+                    - shelter_position_target
+                )
+            total_loss += float(
+                shelter_position_weight
+                * shelter_position_loss
+                / max(1, self.action_dim)
+            )
+            shelter_position_grad_logits = (
+                shelter_position_weight
+                * shelter_position_grad_matrix.reshape(-1)
+                / max(1, self.action_dim)
+            )
+        transition_prediction_grad_logits = np.zeros(0, dtype=float)
+        transition_rollout_prediction_grad_logits = np.zeros(0, dtype=float)
+        if (
+            getattr(self.config, "direct_policy_transition_prediction_head", False)
+            and replay_decision.transition_prediction_logits.size
+            == replay_decision.transition_prediction_targets.size
+            and replay_decision.transition_prediction_logits.size > 0
+        ):
+            transition_prediction_targets = np.clip(
+                np.asarray(
+                    replay_decision.transition_prediction_targets,
+                    dtype=float,
+                ),
+                -1.0,
+                1.0,
+            )
+            transition_prediction_values = np.clip(
+                np.asarray(
+                    replay_decision.transition_prediction_logits,
+                    dtype=float,
+                ),
+                -1.0,
+                1.0,
+            )
+            transition_prediction_weight = float(
+                continuation_weights["transition_prediction"]
+            )
+            total_loss += float(
+                transition_prediction_weight
+                * np.mean(
+                    (transition_prediction_values - transition_prediction_targets)
+                    ** 2
+                )
+            )
+            transition_prediction_grad_logits = (
+                2.0
+                * transition_prediction_weight
+                * (transition_prediction_values - transition_prediction_targets)
+                / max(1, transition_prediction_values.size)
+            )
+        if (
+            getattr(
+                self.config,
+                "direct_policy_transition_rollout_prediction_head",
+                False,
+            )
+            and replay_decision.transition_rollout_prediction_logits.size
+            == replay_decision.transition_rollout_prediction_targets.size
+            and replay_decision.transition_rollout_prediction_logits.size > 0
+        ):
+            transition_rollout_prediction_targets = np.clip(
+                np.asarray(
+                    replay_decision.transition_rollout_prediction_targets,
+                    dtype=float,
+                ),
+                -1.0,
+                1.0,
+            )
+            transition_rollout_prediction_values = np.clip(
+                np.asarray(
+                    replay_decision.transition_rollout_prediction_logits,
+                    dtype=float,
+                ),
+                -1.0,
+                1.0,
+            )
+            transition_rollout_prediction_weight = float(
+                continuation_weights["transition_rollout_prediction"]
+            )
+            total_loss += float(
+                transition_rollout_prediction_weight
+                * np.mean(
+                    (
+                        transition_rollout_prediction_values
+                        - transition_rollout_prediction_targets
+                    )
+                    ** 2
+                )
+            )
+            transition_rollout_prediction_grad_logits = (
+                2.0
+                * transition_rollout_prediction_weight
+                * (
+                    transition_rollout_prediction_values
+                    - transition_rollout_prediction_targets
+                )
+                / max(1, transition_rollout_prediction_values.size)
+            )
+        grad_norm = float(
+            np.linalg.norm(
+                np.concatenate(
+                    [
+                        np.asarray(handoff_teacher_grad_logits, dtype=float),
+                        np.asarray(handoff_option_teacher_grad_logits, dtype=float),
+                        np.asarray(phase_grad_logits, dtype=float),
+                        np.asarray(affordance_blocked_grad_logits, dtype=float),
+                        np.asarray(affordance_role_grad_logits, dtype=float),
+                        np.asarray(geometry_grad_logits, dtype=float),
+                        np.asarray(shelter_column_grad_logits, dtype=float),
+                        np.asarray(shelter_position_grad_logits, dtype=float),
+                        np.asarray(transition_prediction_grad_logits, dtype=float),
+                        np.asarray(
+                            transition_rollout_prediction_grad_logits,
+                            dtype=float,
+                        ),
+                    ]
+                )
+            )
+        )
+        if grad_norm <= 0.0:
+            return {
+                "active": False,
+                "loss": float(total_loss),
+                "grad_norm": 0.0,
+            }
+        if self.TRUE_MONOLITHIC_POLICY_NAME not in self._frozen_modules:
+            backward_kwargs = {
+                "grad_policy_logits": handoff_teacher_grad_logits,
+                "grad_value": 0.0,
+                "lr": self.module_lr * float(lr_scale),
+            }
+            if (
+                self.config.direct_policy_handoff_option_teacher
+                and replay_decision.option_logits.size == len(OPTION_NAMES)
+            ):
+                backward_kwargs["grad_option_logits"] = (
+                    handoff_option_teacher_grad_logits
+                )
+            if (
+                hasattr(self.true_monolithic_policy, "phase_output_dim")
+                and phase_grad_logits.size > 0
+            ):
+                backward_kwargs["grad_phase_logits"] = phase_grad_logits
+            if hasattr(self.true_monolithic_policy, "affordance_role_dim"):
+                backward_kwargs["grad_affordance_blocked_logits"] = (
+                    affordance_blocked_grad_logits
+                )
+                if affordance_role_grad_logits.size > 0:
+                    backward_kwargs["grad_affordance_role_logits"] = (
+                        affordance_role_grad_logits
+                    )
+            if (
+                hasattr(self.true_monolithic_policy, "geometry_dim")
+                and geometry_grad_logits.size > 0
+            ):
+                backward_kwargs["grad_geometry_logits"] = geometry_grad_logits
+            if (
+                hasattr(self.true_monolithic_policy, "shelter_column_dim")
+                and shelter_column_grad_logits.size > 0
+            ):
+                backward_kwargs["grad_shelter_column_logits"] = (
+                    shelter_column_grad_logits
+                )
+            if (
+                hasattr(self.true_monolithic_policy, "shelter_position_dim")
+                and shelter_position_grad_logits.size > 0
+            ):
+                backward_kwargs["grad_shelter_position_logits"] = (
+                    shelter_position_grad_logits
+                )
+            if transition_prediction_grad_logits.size > 0:
+                backward_kwargs["grad_transition_prediction_logits"] = (
+                    transition_prediction_grad_logits
+                )
+            if transition_rollout_prediction_grad_logits.size > 0:
+                backward_kwargs["grad_transition_rollout_prediction_logits"] = (
+                    transition_rollout_prediction_grad_logits
+                )
+            self.true_monolithic_policy.backward(**backward_kwargs)
+        return {
+            "active": True,
+            "loss": float(total_loss),
+            "grad_norm": grad_norm,
+        }
+
     @staticmethod
     def _normalized_teacher_probs(
         teacher_probs: np.ndarray,
@@ -757,18 +1648,681 @@ class BrainLearningMixin:
             value_grad = decision.value - td_target
             module_credit_weights = {self.TRUE_MONOLITHIC_POLICY_NAME: 1.0}
             entropy = -float(np.sum(decision.policy * np.log(decision.policy + 1e-8)))
+            handoff_teacher_loss = 0.0
+            handoff_teacher_grad_norm = 0.0
+            handoff_teacher_weight = 0.0
+            handoff_teacher_grad_logits = np.zeros(self.action_dim, dtype=float)
+            handoff_option_teacher_loss = 0.0
+            handoff_option_teacher_grad_norm = 0.0
+            handoff_option_teacher_weight = 0.0
+            handoff_option_teacher_grad_logits = np.zeros_like(
+                decision.option_logits,
+                dtype=float,
+            )
+            continuation_weights = self._continuation_auxiliary_weights(decision)
+            post_rest_sequence_replay_boost_active = bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_release_sequence_replay_boost",
+                    False,
+                )
+                and self._post_rest_release_sequence_active(decision)
+            )
+            if post_rest_sequence_replay_boost_active:
+                continuation_weights = dict(continuation_weights)
+                continuation_weights["teacher_action"] = max(
+                    float(continuation_weights["teacher_action"]),
+                    6.0,
+                )
+                continuation_weights["teacher_option"] = max(
+                    float(continuation_weights["teacher_option"]),
+                    4.0,
+                )
+                continuation_weights["phase"] = max(
+                    float(continuation_weights["phase"]),
+                    0.8,
+                )
+            post_rest_sequence_distill_active = bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_release_sequence_distill",
+                    False,
+                )
+                and self._post_rest_release_sequence_active(decision)
+            )
+            post_rest_sequence_distill_loss = 0.0
+            post_rest_sequence_distill_action_loss = 0.0
+            post_rest_sequence_distill_option_loss = 0.0
+            post_rest_sequence_distill_phase_loss = 0.0
+            post_rest_sequence_distill_action_weight = 2.0
+            post_rest_sequence_distill_option_weight = 1.5
+            post_rest_sequence_distill_phase_weight = 1.0
+            sequence_distill_targets = (
+                self._post_rest_release_sequence_distillation_targets(decision)
+                if post_rest_sequence_distill_active
+                else {}
+            )
+            continuation_margin_weight = float(
+                getattr(self.config, "direct_policy_continuation_margin_weight", 0.0)
+            )
+            continuation_margin_loss = 0.0
+            continuation_margin_grad_norm = 0.0
+            stay_action_idx = int(ACTION_TO_INDEX["STAY"])
+            return_option_idx = int(OPTION_NAMES.index("RETURN_TO_SHELTER"))
+            initial_forage_phase_idx = int(PHASE_LABELS.index("INITIAL_FORAGE"))
+            if (
+                self.config.direct_policy_handoff_teacher
+                and 0 <= int(decision.teacher_action_target_idx) < self.action_dim
+                and decision.total_logits.size == self.action_dim
+            ):
+                teacher_target = one_hot(
+                    int(decision.teacher_action_target_idx),
+                    self.action_dim,
+                )
+                handoff_teacher_weight = float(continuation_weights["teacher_action"])
+                handoff_teacher_loss = handoff_teacher_weight * cross_entropy_loss(
+                    decision.total_logits,
+                    teacher_target,
+                )
+                handoff_teacher_grad_logits = handoff_teacher_weight * (
+                    softmax(decision.total_logits) - teacher_target
+                )
+                if continuation_margin_weight > 0.0:
+                    margin_loss, margin_grad = self._continuation_margin_loss_and_grad(
+                        decision.total_logits,
+                        target_idx=int(decision.teacher_action_target_idx),
+                        competitor_idx=stay_action_idx,
+                        margin=self.CONTINUATION_MARGIN,
+                        scale=continuation_margin_weight * handoff_teacher_weight,
+                    )
+                    continuation_margin_loss += float(margin_loss)
+                    handoff_teacher_grad_logits += margin_grad
+            if (
+                post_rest_sequence_distill_active
+                and decision.total_logits.size == self.action_dim
+            ):
+                action_distill_target = np.asarray(
+                    sequence_distill_targets.get("action", ()),
+                    dtype=float,
+                )
+                if action_distill_target.size == self.action_dim:
+                    post_rest_sequence_distill_action_loss = (
+                        post_rest_sequence_distill_action_weight
+                        * cross_entropy_loss(
+                            decision.total_logits,
+                            action_distill_target,
+                        )
+                    )
+                    post_rest_sequence_distill_loss += (
+                        post_rest_sequence_distill_action_loss
+                    )
+                    handoff_teacher_grad_logits += (
+                        post_rest_sequence_distill_action_weight
+                        * (softmax(decision.total_logits) - action_distill_target)
+                    )
+                handoff_teacher_grad_norm = float(
+                    np.linalg.norm(handoff_teacher_grad_logits)
+                )
+            if (
+                self.config.direct_policy_handoff_option_teacher
+                and 0 <= int(decision.teacher_option_target_idx) < len(OPTION_NAMES)
+                and decision.option_logits.size == len(OPTION_NAMES)
+            ):
+                option_teacher_target = one_hot(
+                    int(decision.teacher_option_target_idx),
+                    len(OPTION_NAMES),
+                )
+                handoff_option_teacher_weight = float(
+                    continuation_weights["teacher_option"]
+                )
+                handoff_option_teacher_loss = (
+                    handoff_option_teacher_weight
+                    * cross_entropy_loss(
+                        decision.option_logits,
+                        option_teacher_target,
+                    )
+                )
+                handoff_option_teacher_grad_logits = (
+                    handoff_option_teacher_weight
+                    * (softmax(decision.option_logits) - option_teacher_target)
+                )
+                if continuation_margin_weight > 0.0:
+                    margin_loss, margin_grad = self._continuation_margin_loss_and_grad(
+                        decision.option_logits,
+                        target_idx=int(decision.teacher_option_target_idx),
+                        competitor_idx=return_option_idx,
+                        margin=self.CONTINUATION_MARGIN,
+                        scale=continuation_margin_weight
+                        * handoff_option_teacher_weight,
+                    )
+                    continuation_margin_loss += float(margin_loss)
+                    handoff_option_teacher_grad_logits += margin_grad
+            if (
+                post_rest_sequence_distill_active
+                and decision.option_logits.size == len(OPTION_NAMES)
+            ):
+                option_distill_target = np.asarray(
+                    sequence_distill_targets.get("option", ()),
+                    dtype=float,
+                )
+                if option_distill_target.size == len(OPTION_NAMES):
+                    post_rest_sequence_distill_option_loss = (
+                        post_rest_sequence_distill_option_weight
+                        * cross_entropy_loss(
+                            decision.option_logits,
+                            option_distill_target,
+                        )
+                    )
+                    post_rest_sequence_distill_loss += (
+                        post_rest_sequence_distill_option_loss
+                    )
+                    handoff_option_teacher_grad_logits += (
+                        post_rest_sequence_distill_option_weight
+                        * (softmax(decision.option_logits) - option_distill_target)
+                    )
+                handoff_option_teacher_grad_norm = float(
+                    np.linalg.norm(handoff_option_teacher_grad_logits)
+                )
+            phase_loss = 0.0
+            phase_grad_norm = 0.0
+            phase_grad_logits = np.zeros_like(decision.phase_logits, dtype=float)
+            if (
+                self.config.direct_policy_phase_head
+                and decision.phase_target_idx >= 0
+                and decision.phase_logits.size == len(PHASE_LABELS)
+            ):
+                phase_target = one_hot(decision.phase_target_idx, len(PHASE_LABELS))
+                phase_weight = float(continuation_weights["phase"])
+                phase_loss = phase_weight * cross_entropy_loss(
+                    decision.phase_logits,
+                    phase_target,
+                )
+                phase_grad_logits = phase_weight * (
+                    softmax(decision.phase_logits) - phase_target
+                )
+                if continuation_margin_weight > 0.0:
+                    margin_loss, margin_grad = self._continuation_margin_loss_and_grad(
+                        decision.phase_logits,
+                        target_idx=int(decision.phase_target_idx),
+                        competitor_idx=initial_forage_phase_idx,
+                        margin=self.CONTINUATION_MARGIN,
+                        scale=continuation_margin_weight * phase_weight,
+                    )
+                    continuation_margin_loss += float(margin_loss)
+                    phase_grad_logits += margin_grad
+            if (
+                post_rest_sequence_distill_active
+                and decision.phase_logits.size == len(PHASE_LABELS)
+            ):
+                phase_distill_target = np.asarray(
+                    sequence_distill_targets.get("phase", ()),
+                    dtype=float,
+                )
+                if phase_distill_target.size == len(PHASE_LABELS):
+                    post_rest_sequence_distill_phase_loss = (
+                        post_rest_sequence_distill_phase_weight
+                        * cross_entropy_loss(
+                            decision.phase_logits,
+                            phase_distill_target,
+                        )
+                    )
+                    post_rest_sequence_distill_loss += (
+                        post_rest_sequence_distill_phase_loss
+                    )
+                    phase_grad_logits += (
+                        post_rest_sequence_distill_phase_weight
+                        * (softmax(decision.phase_logits) - phase_distill_target)
+                    )
+                phase_grad_norm = float(np.linalg.norm(phase_grad_logits))
+            continuation_margin_grad_norm = float(
+                np.linalg.norm(
+                    np.concatenate(
+                        [
+                            np.asarray(handoff_teacher_grad_logits, dtype=float),
+                            np.asarray(handoff_option_teacher_grad_logits, dtype=float),
+                            np.asarray(phase_grad_logits, dtype=float),
+                        ]
+                    )
+                )
+            )
+            affordance_blocked_loss = 0.0
+            affordance_blocked_grad_norm = 0.0
+            affordance_blocked_grad_logits = np.zeros(
+                self.action_dim,
+                dtype=float,
+            )
+            if (
+                self.config.direct_policy_affordance_head
+                and decision.affordance_blocked_logits.size == self.action_dim
+                and decision.affordance_blocked_targets.size == self.action_dim
+            ):
+                affordance_blocked_target = np.clip(
+                    np.asarray(decision.affordance_blocked_targets, dtype=float),
+                    0.0,
+                    1.0,
+                )
+                blocked_probs = 1.0 / (
+                    1.0 + np.exp(-np.asarray(decision.affordance_blocked_logits, dtype=float))
+                )
+                blocked_weight = float(continuation_weights["affordance_blocked"])
+                affordance_blocked_loss = float(
+                    blocked_weight
+                    * np.mean(
+                        -(
+                            affordance_blocked_target * np.log(blocked_probs + 1e-8)
+                            + (1.0 - affordance_blocked_target)
+                            * np.log(1.0 - blocked_probs + 1e-8)
+                        )
+                    )
+                )
+                affordance_blocked_grad_logits = blocked_weight * (
+                    blocked_probs - affordance_blocked_target
+                ) / max(1, self.action_dim)
+                affordance_blocked_grad_norm = float(
+                    np.linalg.norm(affordance_blocked_grad_logits)
+                )
+            affordance_role_loss = 0.0
+            affordance_role_grad_norm = 0.0
+            affordance_role_grad_logits = np.zeros(
+                0,
+                dtype=float,
+            )
+            affordance_role_dim = len(AFFORDANCE_SHELTER_ROLE_NAMES)
+            expected_affordance_role_size = self.action_dim * affordance_role_dim
+            if (
+                self.config.direct_policy_affordance_head
+                and decision.affordance_role_logits.size
+                == expected_affordance_role_size
+                and decision.affordance_role_targets.size == self.action_dim
+            ):
+                role_weight = float(continuation_weights["affordance_role"])
+                affordance_role_grad_matrix = np.zeros(
+                    (self.action_dim, affordance_role_dim),
+                    dtype=float,
+                )
+                role_logits_matrix = np.asarray(
+                    decision.affordance_role_logits,
+                    dtype=float,
+                ).reshape(self.action_dim, affordance_role_dim)
+                role_targets = np.asarray(
+                    decision.affordance_role_targets,
+                    dtype=int,
+                )
+                for action_idx, role_target_idx in enumerate(role_targets.tolist()):
+                    role_target = one_hot(role_target_idx, affordance_role_dim)
+                    affordance_role_loss += cross_entropy_loss(
+                        role_logits_matrix[action_idx],
+                        role_target,
+                    )
+                    affordance_role_grad_matrix[action_idx] = (
+                        softmax(role_logits_matrix[action_idx]) - role_target
+                    )
+                affordance_role_loss = float(
+                    role_weight * affordance_role_loss / max(1, self.action_dim)
+                )
+                affordance_role_grad_logits = (
+                    role_weight
+                    * affordance_role_grad_matrix.reshape(-1)
+                    / max(1, self.action_dim)
+                )
+                affordance_role_grad_norm = float(
+                    np.linalg.norm(affordance_role_grad_logits)
+                )
+            geometry_loss = 0.0
+            geometry_grad_norm = 0.0
+            geometry_grad_logits = np.zeros(0, dtype=float)
+            geometry_dim = len(AFFORDANCE_GEOMETRY_TARGET_NAMES)
+            expected_geometry_size = self.action_dim * geometry_dim
+            if (
+                self.config.direct_policy_geometry_head
+                and decision.geometry_logits.size == expected_geometry_size
+                and decision.geometry_targets.size == expected_geometry_size
+            ):
+                geometry_targets = np.clip(
+                    np.asarray(decision.geometry_targets, dtype=float),
+                    0.0,
+                    1.0,
+                )
+                geometry_probs = 1.0 / (
+                    1.0 + np.exp(-np.asarray(decision.geometry_logits, dtype=float))
+                )
+                geometry_weight = float(continuation_weights["geometry"])
+                geometry_loss = float(
+                    geometry_weight
+                    * np.mean(
+                        -(
+                            geometry_targets * np.log(geometry_probs + 1e-8)
+                            + (1.0 - geometry_targets)
+                            * np.log(1.0 - geometry_probs + 1e-8)
+                        )
+                    )
+                )
+                geometry_grad_logits = geometry_weight * (
+                    geometry_probs - geometry_targets
+                ) / max(1, expected_geometry_size)
+                geometry_grad_norm = float(np.linalg.norm(geometry_grad_logits))
+            shelter_column_loss = 0.0
+            shelter_column_grad_norm = 0.0
+            shelter_column_grad_logits = np.zeros(0, dtype=float)
+            shelter_column_dim = len(AFFORDANCE_SHELTER_COLUMN_NAMES)
+            expected_shelter_column_size = self.action_dim * shelter_column_dim
+            if (
+                self.config.direct_policy_shelter_column_head
+                and decision.shelter_column_logits.size
+                == expected_shelter_column_size
+                and decision.shelter_column_targets.size == self.action_dim
+            ):
+                shelter_column_weight = float(
+                    continuation_weights["shelter_column"]
+                )
+                shelter_column_grad_matrix = np.zeros(
+                    (self.action_dim, shelter_column_dim),
+                    dtype=float,
+                )
+                shelter_column_logits_matrix = np.asarray(
+                    decision.shelter_column_logits,
+                    dtype=float,
+                ).reshape(self.action_dim, shelter_column_dim)
+                shelter_column_targets = np.asarray(
+                    decision.shelter_column_targets,
+                    dtype=int,
+                )
+                for action_idx, column_target_idx in enumerate(
+                    shelter_column_targets.tolist()
+                ):
+                    shelter_column_target = one_hot(
+                        column_target_idx,
+                        shelter_column_dim,
+                    )
+                    shelter_column_loss += cross_entropy_loss(
+                        shelter_column_logits_matrix[action_idx],
+                        shelter_column_target,
+                    )
+                    shelter_column_grad_matrix[action_idx] = (
+                        softmax(shelter_column_logits_matrix[action_idx])
+                        - shelter_column_target
+                    )
+                shelter_column_loss = float(
+                    shelter_column_weight
+                    * shelter_column_loss
+                    / max(1, self.action_dim)
+                )
+                shelter_column_grad_logits = (
+                    shelter_column_weight
+                    * shelter_column_grad_matrix.reshape(-1)
+                    / max(1, self.action_dim)
+                )
+                shelter_column_grad_norm = float(
+                    np.linalg.norm(shelter_column_grad_logits)
+                )
+            shelter_position_loss = 0.0
+            shelter_position_grad_norm = 0.0
+            shelter_position_grad_logits = np.zeros(0, dtype=float)
+            shelter_position_dim = len(AFFORDANCE_SHELTER_POSITION_NAMES)
+            expected_shelter_position_size = self.action_dim * shelter_position_dim
+            if (
+                self.config.direct_policy_shelter_position_head
+                and decision.shelter_position_logits.size
+                == expected_shelter_position_size
+                and decision.shelter_position_targets.size == self.action_dim
+            ):
+                shelter_position_weight = float(
+                    continuation_weights["shelter_position"]
+                )
+                shelter_position_grad_matrix = np.zeros(
+                    (self.action_dim, shelter_position_dim),
+                    dtype=float,
+                )
+                shelter_position_logits_matrix = np.asarray(
+                    decision.shelter_position_logits,
+                    dtype=float,
+                ).reshape(self.action_dim, shelter_position_dim)
+                shelter_position_targets = np.asarray(
+                    decision.shelter_position_targets,
+                    dtype=int,
+                )
+                for action_idx, position_target_idx in enumerate(
+                    shelter_position_targets.tolist()
+                ):
+                    shelter_position_target = one_hot(
+                        position_target_idx,
+                        shelter_position_dim,
+                    )
+                    shelter_position_loss += cross_entropy_loss(
+                        shelter_position_logits_matrix[action_idx],
+                        shelter_position_target,
+                    )
+                    shelter_position_grad_matrix[action_idx] = (
+                        softmax(shelter_position_logits_matrix[action_idx])
+                        - shelter_position_target
+                    )
+                shelter_position_loss = float(
+                    shelter_position_weight
+                    * shelter_position_loss
+                    / max(1, self.action_dim)
+                )
+                shelter_position_grad_logits = (
+                    shelter_position_weight
+                    * shelter_position_grad_matrix.reshape(-1)
+                    / max(1, self.action_dim)
+                )
+                shelter_position_grad_norm = float(
+                    np.linalg.norm(shelter_position_grad_logits)
+                )
+            transition_prediction_loss = 0.0
+            transition_prediction_grad_norm = 0.0
+            transition_prediction_grad_logits = np.zeros(0, dtype=float)
+            transition_rollout_prediction_loss = 0.0
+            transition_rollout_prediction_grad_norm = 0.0
+            transition_rollout_prediction_grad_logits = np.zeros(0, dtype=float)
+            if (
+                getattr(self.config, "direct_policy_transition_prediction_head", False)
+                and decision.transition_prediction_logits.size
+                == decision.transition_prediction_targets.size
+                and decision.transition_prediction_logits.size > 0
+            ):
+                transition_prediction_targets = np.clip(
+                    np.asarray(decision.transition_prediction_targets, dtype=float),
+                    -1.0,
+                    1.0,
+                )
+                transition_prediction_values = np.clip(
+                    np.asarray(decision.transition_prediction_logits, dtype=float),
+                    -1.0,
+                    1.0,
+                )
+                transition_prediction_weight = float(
+                    continuation_weights["transition_prediction"]
+                )
+                transition_prediction_loss = float(
+                    transition_prediction_weight
+                    * np.mean(
+                        (transition_prediction_values - transition_prediction_targets)
+                        ** 2
+                    )
+                )
+                transition_prediction_grad_logits = (
+                    2.0
+                    * transition_prediction_weight
+                    * (transition_prediction_values - transition_prediction_targets)
+                    / max(1, transition_prediction_values.size)
+                )
+                transition_prediction_grad_norm = float(
+                    np.linalg.norm(transition_prediction_grad_logits)
+                )
+            if (
+                getattr(
+                    self.config,
+                    "direct_policy_transition_rollout_prediction_head",
+                    False,
+                )
+                and decision.transition_rollout_prediction_logits.size
+                == decision.transition_rollout_prediction_targets.size
+                and decision.transition_rollout_prediction_logits.size > 0
+            ):
+                transition_rollout_prediction_targets = np.clip(
+                    np.asarray(
+                        decision.transition_rollout_prediction_targets,
+                        dtype=float,
+                    ),
+                    -1.0,
+                    1.0,
+                )
+                transition_rollout_prediction_values = np.clip(
+                    np.asarray(
+                        decision.transition_rollout_prediction_logits,
+                        dtype=float,
+                    ),
+                    -1.0,
+                    1.0,
+                )
+                transition_rollout_prediction_weight = float(
+                    continuation_weights["transition_rollout_prediction"]
+                )
+                transition_rollout_prediction_loss = float(
+                    transition_rollout_prediction_weight
+                    * np.mean(
+                        (
+                            transition_rollout_prediction_values
+                            - transition_rollout_prediction_targets
+                        )
+                        ** 2
+                    )
+                )
+                transition_rollout_prediction_grad_logits = (
+                    2.0
+                    * transition_rollout_prediction_weight
+                    * (
+                        transition_rollout_prediction_values
+                        - transition_rollout_prediction_targets
+                    )
+                    / max(1, transition_rollout_prediction_values.size)
+                )
+                transition_rollout_prediction_grad_norm = float(
+                    np.linalg.norm(transition_rollout_prediction_grad_logits)
+                )
             true_monolithic_grad = np.concatenate(
                 [
-                    np.asarray(grad_policy_logits, dtype=float),
+                    np.asarray(
+                        grad_policy_logits + handoff_teacher_grad_logits,
+                        dtype=float,
+                    ),
                     np.array([value_grad], dtype=float),
+                    np.asarray(phase_grad_logits, dtype=float),
+                    np.asarray(affordance_blocked_grad_logits, dtype=float),
+                    np.asarray(affordance_role_grad_logits, dtype=float),
+                    np.asarray(geometry_grad_logits, dtype=float),
+                    np.asarray(shelter_column_grad_logits, dtype=float),
+                    np.asarray(shelter_position_grad_logits, dtype=float),
+                    np.asarray(transition_prediction_grad_logits, dtype=float),
+                    np.asarray(
+                        transition_rollout_prediction_grad_logits,
+                        dtype=float,
+                    ),
                 ]
             )
             if self.TRUE_MONOLITHIC_POLICY_NAME not in self._frozen_modules:
-                self.true_monolithic_policy.backward(
-                    grad_policy_logits=grad_policy_logits,
-                    grad_value=value_grad,
-                    lr=self.module_lr,
+                backward_kwargs = {
+                    "grad_policy_logits": (
+                        np.asarray(grad_policy_logits, dtype=float)
+                        + handoff_teacher_grad_logits
+                    ),
+                    "grad_value": value_grad,
+                    "lr": self.module_lr,
+                }
+                if (
+                    self.config.direct_policy_handoff_option_teacher
+                    and decision.option_logits.size == len(OPTION_NAMES)
+                ):
+                    backward_kwargs["grad_option_logits"] = (
+                        handoff_option_teacher_grad_logits
+                    )
+                if (
+                    hasattr(self.true_monolithic_policy, "phase_output_dim")
+                    and phase_grad_logits.size > 0
+                ):
+                    backward_kwargs["grad_phase_logits"] = phase_grad_logits
+                if hasattr(self.true_monolithic_policy, "affordance_role_dim"):
+                    backward_kwargs["grad_affordance_blocked_logits"] = (
+                        affordance_blocked_grad_logits
+                    )
+                    if affordance_role_grad_logits.size > 0:
+                        backward_kwargs["grad_affordance_role_logits"] = (
+                            affordance_role_grad_logits
+                        )
+                if (
+                    hasattr(self.true_monolithic_policy, "geometry_dim")
+                    and geometry_grad_logits.size > 0
+                ):
+                    backward_kwargs["grad_geometry_logits"] = geometry_grad_logits
+                if (
+                    hasattr(self.true_monolithic_policy, "shelter_column_dim")
+                    and shelter_column_grad_logits.size > 0
+                ):
+                    backward_kwargs["grad_shelter_column_logits"] = (
+                        shelter_column_grad_logits
+                    )
+                if (
+                    hasattr(self.true_monolithic_policy, "shelter_position_dim")
+                    and shelter_position_grad_logits.size > 0
+                ):
+                    backward_kwargs["grad_shelter_position_logits"] = (
+                        shelter_position_grad_logits
+                    )
+                if transition_prediction_grad_logits.size > 0:
+                    backward_kwargs["grad_transition_prediction_logits"] = (
+                        transition_prediction_grad_logits
+                    )
+                if transition_rollout_prediction_grad_logits.size > 0:
+                    backward_kwargs["grad_transition_rollout_prediction_logits"] = (
+                        transition_rollout_prediction_grad_logits
+                    )
+                self.true_monolithic_policy.backward(**backward_kwargs)
+            continuation_replay_passes_applied = 0
+            continuation_replay_total_loss = 0.0
+            continuation_replay_total_grad_norm = 0.0
+            continuation_replay_passes = int(
+                getattr(
+                    self.config,
+                    "direct_policy_continuation_replay_passes",
+                    0,
                 )
+            )
+            continuation_replay_lr_scale = float(
+                getattr(
+                    self.config,
+                    "direct_policy_continuation_replay_lr_scale",
+                    0.0,
+                )
+            )
+            if post_rest_sequence_replay_boost_active:
+                continuation_replay_passes = max(
+                    continuation_replay_passes,
+                    self.POST_REST_SEQUENCE_REPLAY_PASSES,
+                )
+                continuation_replay_lr_scale = max(
+                    continuation_replay_lr_scale,
+                    self.POST_REST_SEQUENCE_REPLAY_LR_SCALE,
+                )
+            if (
+                continuation_replay_passes > 0
+                and continuation_replay_lr_scale > 0.0
+                and self._continuation_replay_focus_active(decision)
+            ):
+                for _ in range(continuation_replay_passes):
+                    replay_stats = self._true_monolithic_continuation_replay_step(
+                        decision,
+                        lr_scale=continuation_replay_lr_scale,
+                    )
+                    if not bool(replay_stats.get("active", False)):
+                        continue
+                    continuation_replay_passes_applied += 1
+                    continuation_replay_total_loss += float(
+                        replay_stats.get("loss", 0.0)
+                    )
+                    continuation_replay_total_grad_norm += float(
+                        replay_stats.get("grad_norm", 0.0)
+                    )
             module_gradient_norms = {
                 self.TRUE_MONOLITHIC_POLICY_NAME: float(
                     0.0
@@ -783,6 +2337,126 @@ class BrainLearningMixin:
                 "value": float(decision.value),
                 "next_value": float(next_value),
                 "entropy": entropy,
+                "handoff_teacher_loss": float(handoff_teacher_loss),
+                "handoff_teacher_grad_norm": float(handoff_teacher_grad_norm),
+                "handoff_teacher_weight": float(handoff_teacher_weight),
+                "handoff_teacher_target_idx": int(decision.teacher_action_target_idx),
+                "handoff_teacher_active": bool(
+                    decision.teacher_action_target_idx >= 0
+                ),
+                "handoff_option_teacher_loss": float(
+                    handoff_option_teacher_loss
+                ),
+                "handoff_option_teacher_grad_norm": float(
+                    handoff_option_teacher_grad_norm
+                ),
+                "handoff_option_teacher_weight": float(
+                    handoff_option_teacher_weight
+                ),
+                "handoff_option_teacher_target_idx": int(
+                    decision.teacher_option_target_idx
+                ),
+                "handoff_option_teacher_active": bool(
+                    decision.teacher_option_target_idx >= 0
+                ),
+                "phase_loss": float(phase_loss),
+                "phase_weight": float(continuation_weights["phase"]),
+                "phase_grad_norm": float(phase_grad_norm),
+                "phase_target": (
+                    ""
+                    if decision.phase_target is None
+                    else str(decision.phase_target)
+                ),
+                "phase_prediction": (
+                    ""
+                    if decision.phase_prediction is None
+                    else str(decision.phase_prediction)
+                ),
+                "phase_prediction_confidence": float(
+                    decision.phase_prediction_confidence
+                ),
+                "continuation_weight_profile": dict(continuation_weights),
+                "post_rest_sequence_replay_boost_active": bool(
+                    post_rest_sequence_replay_boost_active
+                ),
+                "post_rest_sequence_distill_active": bool(
+                    post_rest_sequence_distill_active
+                ),
+                "post_rest_sequence_distill_loss": float(
+                    post_rest_sequence_distill_loss
+                ),
+                "post_rest_sequence_distill_action_loss": float(
+                    post_rest_sequence_distill_action_loss
+                ),
+                "post_rest_sequence_distill_option_loss": float(
+                    post_rest_sequence_distill_option_loss
+                ),
+                "post_rest_sequence_distill_phase_loss": float(
+                    post_rest_sequence_distill_phase_loss
+                ),
+                "continuation_margin_weight": float(continuation_margin_weight),
+                "continuation_margin_loss": float(continuation_margin_loss),
+                "continuation_margin_grad_norm": float(
+                    continuation_margin_grad_norm
+                ),
+                "continuation_replay_passes_configured": int(
+                    continuation_replay_passes
+                ),
+                "continuation_replay_passes_applied": int(
+                    continuation_replay_passes_applied
+                ),
+                "continuation_replay_lr_scale": float(
+                    continuation_replay_lr_scale
+                ),
+                "continuation_replay_total_loss": float(
+                    continuation_replay_total_loss
+                ),
+                "continuation_replay_total_grad_norm": float(
+                    continuation_replay_total_grad_norm
+                ),
+                "affordance_blocked_loss": float(affordance_blocked_loss),
+                "affordance_blocked_weight": float(
+                    continuation_weights["affordance_blocked"]
+                ),
+                "affordance_blocked_grad_norm": float(
+                    affordance_blocked_grad_norm
+                ),
+                "affordance_role_loss": float(affordance_role_loss),
+                "affordance_role_weight": float(
+                    continuation_weights["affordance_role"]
+                ),
+                "affordance_role_grad_norm": float(affordance_role_grad_norm),
+                "geometry_loss": float(geometry_loss),
+                "geometry_weight": float(continuation_weights["geometry"]),
+                "geometry_grad_norm": float(geometry_grad_norm),
+                "shelter_column_loss": float(shelter_column_loss),
+                "shelter_column_weight": float(
+                    continuation_weights["shelter_column"]
+                ),
+                "shelter_column_grad_norm": float(shelter_column_grad_norm),
+                "shelter_position_loss": float(shelter_position_loss),
+                "shelter_position_weight": float(
+                    continuation_weights["shelter_position"]
+                ),
+                "shelter_position_grad_norm": float(shelter_position_grad_norm),
+                "transition_prediction_loss": float(
+                    transition_prediction_loss
+                ),
+                "transition_prediction_weight": float(
+                    continuation_weights["transition_prediction"]
+                ),
+                "transition_prediction_grad_norm": float(
+                    transition_prediction_grad_norm
+                ),
+                "transition_rollout_prediction_loss": float(
+                    transition_rollout_prediction_loss
+                ),
+                "transition_rollout_prediction_weight": float(
+                    continuation_weights["transition_rollout_prediction"]
+                ),
+                "transition_rollout_prediction_grad_norm": float(
+                    transition_rollout_prediction_grad_norm
+                ),
                 "aux_modules": 0.0,
                 "arbitration_value": 0.0,
                 "arbitration_value_grad": 0.0,

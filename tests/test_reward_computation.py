@@ -215,6 +215,28 @@ class RewardComputationCoreTest(RewardComputationModuleTestBase):
 
         self.assertFalse(result)
 
+    def test_compute_predator_threat_ignores_tiny_contact_residue_inside_shelter(self) -> None:
+        world = SpiderWorld(
+            seed=1,
+            lizard_move_interval=999999,
+            map_template="central_burrow",
+            operational_profile=self._profile_with_reward_updates(predator_threat_smell_threshold=0.0),
+        )
+        world.reset(seed=1)
+        world.state.x, world.state.y = 5, 7
+        self.assertEqual(world.shelter_role_at(world.spider_pos()), "deep")
+        world.lizard.x, world.lizard.y = 8, 8
+        world.state.recent_contact = 0.001
+        world.state.recent_pain = 0.05
+
+        result = compute_predator_threat(
+            world,
+            prev_predator_visible=False,
+            prev_predator_dist=4,
+        )
+
+        self.assertFalse(result)
+
 
     def test_compute_predator_threat_uses_deterministic_smell_signal(self) -> None:
         noise_profile = NoiseConfig(

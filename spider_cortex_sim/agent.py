@@ -34,6 +34,13 @@ from .arbitration import (
 )
 from .capacity_profiles import CapacityProfile, resolve_capacity_profile
 from .bus import MessageBus
+from .direct_policy_affordances import (
+    DIRECT_POLICY_LOCAL_AFFORDANCE_INPUT_DIM,
+    DIRECT_POLICY_LOCAL_GEODESIC_INPUT_DIM,
+    DIRECT_POLICY_LOCAL_TRANSITION_INPUT_DIM,
+    DIRECT_POLICY_LOCAL_TRANSITION_ROLLOUT_INPUT_DIM,
+    DIRECT_POLICY_LOCAL_SPATIAL_INPUT_DIM,
+)
 from .interfaces import (
     ACTION_CONTEXT_INTERFACE,
     ACTION_DELTAS,
@@ -50,12 +57,21 @@ from .nn import (
     ArbitrationNetwork,
     MotorNetwork,
     ProposalNetwork,
+    RecurrentEventAttentionTrueMonolithicNetwork,
+    RecurrentOptionAffordanceFeedbackTrueMonolithicNetwork,
+    RecurrentOptionAffordanceGeometryFeedbackTrueMonolithicNetwork,
+    RecurrentOptionAffordancePositionFeedbackTrueMonolithicNetwork,
+    RecurrentOptionAffordanceTopologyFeedbackTrueMonolithicNetwork,
+    RecurrentOptionAffordanceTrueMonolithicNetwork,
+    RecurrentOptionTrueMonolithicNetwork,
+    RecurrentTrueMonolithicNetwork,
     TrueMonolithicNetwork,
     one_hot,
     softmax,
 )
 from .noise import _compute_execution_difficulty_core
 from .operational_profiles import OperationalProfile, runtime_operational_profile
+from .phase import PHASE_LABELS
 from .reflexes import (
     _apply_reflex_path as apply_reflex_path,
     _direction_action as direction_action,
@@ -79,7 +95,7 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
     This is where the interpretable local reflexes and final motor arbitration live.
     """
 
-    ARCHITECTURE_VERSION = 14
+    ARCHITECTURE_VERSION = 25
     _METADATA_FILE = "metadata.json"
     MONOLITHIC_POLICY_NAME = DEFAULT_MONOLITHIC_POLICY_NAME
     TRUE_MONOLITHIC_POLICY_NAME = DEFAULT_TRUE_MONOLITHIC_POLICY_NAME
@@ -217,11 +233,14 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         self.current_reflex_scale = float(self.config.reflex_scale)
         self.module_bank: CorticalModuleBank | None = None
         self.monolithic_policy: ProposalNetwork | None = None
-        self.true_monolithic_policy: TrueMonolithicNetwork | DeepTrueMonolithicNetwork | None = None
+        self.true_monolithic_policy: (
+            TrueMonolithicNetwork | RecurrentTrueMonolithicNetwork | RecurrentEventAttentionTrueMonolithicNetwork | RecurrentOptionTrueMonolithicNetwork | RecurrentOptionAffordanceTrueMonolithicNetwork | RecurrentOptionAffordanceFeedbackTrueMonolithicNetwork | RecurrentOptionAffordanceGeometryFeedbackTrueMonolithicNetwork | RecurrentOptionAffordanceTopologyFeedbackTrueMonolithicNetwork | RecurrentOptionAffordancePositionFeedbackTrueMonolithicNetwork | DeepTrueMonolithicNetwork | None
+        ) = None
         self.action_center: MotorNetwork | None = None
         self.motor_cortex: ProposalNetwork | None = None
         self.arbitration_network: ArbitrationNetwork | None = None
         self._frozen_modules: Set[str] = set()
+        self._direct_policy_hidden_reset_pending = False
         module_hidden_dims = dict(self.config.module_hidden_dims)
         action_center_hidden_dim = int(self.config.action_center_hidden_dim)
         arbitration_hidden_dim = int(self.config.arbitration_hidden_dim)
@@ -279,7 +298,231 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
             )
         else:
             monolithic_input_dim = sum(spec.input_dim for spec in MODULE_INTERFACES)
-            if len(self.config.direct_policy_hidden_dims) > 1:
+            if self.config.direct_policy_local_affordance_inputs:
+                monolithic_input_dim += DIRECT_POLICY_LOCAL_AFFORDANCE_INPUT_DIM
+            if self.config.direct_policy_local_spatial_inputs:
+                monolithic_input_dim += DIRECT_POLICY_LOCAL_SPATIAL_INPUT_DIM
+            if self.config.direct_policy_local_transition_inputs:
+                monolithic_input_dim += DIRECT_POLICY_LOCAL_TRANSITION_INPUT_DIM
+            if self.config.direct_policy_local_transition_rollout_inputs:
+                monolithic_input_dim += DIRECT_POLICY_LOCAL_TRANSITION_ROLLOUT_INPUT_DIM
+            if self.config.direct_policy_local_geodesic_inputs:
+                monolithic_input_dim += DIRECT_POLICY_LOCAL_GEODESIC_INPUT_DIM
+            if self.config.direct_policy_recurrent:
+                direct_hidden_dim = (
+                    int(self.config.direct_policy_hidden_dims[0])
+                    if self.config.direct_policy_hidden_dims
+                    else monolithic_hidden_dim
+                )
+                if self.config.direct_policy_event_attention:
+                    if self.config.direct_policy_option_head:
+                        if self.config.direct_policy_affordance_head:
+                            if self.config.direct_policy_affordance_feedback:
+                                if self.config.direct_policy_shelter_position_head:
+                                    self.true_monolithic_policy = RecurrentOptionAffordancePositionFeedbackTrueMonolithicNetwork(
+                                        input_dim=monolithic_input_dim,
+                                        hidden_dim=direct_hidden_dim,
+                                        output_dim=self.action_dim,
+                                        event_buffer_size=self.config.direct_policy_event_buffer_size,
+                                        option_ttl=self.config.direct_policy_option_ttl,
+                                        phase_output_dim=(
+                                            len(PHASE_LABELS)
+                                            if self.config.direct_policy_phase_head
+                                            else 0
+                                        ),
+                                        phase_option_feedback=(
+                                            self.config.direct_policy_phase_option_feedback
+                                        ),
+                                        option_transition_feedback=(
+                                            self.config.direct_policy_option_transition_feedback
+                                        ),
+                                        option_termination_cooldown=(
+                                            self.config.direct_policy_option_termination_cooldown
+                                        ),
+                                        option_action_head=(
+                                            self.config.direct_policy_option_action_head
+                                        ),
+                                        option_decoder_state=(
+                                            self.config.direct_policy_option_decoder_state
+                                        ),
+                                        option_recurrent_dynamics=(
+                                            self.config.direct_policy_option_recurrent_dynamics
+                                        ),
+                                        option_sequence_head=(
+                                            self.config.direct_policy_option_sequence_head
+                                        ),
+                                        option_decoder_recurrent_state=(
+                                            self.config.direct_policy_option_decoder_recurrent_state
+                                        ),
+                                        option_action_transition_state=(
+                                            self.config.direct_policy_option_action_transition_state
+                                        ),
+                                        option_action_controller_state=(
+                                            self.config.direct_policy_option_action_controller_state
+                                        ),
+                                        option_action_token_decoder=(
+                                            self.config.direct_policy_option_action_token_decoder
+                                        ),
+                                        option_action_recurrent_core=(
+                                            self.config.direct_policy_option_action_recurrent_core
+                                        ),
+                                        option_action_separate_recurrent_head=(
+                                            self.config.direct_policy_option_action_separate_recurrent_head
+                                        ),
+                                        option_action_separate_policy_path=(
+                                            self.config.direct_policy_option_action_separate_policy_path
+                                        ),
+                                        option_action_separate_backbone=(
+                                            self.config.direct_policy_option_action_separate_backbone
+                                        ),
+                                        executive_physiology_option_gating=(
+                                            self.config.direct_policy_executive_physiology_option_gating
+                                        ),
+                                        executive_affordance_action_gating=(
+                                            self.config.direct_policy_executive_affordance_action_gating
+                                        ),
+                                        executive_option_action_masking=(
+                                            self.config.direct_policy_executive_option_action_masking
+                                        ),
+                                        executive_event_release_latching=(
+                                            self.config.direct_policy_executive_event_release_latching
+                                        ),
+                                        executive_event_release_action_commitment=(
+                                            self.config.direct_policy_executive_event_release_action_commitment
+                                        ),
+                                        executive_release_phase_state=(
+                                            self.config.direct_policy_executive_release_phase_state
+                                        ),
+                                        executive_release_progression=(
+                                            self.config.direct_policy_executive_release_progression
+                                        ),
+                                        executive_release_exit_contract=(
+                                            self.config.direct_policy_executive_release_exit_contract
+                                        ),
+                                        executive_release_substate_progression=(
+                                            self.config.direct_policy_executive_release_substate_progression
+                                        ),
+                                        executive_post_exit_continuation=(
+                                            self.config.direct_policy_executive_post_exit_continuation
+                                        ),
+                                        executive_post_exit_food_guidance=(
+                                            self.config.direct_policy_executive_post_exit_food_guidance
+                                        ),
+                                        executive_post_exit_food_commitment=(
+                                            self.config.direct_policy_executive_post_exit_food_commitment
+                                        ),
+                                        executive_post_exit_food_progression=(
+                                            self.config.direct_policy_executive_post_exit_food_progression
+                                        ),
+                                        executive_post_exit_food_heading_progression=(
+                                            self.config.direct_policy_executive_post_exit_food_heading_progression
+                                        ),
+                                        executive_post_exit_smell_progression=(
+                                            self.config.direct_policy_executive_post_exit_smell_progression
+                                        ),
+                                        executive_post_exit_corridor_progression=(
+                                            self.config.direct_policy_executive_post_exit_corridor_progression
+                                        ),
+                                        executive_post_exit_corridor_affordance_progression=(
+                                            self.config.direct_policy_executive_post_exit_corridor_affordance_progression
+                                        ),
+                                        executive_post_food_return=(
+                                            self.config.direct_policy_executive_post_food_return
+                                        ),
+                                        executive_post_food_vector_return=(
+                                            self.config.direct_policy_executive_post_food_vector_return
+                                        ),
+                                        executive_post_food_path_return=(
+                                            self.config.direct_policy_executive_post_food_path_return
+                                        ),
+                                        transition_prediction_head=(
+                                            self.config.direct_policy_transition_prediction_head
+                                        ),
+                                        transition_prediction_feedback=(
+                                            self.config.direct_policy_transition_prediction_feedback
+                                        ),
+                                        transition_rollout_prediction_head=(
+                                            self.config.direct_policy_transition_rollout_prediction_head
+                                        ),
+                                        transition_rollout_prediction_feedback=(
+                                            self.config.direct_policy_transition_rollout_prediction_feedback
+                                        ),
+                                        rng=self.rng,
+                                        name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                                    )
+                                elif self.config.direct_policy_shelter_column_head:
+                                    self.true_monolithic_policy = RecurrentOptionAffordanceTopologyFeedbackTrueMonolithicNetwork(
+                                        input_dim=monolithic_input_dim,
+                                        hidden_dim=direct_hidden_dim,
+                                        output_dim=self.action_dim,
+                                        event_buffer_size=self.config.direct_policy_event_buffer_size,
+                                        option_ttl=self.config.direct_policy_option_ttl,
+                                        rng=self.rng,
+                                        name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                                    )
+                                elif self.config.direct_policy_geometry_head:
+                                    self.true_monolithic_policy = RecurrentOptionAffordanceGeometryFeedbackTrueMonolithicNetwork(
+                                        input_dim=monolithic_input_dim,
+                                        hidden_dim=direct_hidden_dim,
+                                        output_dim=self.action_dim,
+                                        event_buffer_size=self.config.direct_policy_event_buffer_size,
+                                        option_ttl=self.config.direct_policy_option_ttl,
+                                        rng=self.rng,
+                                        name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                                    )
+                                else:
+                                    self.true_monolithic_policy = RecurrentOptionAffordanceFeedbackTrueMonolithicNetwork(
+                                        input_dim=monolithic_input_dim,
+                                        hidden_dim=direct_hidden_dim,
+                                        output_dim=self.action_dim,
+                                        event_buffer_size=self.config.direct_policy_event_buffer_size,
+                                        option_ttl=self.config.direct_policy_option_ttl,
+                                        rng=self.rng,
+                                        name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                                    )
+                            else:
+                                self.true_monolithic_policy = RecurrentOptionAffordanceTrueMonolithicNetwork(
+                                    input_dim=monolithic_input_dim,
+                                    hidden_dim=direct_hidden_dim,
+                                    output_dim=self.action_dim,
+                                    event_buffer_size=self.config.direct_policy_event_buffer_size,
+                                    option_ttl=self.config.direct_policy_option_ttl,
+                                    rng=self.rng,
+                                    name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                                )
+                        else:
+                            self.true_monolithic_policy = RecurrentOptionTrueMonolithicNetwork(
+                                input_dim=monolithic_input_dim,
+                                hidden_dim=direct_hidden_dim,
+                                output_dim=self.action_dim,
+                                event_buffer_size=self.config.direct_policy_event_buffer_size,
+                                option_ttl=self.config.direct_policy_option_ttl,
+                                rng=self.rng,
+                                name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                            )
+                    else:
+                        self.true_monolithic_policy = RecurrentEventAttentionTrueMonolithicNetwork(
+                            input_dim=monolithic_input_dim,
+                            hidden_dim=direct_hidden_dim,
+                            output_dim=self.action_dim,
+                            event_buffer_size=self.config.direct_policy_event_buffer_size,
+                            rng=self.rng,
+                            name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                        )
+                else:
+                    self.true_monolithic_policy = RecurrentTrueMonolithicNetwork(
+                        input_dim=monolithic_input_dim,
+                        hidden_dim=direct_hidden_dim,
+                        output_dim=self.action_dim,
+                        phase_output_dim=(
+                            len(PHASE_LABELS)
+                            if self.config.direct_policy_phase_head
+                            else 0
+                        ),
+                        rng=self.rng,
+                        name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                    )
+            elif len(self.config.direct_policy_hidden_dims) > 1:
                 self.true_monolithic_policy = DeepTrueMonolithicNetwork(
                     input_dim=monolithic_input_dim,
                     hidden_sizes=self.config.direct_policy_hidden_dims,

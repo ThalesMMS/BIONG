@@ -29,6 +29,7 @@ from spider_cortex_sim.ablations import (
     TRUE_MONOLITHIC_POLICY_NAME,
     canonical_ablation_configs,
     default_brain_config,
+    resolve_ablation_configs,
 )
 from spider_cortex_sim.agent import BrainStep, SpiderBrain
 from spider_cortex_sim.arbitration import ArbitrationDecision
@@ -51,6 +52,7 @@ from spider_cortex_sim.modules import CorticalModuleBank, ModuleResult
 from spider_cortex_sim.nn import ArbitrationNetwork, MotorNetwork, ProposalNetwork
 from spider_cortex_sim.noise import compute_execution_difficulty
 from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
+from spider_cortex_sim.phase import PHASE_TO_INDEX
 from spider_cortex_sim.perception import (
     PerceivedTarget,
     build_action_context_observation,
@@ -156,6 +158,295 @@ class SpiderBrainMonolithicBasicsTest(MonolithicArchitectureFixtures, unittest.T
         self.assertTrue(
             any(not np.allclose(before[key], after[key]) for key in before)
         )
+
+    def test_true_monolithic_handoff_teacher_losses_use_full_weight_when_active(self) -> None:
+        config = resolve_ablation_configs(
+            ["true_monolithic_option_affordance_position_teacher_option_policy"],
+            module_dropout=0.0,
+        )[0]
+        brain = SpiderBrain(seed=23, config=config)
+        obs = self._build_observation()
+        step = brain.act_train(obs, sample=False)
+        step.affordance_blocked_targets = np.zeros_like(
+            step.affordance_blocked_logits,
+        )
+        step.affordance_role_targets = np.zeros(len(LOCOMOTION_ACTIONS), dtype=int)
+        step.geometry_targets = np.zeros_like(step.geometry_logits)
+        step.shelter_position_targets = np.zeros(
+            len(LOCOMOTION_ACTIONS),
+            dtype=int,
+        )
+        step.teacher_action_target_idx = int(ACTION_TO_INDEX["MOVE_RIGHT"])
+        step.teacher_option_target_idx = 0
+        stats = brain.learn(
+            step,
+            reward=0.25,
+            next_observation=self._build_observation(),
+            done=False,
+        )
+        self.assertEqual(stats["handoff_teacher_weight"], 1.0)
+        self.assertEqual(stats["handoff_option_teacher_weight"], 1.0)
+        self.assertTrue(stats["handoff_teacher_active"])
+        self.assertTrue(stats["handoff_option_teacher_active"])
+        self.assertGreater(stats["handoff_teacher_loss"], 0.0)
+        self.assertGreater(stats["handoff_option_teacher_loss"], 0.0)
+
+    def test_true_monolithic_continuation_scenarios_boost_auxiliary_weights(self) -> None:
+        config = resolve_ablation_configs(
+            ["true_monolithic_option_affordance_position_teacher_option_policy"],
+            module_dropout=0.0,
+        )[0]
+        brain = SpiderBrain(seed=29, config=config)
+        obs = self._build_observation()
+        step = brain.act_train(obs, sample=False)
+        step.scenario_name = "continuous_survival_post_rest_inside_v1"
+        step.phase_target = "POST_REST_REACTIVATE"
+        step.phase_target_idx = int(PHASE_TO_INDEX["POST_REST_REACTIVATE"])
+        step.affordance_blocked_targets = np.zeros_like(
+            step.affordance_blocked_logits,
+        )
+        step.affordance_role_targets = np.zeros(len(LOCOMOTION_ACTIONS), dtype=int)
+        step.geometry_targets = np.zeros_like(step.geometry_logits)
+        step.shelter_position_targets = np.zeros(
+            len(LOCOMOTION_ACTIONS),
+            dtype=int,
+        )
+        step.teacher_action_target_idx = int(ACTION_TO_INDEX["MOVE_RIGHT"])
+        step.teacher_action_target_stage = "handoff_release"
+        step.teacher_option_target_idx = 0
+        step.teacher_option_target_stage = "option_reactivate"
+        stats = brain.learn(
+            step,
+            reward=0.25,
+            next_observation=self._build_observation(),
+            done=False,
+        )
+        self.assertEqual(stats["handoff_teacher_weight"], 3.0)
+        self.assertEqual(stats["handoff_option_teacher_weight"], 3.0)
+        self.assertEqual(stats["phase_weight"], 0.6)
+        self.assertEqual(stats["affordance_blocked_weight"], 0.2)
+        self.assertEqual(stats["affordance_role_weight"], 0.2)
+        self.assertEqual(stats["shelter_position_weight"], 0.2)
+        self.assertEqual(
+            stats["continuation_weight_profile"]["teacher_action"],
+            3.0,
+        )
+
+    def test_true_monolithic_post_rest_action_teacher_stages_boost_action_weight(self) -> None:
+        config = resolve_ablation_configs(
+            [
+                "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_action_teacher_option_replay_policy"
+            ],
+            module_dropout=0.0,
+        )[0]
+        brain = SpiderBrain(seed=129, config=config)
+        obs = self._build_observation()
+        step = brain.act_train(obs, sample=False)
+        step.scenario_name = "continuous_survival_post_rest_entrance_v1"
+        step.teacher_action_target_idx = int(ACTION_TO_INDEX["MOVE_RIGHT"])
+        step.teacher_action_target_stage = "handoff_post_rest_forage"
+        step.teacher_option_target_idx = 0
+        step.teacher_option_target_stage = "option_post_rest_forage"
+        stats = brain.learn(
+            step,
+            reward=0.25,
+            next_observation=self._build_observation(),
+            done=False,
+        )
+        self.assertEqual(stats["handoff_teacher_weight"], 3.0)
+        self.assertEqual(
+            stats["continuation_weight_profile"]["teacher_action"],
+            3.0,
+        )
+
+    def test_true_monolithic_post_rest_release_sequence_replay_boost_raises_weights_and_passes(self) -> None:
+        config = resolve_ablation_configs(
+            [
+                "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_release_sequence_replay_boost_option_replay_policy"
+            ],
+            module_dropout=0.0,
+        )[0]
+        brain = SpiderBrain(seed=131, config=config)
+        obs = self._build_observation()
+        step = brain.act_train(obs, sample=False)
+        step.observation = dict(obs)
+        step.scenario_name = "continuous_survival_post_rest_inside_v1"
+        step.phase_target = "POST_REST_REACTIVATE"
+        step.phase_target_idx = int(PHASE_TO_INDEX["POST_REST_REACTIVATE"])
+        step.affordance_blocked_targets = np.zeros_like(
+            step.affordance_blocked_logits,
+        )
+        step.affordance_role_targets = np.zeros(len(LOCOMOTION_ACTIONS), dtype=int)
+        step.geometry_targets = np.zeros_like(step.geometry_logits)
+        step.shelter_position_targets = np.zeros(
+            len(LOCOMOTION_ACTIONS),
+            dtype=int,
+        )
+        step.teacher_action_target_idx = int(ACTION_TO_INDEX["MOVE_RIGHT"])
+        step.teacher_action_target_stage = "handoff_release"
+        step.teacher_option_target_idx = 0
+        step.teacher_option_target_stage = "option_reactivate"
+        stats = brain.learn(
+            step,
+            reward=0.25,
+            next_observation=self._build_observation(),
+            done=False,
+        )
+        self.assertTrue(stats["post_rest_sequence_replay_boost_active"])
+        self.assertEqual(stats["handoff_teacher_weight"], 6.0)
+        self.assertEqual(stats["handoff_option_teacher_weight"], 4.0)
+        self.assertEqual(stats["phase_weight"], 0.8)
+        self.assertEqual(stats["continuation_replay_passes_configured"], 6)
+        self.assertEqual(stats["continuation_replay_passes_applied"], 6)
+        self.assertEqual(stats["continuation_replay_lr_scale"], 1.0)
+
+    def test_true_monolithic_post_rest_release_sequence_distill_adds_sequence_loss(self) -> None:
+        config = resolve_ablation_configs(
+            [
+                "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_release_sequence_distill_option_replay_policy"
+            ],
+            module_dropout=0.0,
+        )[0]
+        brain = SpiderBrain(seed=132, config=config)
+        obs = self._build_observation()
+        step = brain.act_train(obs, sample=False)
+        step.observation = dict(obs)
+        step.scenario_name = "continuous_survival_post_rest_inside_v1"
+        step.phase_target = "POST_REST_REACTIVATE"
+        step.phase_target_idx = int(PHASE_TO_INDEX["POST_REST_REACTIVATE"])
+        step.affordance_blocked_targets = np.zeros_like(
+            step.affordance_blocked_logits,
+        )
+        step.affordance_role_targets = np.zeros(len(LOCOMOTION_ACTIONS), dtype=int)
+        step.geometry_targets = np.zeros_like(step.geometry_logits)
+        step.shelter_position_targets = np.zeros(
+            len(LOCOMOTION_ACTIONS),
+            dtype=int,
+        )
+        step.teacher_action_target_idx = int(ACTION_TO_INDEX["MOVE_RIGHT"])
+        step.teacher_action_target_stage = "handoff_release"
+        step.teacher_option_target_idx = 0
+        step.teacher_option_target_stage = "option_reactivate"
+        stats = brain.learn(
+            step,
+            reward=0.25,
+            next_observation=self._build_observation(),
+            done=False,
+        )
+        self.assertTrue(stats["post_rest_sequence_replay_boost_active"])
+        self.assertTrue(stats["post_rest_sequence_distill_active"])
+        self.assertGreater(stats["post_rest_sequence_distill_loss"], 0.0)
+        self.assertGreater(stats["post_rest_sequence_distill_action_loss"], 0.0)
+        self.assertGreater(stats["post_rest_sequence_distill_option_loss"], 0.0)
+        self.assertGreater(stats["post_rest_sequence_distill_phase_loss"], 0.0)
+        self.assertEqual(stats["continuation_replay_passes_configured"], 6)
+        self.assertEqual(stats["continuation_replay_passes_applied"], 6)
+
+    def test_true_monolithic_continuation_replay_passes_apply_when_enabled(self) -> None:
+        config = resolve_ablation_configs(
+            ["true_monolithic_option_affordance_position_phase_teacher_option_replay_policy"],
+            module_dropout=0.0,
+        )[0]
+        brain = SpiderBrain(seed=31, config=config)
+        obs = self._build_observation()
+        step = brain.act_train(obs, sample=False)
+        step.observation = dict(obs)
+        step.scenario_name = "continuous_survival_post_rest_inside_v1"
+        step.phase_target = "POST_REST_REACTIVATE"
+        step.phase_target_idx = int(PHASE_TO_INDEX["POST_REST_REACTIVATE"])
+        step.affordance_blocked_targets = np.zeros_like(
+            step.affordance_blocked_logits,
+        )
+        step.affordance_role_targets = np.zeros(len(LOCOMOTION_ACTIONS), dtype=int)
+        step.geometry_targets = np.zeros_like(step.geometry_logits)
+        step.shelter_position_targets = np.zeros(
+            len(LOCOMOTION_ACTIONS),
+            dtype=int,
+        )
+        step.teacher_action_target_idx = int(ACTION_TO_INDEX["MOVE_RIGHT"])
+        step.teacher_action_target_stage = "handoff_release"
+        step.teacher_option_target_idx = 0
+        step.teacher_option_target_stage = "option_reactivate"
+        stats = brain.learn(
+            step,
+            reward=0.25,
+            next_observation=self._build_observation(),
+            done=False,
+        )
+        self.assertEqual(stats["continuation_replay_passes_configured"], 2)
+        self.assertEqual(stats["continuation_replay_passes_applied"], 2)
+        self.assertEqual(stats["continuation_replay_lr_scale"], 0.5)
+        self.assertGreater(stats["continuation_replay_total_loss"], 0.0)
+        self.assertGreater(stats["continuation_replay_total_grad_norm"], 0.0)
+        self.assertGreater(stats["phase_loss"], 0.0)
+
+    def test_true_monolithic_continuation_margin_loss_applies_when_enabled(self) -> None:
+        config = resolve_ablation_configs(
+            [
+                "true_monolithic_option_affordance_position_phase_teacher_option_margin_replay_policy"
+            ],
+            module_dropout=0.0,
+        )[0]
+        brain = SpiderBrain(seed=32, config=config)
+        obs = self._build_observation()
+        step = brain.act_train(obs, sample=False)
+        step.observation = dict(obs)
+        step.scenario_name = "continuous_survival_post_rest_inside_v1"
+        step.phase_target = "POST_REST_REACTIVATE"
+        step.phase_target_idx = int(PHASE_TO_INDEX["POST_REST_REACTIVATE"])
+        step.affordance_blocked_targets = np.zeros_like(step.affordance_blocked_logits)
+        step.affordance_role_targets = np.zeros(len(LOCOMOTION_ACTIONS), dtype=int)
+        step.geometry_targets = np.zeros_like(step.geometry_logits)
+        step.shelter_position_targets = np.zeros(len(LOCOMOTION_ACTIONS), dtype=int)
+        step.teacher_action_target_idx = int(ACTION_TO_INDEX["MOVE_RIGHT"])
+        step.teacher_action_target_stage = "handoff_release"
+        step.teacher_option_target_idx = 0
+        step.teacher_option_target_name = "FORAGE"
+        step.teacher_option_target_stage = "option_post_rest_forage"
+        stats = brain.learn(
+            step,
+            reward=0.25,
+            next_observation=self._build_observation(),
+            done=False,
+        )
+        self.assertEqual(stats["continuation_margin_weight"], 1.0)
+        self.assertGreater(stats["continuation_margin_loss"], 0.0)
+        self.assertGreater(stats["continuation_margin_grad_norm"], 0.0)
+
+    def test_true_monolithic_geodesic_frontier_continuation_margin_loss_applies_when_enabled(
+        self,
+    ) -> None:
+        config = resolve_ablation_configs(
+            [
+                "true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_geodesic_inputs_post_rest_probe_replayable_teacher_distill_option_margin_replay_policy"
+            ],
+            module_dropout=0.0,
+        )[0]
+        brain = SpiderBrain(seed=33, config=config)
+        obs = self._build_observation()
+        step = brain.act_train(obs, sample=False)
+        step.observation = dict(obs)
+        step.scenario_name = "continuous_survival_post_rest_inside_v1"
+        step.phase_target = "POST_REST_REACTIVATE"
+        step.phase_target_idx = int(PHASE_TO_INDEX["POST_REST_REACTIVATE"])
+        step.affordance_blocked_targets = np.zeros_like(step.affordance_blocked_logits)
+        step.affordance_role_targets = np.zeros(len(LOCOMOTION_ACTIONS), dtype=int)
+        step.geometry_targets = np.zeros_like(step.geometry_logits)
+        step.shelter_position_targets = np.zeros(len(LOCOMOTION_ACTIONS), dtype=int)
+        step.teacher_action_target_idx = int(ACTION_TO_INDEX["MOVE_RIGHT"])
+        step.teacher_action_target_stage = "handoff_release"
+        step.teacher_option_target_idx = 0
+        step.teacher_option_target_name = "FORAGE"
+        step.teacher_option_target_stage = "option_post_rest_forage"
+        stats = brain.learn(
+            step,
+            reward=0.25,
+            next_observation=self._build_observation(),
+            done=False,
+        )
+        self.assertEqual(stats["continuation_margin_weight"], 1.0)
+        self.assertGreater(stats["continuation_margin_loss"], 0.0)
+        self.assertGreater(stats["continuation_margin_grad_norm"], 0.0)
 
     def test_true_monolithic_frozen_proposer_skips_weight_update_and_reports_zero_norm(self) -> None:
         brain = SpiderBrain(seed=17, config=self._true_monolithic_config())

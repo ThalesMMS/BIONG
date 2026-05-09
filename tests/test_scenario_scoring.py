@@ -24,9 +24,12 @@ from spider_cortex_sim.scenarios.scoring import (
     CONTINUOUS_SURVIVAL_CHECKS,
     FOOD_DEPRIVATION_CHECKS,
     FOOD_VS_PREDATOR_CONFLICT_CHECKS,
+    LATE_FORAGE_RETURN_CHECKS,
     NIGHT_REST_CHECKS,
     OLFACTORY_AMBUSH_CHECKS,
+    POST_REST_CONTINUATION_CHECKS,
     PREDATOR_EDGE_CHECKS,
+    RE_REST_AFTER_RETURN_CHECKS,
     SLEEP_VS_EXPLORATION_CONFLICT_CHECKS,
     VISUAL_HUNTER_OPEN_FIELD_CHECKS,
     _attribute_two_shelter_tradeoff_failure,
@@ -213,6 +216,89 @@ class ScoreFunctionCoreTest(ScoreFunctionTestBase):
         score = spec.score_episode(stats, trace)
         self.assertFalse(score.checks["repeated_foraging_cycle"].passed)
         self.assertEqual(score.behavior_metrics["shelter_exits"], 1)
+
+    def test_post_rest_continuation_scenario_uses_named_continuation_checks(self) -> None:
+        spec = get_scenario("continuous_survival_post_rest_inside_v1")
+        stats = _make_episode_stats(
+            scenario="continuous_survival_post_rest_inside_v1",
+            steps=120,
+            food_eaten=1,
+            sleep_events=1,
+            predator_contacts=0,
+            final_health=1.0,
+        )
+        trace = [
+            {"state": {"shelter_role": "inside", "hunger": 0.5, "fatigue": 0.2, "sleep_debt": 0.1}},
+            {"state": {"shelter_role": "outside"}},
+            {"state": {"shelter_role": "inside"}},
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertEqual(spec.behavior_checks, POST_REST_CONTINUATION_CHECKS)
+        self.assertEqual(
+            set(score.checks),
+            {
+                "post_rest_exit_committed",
+                "post_rest_food_reacquired",
+                "post_rest_cycle_reclosed",
+            },
+        )
+        self.assertTrue(score.checks["post_rest_exit_committed"].passed)
+        self.assertTrue(score.checks["post_rest_food_reacquired"].passed)
+        self.assertTrue(score.checks["post_rest_cycle_reclosed"].passed)
+
+    def test_late_forage_return_scenario_scores_return_specific_checks(self) -> None:
+        spec = get_scenario("continuous_survival_return_after_late_forage_v1")
+        stats = _make_episode_stats(
+            scenario="continuous_survival_return_after_late_forage_v1",
+            steps=120,
+            predator_contacts=0,
+            final_health=1.0,
+        )
+        trace = [
+            {"state": {"shelter_role": "outside", "hunger": 0.4, "fatigue": 0.7, "sleep_debt": 0.6}},
+            {"state": {"shelter_role": "inside"}},
+            {"state": {"shelter_role": "deep"}},
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertEqual(spec.behavior_checks, LATE_FORAGE_RETURN_CHECKS)
+        self.assertEqual(
+            set(score.checks),
+            {
+                "late_cycle_return_completed",
+                "late_cycle_shelter_reached",
+                "late_cycle_survives_without_contact",
+            },
+        )
+        self.assertTrue(score.checks["late_cycle_return_completed"].passed)
+        self.assertTrue(score.checks["late_cycle_shelter_reached"].passed)
+        self.assertEqual(score.behavior_metrics["final_shelter_role"], "deep")
+
+    def test_re_rest_after_return_scenario_scores_rest_specific_checks(self) -> None:
+        spec = get_scenario("continuous_survival_re_rest_after_return_v1")
+        stats = _make_episode_stats(
+            scenario="continuous_survival_re_rest_after_return_v1",
+            steps=120,
+            sleep_events=1,
+            predator_contacts=0,
+            final_health=1.0,
+            final_sleep_debt=0.2,
+        )
+        trace = [
+            {"state": {"shelter_role": "inside", "hunger": 0.3, "fatigue": 0.8, "sleep_debt": 0.8}},
+            {"state": {"shelter_role": "deep"}},
+        ]
+        score = spec.score_episode(stats, trace)
+        self.assertEqual(spec.behavior_checks, RE_REST_AFTER_RETURN_CHECKS)
+        self.assertEqual(
+            set(score.checks),
+            {
+                "late_cycle_re_rest_started",
+                "late_cycle_stays_sheltered",
+                "late_cycle_survives_without_contact",
+            },
+        )
+        self.assertTrue(score.checks["late_cycle_re_rest_started"].passed)
+        self.assertTrue(score.checks["late_cycle_stays_sheltered"].passed)
 
     def test_two_shelter_tradeoff_emits_trace_diagnostics_and_failure_mode(self) -> None:
         spec = get_scenario("two_shelter_tradeoff")
@@ -438,6 +524,15 @@ class CheckSpecConstantsTest(unittest.TestCase):
     def test_continuous_survival_checks_has_four_items(self) -> None:
         self.assertEqual(len(CONTINUOUS_SURVIVAL_CHECKS), 4)
 
+    def test_post_rest_continuation_checks_has_three_items(self) -> None:
+        self.assertEqual(len(POST_REST_CONTINUATION_CHECKS), 3)
+
+    def test_late_forage_return_checks_has_three_items(self) -> None:
+        self.assertEqual(len(LATE_FORAGE_RETURN_CHECKS), 3)
+
+    def test_re_rest_after_return_checks_has_three_items(self) -> None:
+        self.assertEqual(len(RE_REST_AFTER_RETURN_CHECKS), 3)
+
     def test_sleep_vs_exploration_conflict_checks_has_four_items(self) -> None:
         self.assertEqual(len(SLEEP_VS_EXPLORATION_CONFLICT_CHECKS), 4)
 
@@ -446,6 +541,9 @@ class CheckSpecConstantsTest(unittest.TestCase):
             list(NIGHT_REST_CHECKS)
             + list(PREDATOR_EDGE_CHECKS)
             + list(CONTINUOUS_SURVIVAL_CHECKS)
+            + list(POST_REST_CONTINUATION_CHECKS)
+            + list(LATE_FORAGE_RETURN_CHECKS)
+            + list(RE_REST_AFTER_RETURN_CHECKS)
             + list(FOOD_DEPRIVATION_CHECKS)
             + list(FOOD_VS_PREDATOR_CONFLICT_CHECKS)
             + list(SLEEP_VS_EXPLORATION_CONFLICT_CHECKS)

@@ -81,7 +81,7 @@ class SpiderBrainArchitectureTest(unittest.TestCase):
         self.brain = SpiderBrain(seed=42, module_dropout=0.0)
 
     def test_architecture_version(self) -> None:
-        self.assertEqual(SpiderBrain.ARCHITECTURE_VERSION, 14)
+        self.assertEqual(SpiderBrain.ARCHITECTURE_VERSION, 25)
 
     def test_legacy_act_fallback_preserves_requested_sample_mode(self) -> None:
         calls: list[dict[str, object]] = []

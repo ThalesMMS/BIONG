@@ -21,6 +21,9 @@ class CurriculumModuleTest(unittest.TestCase):
     def test_curriculum_profile_names_contains_required_values(self) -> None:
         self.assertIn("none", CURRICULUM_PROFILE_NAMES)
         self.assertIn("a0_easy_ramp_v1", CURRICULUM_PROFILE_NAMES)
+        self.assertIn("a0_post_rest_continuation_v1", CURRICULUM_PROFILE_NAMES)
+        self.assertIn("a0_post_rest_continuation_v2", CURRICULUM_PROFILE_NAMES)
+        self.assertIn("a0_post_rest_continuation_dense_v1", CURRICULUM_PROFILE_NAMES)
         self.assertIn("ecological_v1", CURRICULUM_PROFILE_NAMES)
         self.assertIn("ecological_v2", CURRICULUM_PROFILE_NAMES)
         self.assertIn("ecological_v3", CURRICULUM_PROFILE_NAMES)
@@ -35,6 +38,123 @@ class CurriculumModuleTest(unittest.TestCase):
         self.assertEqual(phases[0].training_scenarios, ("continuous_survival_easy_v1",))
         self.assertEqual(phases[1].training_scenarios, ("continuous_survival_medium_v1",))
         self.assertIn("continuous_survival_canonical", phases[2].training_scenarios)
+
+    def test_resolve_curriculum_profile_a0_post_rest_continuation_includes_training_only_handoffs(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="a0_post_rest_continuation_v1",
+            total_episodes=12,
+        )
+        self.assertEqual(len(phases), 4)
+        self.assertEqual(phases[0].training_scenarios, ("continuous_survival_easy_v1",))
+        self.assertEqual(
+            phases[1].training_scenarios,
+            (
+                "continuous_survival_post_rest_inside_v1",
+                "continuous_survival_post_rest_entrance_v1",
+            ),
+        )
+        self.assertIn("continuous_survival_canonical", phases[3].training_scenarios)
+        self.assertEqual(
+            phases[1].promotion_check_specs,
+            tuple(SUBSKILL_CHECK_MAPPINGS["post_rest_continuation"]),
+        )
+
+    def test_resolve_curriculum_profile_a0_post_rest_continuation_v2_includes_late_cycle_scenarios(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="a0_post_rest_continuation_v2",
+            total_episodes=12,
+        )
+        self.assertEqual(len(phases), 4)
+        self.assertEqual(
+            phases[2].training_scenarios,
+            (
+                "continuous_survival_return_after_late_forage_v1",
+                "continuous_survival_re_rest_after_return_v1",
+                "continuous_survival_medium_v1",
+                "continuous_survival_canonical",
+            ),
+        )
+        self.assertIn(
+            "continuous_survival_return_after_late_forage_v1",
+            phases[3].training_scenarios,
+        )
+        self.assertIn(
+            "continuous_survival_re_rest_after_return_v1",
+            phases[3].training_scenarios,
+        )
+        self.assertEqual(
+            phases[1].promotion_check_specs,
+            tuple(SUBSKILL_CHECK_MAPPINGS["post_rest_continuation"]),
+        )
+        self.assertEqual(
+            phases[2].promotion_check_specs,
+            tuple(SUBSKILL_CHECK_MAPPINGS["late_cycle_return_rest"]),
+        )
+        self.assertEqual(
+            [
+                (spec.scenario, spec.check_name)
+                for spec in phases[3].promotion_check_specs
+            ],
+            [
+                (
+                    "continuous_survival_return_after_late_forage_v1",
+                    "late_cycle_return_completed",
+                ),
+                (
+                    "continuous_survival_re_rest_after_return_v1",
+                    "late_cycle_re_rest_started",
+                ),
+                ("continuous_survival_canonical", "repeated_foraging_cycle"),
+            ],
+        )
+
+    def test_resolve_curriculum_profile_a0_post_rest_continuation_dense_v1_focuses_phase3_on_late_cycle(self) -> None:
+        phases = resolve_curriculum_profile(
+            curriculum_profile="a0_post_rest_continuation_dense_v1",
+            total_episodes=12,
+        )
+        self.assertEqual(
+            phases[2].training_scenarios,
+            (
+                "continuous_survival_return_after_late_forage_v1",
+                "continuous_survival_re_rest_after_return_v1",
+            ),
+        )
+        self.assertEqual(
+            phases[3].training_scenarios[:4],
+            (
+                "continuous_survival_post_rest_inside_v1",
+                "continuous_survival_post_rest_entrance_v1",
+                "continuous_survival_return_after_late_forage_v1",
+                "continuous_survival_re_rest_after_return_v1",
+            ),
+        )
+        self.assertEqual(phases[3].training_scenarios[-1], "continuous_survival_canonical")
+        self.assertEqual(
+            phases[1].promotion_check_specs,
+            tuple(SUBSKILL_CHECK_MAPPINGS["post_rest_continuation"]),
+        )
+        self.assertEqual(
+            phases[2].promotion_check_specs,
+            tuple(SUBSKILL_CHECK_MAPPINGS["late_cycle_return_rest"]),
+        )
+        self.assertEqual(
+            [
+                (spec.scenario, spec.check_name)
+                for spec in phases[3].promotion_check_specs
+            ],
+            [
+                (
+                    "continuous_survival_return_after_late_forage_v1",
+                    "late_cycle_return_completed",
+                ),
+                (
+                    "continuous_survival_re_rest_after_return_v1",
+                    "late_cycle_re_rest_started",
+                ),
+                ("continuous_survival_canonical", "repeated_foraging_cycle"),
+            ],
+        )
 
     def test_curriculum_focus_scenarios_are_expected_four(self) -> None:
         expected = {
@@ -52,6 +172,8 @@ class CurriculumModuleTest(unittest.TestCase):
             "predator_response",
             "corridor_navigation",
             "hunger_commitment",
+            "post_rest_continuation",
+            "late_cycle_return_rest",
         }
         self.assertTrue(required_subskills.issubset(set(SUBSKILL_CHECK_MAPPINGS)))
         for criteria in SUBSKILL_CHECK_MAPPINGS.values():
@@ -79,6 +201,14 @@ class CurriculumModuleTest(unittest.TestCase):
                 "corridor_food_progress",
             },
             "hunger_commitment": {"hunger_reduced", "survives_deprivation"},
+            "post_rest_continuation": {
+                "post_rest_exit_committed",
+                "post_rest_food_reacquired",
+            },
+            "late_cycle_return_rest": {
+                "late_cycle_return_completed",
+                "late_cycle_re_rest_started",
+            },
         }
         for subskill, required_names in expected_checks.items():
             with self.subTest(subskill=subskill):

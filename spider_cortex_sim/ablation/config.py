@@ -131,6 +131,80 @@ class BrainAblationConfig:
     capacity_profile: str | CapacityProfile | None = None
     module_hidden_dims: dict[str, int] = field(default_factory=dict)
     direct_policy_hidden_dims: tuple[int, ...] = ()
+    direct_policy_recurrent: bool = False
+    direct_policy_phase_head: bool = False
+    direct_policy_event_attention: bool = False
+    direct_policy_event_buffer_size: int = 0
+    direct_policy_option_head: bool = False
+    direct_policy_option_ttl: int = 0
+    direct_policy_affordance_head: bool = False
+    direct_policy_affordance_feedback: bool = False
+    direct_policy_geometry_head: bool = False
+    direct_policy_shelter_column_head: bool = False
+    direct_policy_shelter_position_head: bool = False
+    direct_policy_local_affordance_inputs: bool = False
+    direct_policy_local_spatial_inputs: bool = False
+    direct_policy_local_transition_inputs: bool = False
+    direct_policy_local_transition_rollout_inputs: bool = False
+    direct_policy_local_geodesic_inputs: bool = False
+    direct_policy_transition_prediction_head: bool = False
+    direct_policy_transition_prediction_feedback: bool = False
+    direct_policy_transition_rollout_prediction_head: bool = False
+    direct_policy_transition_rollout_prediction_feedback: bool = False
+    direct_policy_handoff_teacher: bool = False
+    direct_policy_handoff_option_teacher: bool = False
+    direct_policy_post_rest_action_teacher: bool = False
+    direct_policy_post_rest_release_sequence_teacher: bool = False
+    direct_policy_post_rest_release_sequence_replay_boost: bool = False
+    direct_policy_post_rest_release_sequence_distill: bool = False
+    direct_policy_post_rest_probe_distillation: bool = False
+    direct_policy_post_rest_probe_sequence_distillation: bool = False
+    direct_policy_post_rest_probe_family_distillation: bool = False
+    direct_policy_post_rest_probe_handoff_distillation: bool = False
+    direct_policy_post_rest_probe_trajectory_distillation: bool = False
+    direct_policy_post_rest_probe_cycle_distillation: bool = False
+    direct_policy_post_rest_probe_trace_distillation: bool = False
+    direct_policy_post_rest_probe_rollout_distillation: bool = False
+    direct_policy_post_rest_probe_frontier_teacher_distillation: bool = False
+    direct_policy_post_rest_probe_replayable_teacher_distillation: bool = False
+    direct_policy_continuation_replay_passes: int = 0
+    direct_policy_continuation_replay_lr_scale: float = 0.0
+    direct_policy_continuation_margin_weight: float = 0.0
+    direct_policy_phase_option_feedback: bool = False
+    direct_policy_option_transition_feedback: bool = False
+    direct_policy_option_termination_cooldown: bool = False
+    direct_policy_option_action_head: bool = False
+    direct_policy_option_decoder_state: bool = False
+    direct_policy_option_recurrent_dynamics: bool = False
+    direct_policy_option_sequence_head: bool = False
+    direct_policy_option_decoder_recurrent_state: bool = False
+    direct_policy_option_action_transition_state: bool = False
+    direct_policy_option_action_controller_state: bool = False
+    direct_policy_option_action_token_decoder: bool = False
+    direct_policy_option_action_recurrent_core: bool = False
+    direct_policy_option_action_separate_recurrent_head: bool = False
+    direct_policy_option_action_separate_policy_path: bool = False
+    direct_policy_option_action_separate_backbone: bool = False
+    direct_policy_executive_physiology_option_gating: bool = False
+    direct_policy_executive_affordance_action_gating: bool = False
+    direct_policy_executive_option_action_masking: bool = False
+    direct_policy_executive_event_release_latching: bool = False
+    direct_policy_executive_event_release_action_commitment: bool = False
+    direct_policy_executive_release_phase_state: bool = False
+    direct_policy_executive_release_progression: bool = False
+    direct_policy_executive_release_exit_contract: bool = False
+    direct_policy_executive_release_substate_progression: bool = False
+    direct_policy_executive_post_exit_continuation: bool = False
+    direct_policy_executive_post_exit_food_guidance: bool = False
+    direct_policy_executive_post_exit_food_commitment: bool = False
+    direct_policy_executive_post_exit_food_progression: bool = False
+    direct_policy_executive_post_exit_food_heading_progression: bool = False
+    direct_policy_executive_post_exit_smell_progression: bool = False
+    direct_policy_executive_post_exit_corridor_progression: bool = False
+    direct_policy_executive_post_exit_corridor_affordance_progression: bool = False
+    direct_policy_executive_post_food_return: bool = False
+    direct_policy_executive_post_food_vector_return: bool = False
+    direct_policy_executive_post_food_path_return: bool = False
     action_center_hidden_dim: int | None = None
     arbitration_hidden_dim: int | None = None
     motor_hidden_dim: int | None = None
@@ -244,6 +318,1114 @@ class BrainAblationConfig:
             "direct_policy_hidden_dims",
             direct_policy_hidden_dims,
         )
+        object.__setattr__(
+            self,
+            "direct_policy_recurrent",
+            bool(self.direct_policy_recurrent),
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_phase_head",
+            bool(self.direct_policy_phase_head),
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_event_attention",
+            bool(self.direct_policy_event_attention),
+        )
+        direct_policy_event_buffer_size = int(self.direct_policy_event_buffer_size)
+        if bool(self.direct_policy_event_attention):
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_event_attention is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_recurrent):
+                raise ValueError(
+                    "direct_policy_event_attention requires direct_policy_recurrent=True."
+                )
+            if direct_policy_event_buffer_size <= 0:
+                direct_policy_event_buffer_size = 8
+        if direct_policy_event_buffer_size < 0:
+            raise ValueError("direct_policy_event_buffer_size must be non-negative.")
+        object.__setattr__(
+            self,
+            "direct_policy_event_buffer_size",
+            direct_policy_event_buffer_size,
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_head",
+            bool(self.direct_policy_option_head),
+        )
+        direct_policy_option_ttl = int(self.direct_policy_option_ttl)
+        if bool(self.direct_policy_option_head):
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_head is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_recurrent):
+                raise ValueError(
+                    "direct_policy_option_head requires direct_policy_recurrent=True."
+                )
+            if not bool(self.direct_policy_event_attention):
+                raise ValueError(
+                    "direct_policy_option_head requires direct_policy_event_attention=True."
+                )
+            if direct_policy_option_ttl <= 0:
+                direct_policy_option_ttl = 4
+        if direct_policy_option_ttl < 0:
+            raise ValueError("direct_policy_option_ttl must be non-negative.")
+        object.__setattr__(
+            self,
+            "direct_policy_option_ttl",
+            direct_policy_option_ttl,
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_affordance_head",
+            bool(self.direct_policy_affordance_head),
+        )
+        if bool(self.direct_policy_affordance_head):
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_affordance_head is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_recurrent):
+                raise ValueError(
+                    "direct_policy_affordance_head requires direct_policy_recurrent=True."
+                )
+            if not bool(self.direct_policy_event_attention):
+                raise ValueError(
+                    "direct_policy_affordance_head requires direct_policy_event_attention=True."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_affordance_head requires direct_policy_option_head=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_affordance_feedback",
+            bool(self.direct_policy_affordance_feedback),
+        )
+        if bool(self.direct_policy_affordance_feedback):
+            if not bool(self.direct_policy_affordance_head):
+                raise ValueError(
+                    "direct_policy_affordance_feedback requires direct_policy_affordance_head=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_geometry_head",
+            bool(self.direct_policy_geometry_head),
+        )
+        if bool(self.direct_policy_geometry_head):
+            if not bool(self.direct_policy_affordance_head):
+                raise ValueError(
+                    "direct_policy_geometry_head requires direct_policy_affordance_head=True."
+                )
+            if not bool(self.direct_policy_affordance_feedback):
+                raise ValueError(
+                    "direct_policy_geometry_head requires direct_policy_affordance_feedback=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_shelter_column_head",
+            bool(self.direct_policy_shelter_column_head),
+        )
+        if bool(self.direct_policy_shelter_column_head):
+            if not bool(self.direct_policy_affordance_head):
+                raise ValueError(
+                    "direct_policy_shelter_column_head requires direct_policy_affordance_head=True."
+                )
+            if not bool(self.direct_policy_affordance_feedback):
+                raise ValueError(
+                    "direct_policy_shelter_column_head requires direct_policy_affordance_feedback=True."
+                )
+            if not bool(self.direct_policy_geometry_head):
+                raise ValueError(
+                    "direct_policy_shelter_column_head requires direct_policy_geometry_head=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_shelter_position_head",
+            bool(self.direct_policy_shelter_position_head),
+        )
+        if bool(self.direct_policy_shelter_position_head):
+            if not bool(self.direct_policy_affordance_head):
+                raise ValueError(
+                    "direct_policy_shelter_position_head requires direct_policy_affordance_head=True."
+                )
+            if not bool(self.direct_policy_affordance_feedback):
+                raise ValueError(
+                    "direct_policy_shelter_position_head requires direct_policy_affordance_feedback=True."
+                )
+            if not bool(self.direct_policy_geometry_head):
+                raise ValueError(
+                    "direct_policy_shelter_position_head requires direct_policy_geometry_head=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_local_affordance_inputs",
+            bool(self.direct_policy_local_affordance_inputs),
+        )
+        if bool(self.direct_policy_local_affordance_inputs):
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_local_affordance_inputs is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_shelter_position_head):
+                raise ValueError(
+                    "direct_policy_local_affordance_inputs requires direct_policy_shelter_position_head=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_local_spatial_inputs",
+            bool(self.direct_policy_local_spatial_inputs),
+        )
+        if bool(self.direct_policy_local_spatial_inputs):
+            if not bool(self.direct_policy_local_affordance_inputs):
+                raise ValueError(
+                    "direct_policy_local_spatial_inputs requires direct_policy_local_affordance_inputs=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_local_transition_inputs",
+            bool(self.direct_policy_local_transition_inputs),
+        )
+        if bool(self.direct_policy_local_transition_inputs):
+            if not bool(self.direct_policy_local_spatial_inputs):
+                raise ValueError(
+                    "direct_policy_local_transition_inputs requires direct_policy_local_spatial_inputs=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_local_transition_rollout_inputs",
+            bool(self.direct_policy_local_transition_rollout_inputs),
+        )
+        if bool(self.direct_policy_local_transition_rollout_inputs):
+            if not bool(self.direct_policy_local_transition_inputs):
+                raise ValueError(
+                    "direct_policy_local_transition_rollout_inputs requires direct_policy_local_transition_inputs=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_local_geodesic_inputs",
+            bool(self.direct_policy_local_geodesic_inputs),
+        )
+        if bool(self.direct_policy_local_geodesic_inputs):
+            if not bool(self.direct_policy_local_transition_rollout_inputs):
+                raise ValueError(
+                    "direct_policy_local_geodesic_inputs requires direct_policy_local_transition_rollout_inputs=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_transition_prediction_head",
+            bool(self.direct_policy_transition_prediction_head),
+        )
+        if bool(self.direct_policy_transition_prediction_head):
+            if not bool(self.direct_policy_local_transition_inputs):
+                raise ValueError(
+                    "direct_policy_transition_prediction_head requires direct_policy_local_transition_inputs=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_transition_prediction_feedback",
+            bool(self.direct_policy_transition_prediction_feedback),
+        )
+        if bool(self.direct_policy_transition_prediction_feedback):
+            if not bool(self.direct_policy_transition_prediction_head):
+                raise ValueError(
+                    "direct_policy_transition_prediction_feedback requires direct_policy_transition_prediction_head=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_transition_rollout_prediction_head",
+            bool(self.direct_policy_transition_rollout_prediction_head),
+        )
+        if bool(self.direct_policy_transition_rollout_prediction_head):
+            if not bool(self.direct_policy_local_transition_rollout_inputs):
+                raise ValueError(
+                    "direct_policy_transition_rollout_prediction_head requires direct_policy_local_transition_rollout_inputs=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_transition_rollout_prediction_feedback",
+            bool(self.direct_policy_transition_rollout_prediction_feedback),
+        )
+        if bool(self.direct_policy_transition_rollout_prediction_feedback):
+            if not bool(self.direct_policy_transition_rollout_prediction_head):
+                raise ValueError(
+                    "direct_policy_transition_rollout_prediction_feedback requires direct_policy_transition_rollout_prediction_head=True."
+                )
+        if bool(self.direct_policy_phase_head) and bool(self.direct_policy_option_head):
+            if not bool(self.direct_policy_shelter_position_head):
+                raise ValueError(
+                    "direct_policy_phase_head with direct_policy_option_head requires direct_policy_shelter_position_head=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_handoff_teacher",
+            bool(self.direct_policy_handoff_teacher),
+        )
+        if bool(self.direct_policy_handoff_teacher):
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_handoff_teacher is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_shelter_position_head):
+                raise ValueError(
+                    "direct_policy_handoff_teacher requires direct_policy_shelter_position_head=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_handoff_option_teacher",
+            bool(self.direct_policy_handoff_option_teacher),
+        )
+        if bool(self.direct_policy_handoff_option_teacher):
+            if not bool(self.direct_policy_handoff_teacher):
+                raise ValueError(
+                    "direct_policy_handoff_option_teacher requires direct_policy_handoff_teacher=True."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_handoff_option_teacher requires direct_policy_option_head=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_action_teacher",
+            bool(self.direct_policy_post_rest_action_teacher),
+        )
+        if bool(self.direct_policy_post_rest_action_teacher):
+            if not bool(self.direct_policy_handoff_teacher):
+                raise ValueError(
+                    "direct_policy_post_rest_action_teacher requires direct_policy_handoff_teacher=True."
+                )
+            if not bool(self.direct_policy_option_action_separate_backbone):
+                raise ValueError(
+                    "direct_policy_post_rest_action_teacher requires direct_policy_option_action_separate_backbone=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_release_sequence_teacher",
+            bool(self.direct_policy_post_rest_release_sequence_teacher),
+        )
+        if bool(self.direct_policy_post_rest_release_sequence_teacher):
+            if not bool(self.direct_policy_post_rest_action_teacher):
+                raise ValueError(
+                    "direct_policy_post_rest_release_sequence_teacher requires direct_policy_post_rest_action_teacher=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_release_sequence_replay_boost",
+            bool(self.direct_policy_post_rest_release_sequence_replay_boost),
+        )
+        if bool(self.direct_policy_post_rest_release_sequence_replay_boost):
+            if not bool(self.direct_policy_post_rest_release_sequence_teacher):
+                raise ValueError(
+                    "direct_policy_post_rest_release_sequence_replay_boost requires direct_policy_post_rest_release_sequence_teacher=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_release_sequence_distill",
+            bool(self.direct_policy_post_rest_release_sequence_distill),
+        )
+        if bool(self.direct_policy_post_rest_release_sequence_distill):
+            if not bool(self.direct_policy_post_rest_release_sequence_teacher):
+                raise ValueError(
+                    "direct_policy_post_rest_release_sequence_distill requires direct_policy_post_rest_release_sequence_teacher=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_distillation",
+            bool(self.direct_policy_post_rest_probe_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_distillation):
+            if not bool(self.direct_policy_post_rest_release_sequence_teacher):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_distillation requires direct_policy_post_rest_release_sequence_teacher=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_sequence_distillation",
+            bool(self.direct_policy_post_rest_probe_sequence_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_sequence_distillation):
+            if not bool(self.direct_policy_post_rest_probe_distillation):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_sequence_distillation requires direct_policy_post_rest_probe_distillation=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_family_distillation",
+            bool(self.direct_policy_post_rest_probe_family_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_family_distillation):
+            if not bool(self.direct_policy_post_rest_probe_sequence_distillation):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_family_distillation requires direct_policy_post_rest_probe_sequence_distillation=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_handoff_distillation",
+            bool(self.direct_policy_post_rest_probe_handoff_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_handoff_distillation):
+            if not bool(self.direct_policy_post_rest_probe_family_distillation):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_handoff_distillation requires direct_policy_post_rest_probe_family_distillation=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_trajectory_distillation",
+            bool(self.direct_policy_post_rest_probe_trajectory_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_trajectory_distillation):
+            if not bool(self.direct_policy_post_rest_probe_handoff_distillation):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_trajectory_distillation requires direct_policy_post_rest_probe_handoff_distillation=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_cycle_distillation",
+            bool(self.direct_policy_post_rest_probe_cycle_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_cycle_distillation):
+            if not bool(self.direct_policy_post_rest_probe_trajectory_distillation):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_cycle_distillation requires direct_policy_post_rest_probe_trajectory_distillation=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_trace_distillation",
+            bool(self.direct_policy_post_rest_probe_trace_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_trace_distillation):
+            if not bool(self.direct_policy_post_rest_probe_cycle_distillation):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_trace_distillation requires direct_policy_post_rest_probe_cycle_distillation=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_rollout_distillation",
+            bool(self.direct_policy_post_rest_probe_rollout_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_rollout_distillation):
+            if not bool(self.direct_policy_post_rest_probe_trace_distillation):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_rollout_distillation requires direct_policy_post_rest_probe_trace_distillation=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_frontier_teacher_distillation",
+            bool(self.direct_policy_post_rest_probe_frontier_teacher_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_frontier_teacher_distillation):
+            if not bool(self.direct_policy_post_rest_probe_rollout_distillation):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_frontier_teacher_distillation requires direct_policy_post_rest_probe_rollout_distillation=True."
+                )
+        object.__setattr__(
+            self,
+            "direct_policy_post_rest_probe_replayable_teacher_distillation",
+            bool(self.direct_policy_post_rest_probe_replayable_teacher_distillation),
+        )
+        if bool(self.direct_policy_post_rest_probe_replayable_teacher_distillation):
+            if not bool(self.direct_policy_post_rest_probe_rollout_distillation):
+                raise ValueError(
+                    "direct_policy_post_rest_probe_replayable_teacher_distillation requires direct_policy_post_rest_probe_rollout_distillation=True."
+                )
+        continuation_replay_passes = int(
+            self.direct_policy_continuation_replay_passes
+        )
+        if continuation_replay_passes < 0:
+            raise ValueError(
+                "direct_policy_continuation_replay_passes must be >= 0."
+            )
+        object.__setattr__(
+            self,
+            "direct_policy_continuation_replay_passes",
+            continuation_replay_passes,
+        )
+        continuation_replay_lr_scale = float(
+            self.direct_policy_continuation_replay_lr_scale
+        )
+        if not math.isfinite(continuation_replay_lr_scale):
+            raise ValueError(
+                "direct_policy_continuation_replay_lr_scale must be finite."
+            )
+        if continuation_replay_lr_scale < 0.0:
+            raise ValueError(
+                "direct_policy_continuation_replay_lr_scale must be >= 0.0."
+            )
+        object.__setattr__(
+            self,
+            "direct_policy_continuation_replay_lr_scale",
+            continuation_replay_lr_scale,
+        )
+        continuation_margin_weight = float(
+            self.direct_policy_continuation_margin_weight
+        )
+        if not math.isfinite(continuation_margin_weight):
+            raise ValueError(
+                "direct_policy_continuation_margin_weight must be finite."
+            )
+        if continuation_margin_weight < 0.0:
+            raise ValueError(
+                "direct_policy_continuation_margin_weight must be >= 0.0."
+            )
+        object.__setattr__(
+            self,
+            "direct_policy_continuation_margin_weight",
+            continuation_margin_weight,
+        )
+        phase_option_feedback = bool(self.direct_policy_phase_option_feedback)
+        object.__setattr__(
+            self,
+            "direct_policy_phase_option_feedback",
+            phase_option_feedback,
+        )
+        option_transition_feedback = bool(
+            self.direct_policy_option_transition_feedback
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_transition_feedback",
+            option_transition_feedback,
+        )
+        option_termination_cooldown = bool(
+            self.direct_policy_option_termination_cooldown
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_termination_cooldown",
+            option_termination_cooldown,
+        )
+        option_action_head = bool(self.direct_policy_option_action_head)
+        object.__setattr__(
+            self,
+            "direct_policy_option_action_head",
+            option_action_head,
+        )
+        option_decoder_state = bool(self.direct_policy_option_decoder_state)
+        object.__setattr__(
+            self,
+            "direct_policy_option_decoder_state",
+            option_decoder_state,
+        )
+        option_recurrent_dynamics = bool(
+            self.direct_policy_option_recurrent_dynamics
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_recurrent_dynamics",
+            option_recurrent_dynamics,
+        )
+        option_sequence_head = bool(self.direct_policy_option_sequence_head)
+        object.__setattr__(
+            self,
+            "direct_policy_option_sequence_head",
+            option_sequence_head,
+        )
+        option_decoder_recurrent_state = bool(
+            self.direct_policy_option_decoder_recurrent_state
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_decoder_recurrent_state",
+            option_decoder_recurrent_state,
+        )
+        option_action_transition_state = bool(
+            self.direct_policy_option_action_transition_state
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_action_transition_state",
+            option_action_transition_state,
+        )
+        option_action_controller_state = bool(
+            self.direct_policy_option_action_controller_state
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_action_controller_state",
+            option_action_controller_state,
+        )
+        option_action_token_decoder = bool(
+            self.direct_policy_option_action_token_decoder
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_action_token_decoder",
+            option_action_token_decoder,
+        )
+        option_action_recurrent_core = bool(
+            self.direct_policy_option_action_recurrent_core
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_action_recurrent_core",
+            option_action_recurrent_core,
+        )
+        option_action_separate_recurrent_head = bool(
+            self.direct_policy_option_action_separate_recurrent_head
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_action_separate_recurrent_head",
+            option_action_separate_recurrent_head,
+        )
+        option_action_separate_policy_path = bool(
+            self.direct_policy_option_action_separate_policy_path
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_action_separate_policy_path",
+            option_action_separate_policy_path,
+        )
+        option_action_separate_backbone = bool(
+            self.direct_policy_option_action_separate_backbone
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_option_action_separate_backbone",
+            option_action_separate_backbone,
+        )
+        executive_physiology_option_gating = bool(
+            self.direct_policy_executive_physiology_option_gating
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_physiology_option_gating",
+            executive_physiology_option_gating,
+        )
+        executive_affordance_action_gating = bool(
+            self.direct_policy_executive_affordance_action_gating
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_affordance_action_gating",
+            executive_affordance_action_gating,
+        )
+        executive_option_action_masking = bool(
+            self.direct_policy_executive_option_action_masking
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_option_action_masking",
+            executive_option_action_masking,
+        )
+        executive_event_release_latching = bool(
+            self.direct_policy_executive_event_release_latching
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_event_release_latching",
+            executive_event_release_latching,
+        )
+        executive_event_release_action_commitment = bool(
+            self.direct_policy_executive_event_release_action_commitment
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_event_release_action_commitment",
+            executive_event_release_action_commitment,
+        )
+        executive_release_phase_state = bool(
+            self.direct_policy_executive_release_phase_state
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_release_phase_state",
+            executive_release_phase_state,
+        )
+        executive_release_progression = bool(
+            self.direct_policy_executive_release_progression
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_release_progression",
+            executive_release_progression,
+        )
+        executive_release_exit_contract = bool(
+            self.direct_policy_executive_release_exit_contract
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_release_exit_contract",
+            executive_release_exit_contract,
+        )
+        executive_release_substate_progression = bool(
+            self.direct_policy_executive_release_substate_progression
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_release_substate_progression",
+            executive_release_substate_progression,
+        )
+        executive_post_exit_continuation = bool(
+            self.direct_policy_executive_post_exit_continuation
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_exit_continuation",
+            executive_post_exit_continuation,
+        )
+        executive_post_exit_food_guidance = bool(
+            self.direct_policy_executive_post_exit_food_guidance
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_exit_food_guidance",
+            executive_post_exit_food_guidance,
+        )
+        executive_post_exit_food_commitment = bool(
+            self.direct_policy_executive_post_exit_food_commitment
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_exit_food_commitment",
+            executive_post_exit_food_commitment,
+        )
+        executive_post_exit_food_progression = bool(
+            self.direct_policy_executive_post_exit_food_progression
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_exit_food_progression",
+            executive_post_exit_food_progression,
+        )
+        executive_post_exit_food_heading_progression = bool(
+            self.direct_policy_executive_post_exit_food_heading_progression
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_exit_food_heading_progression",
+            executive_post_exit_food_heading_progression,
+        )
+        executive_post_exit_smell_progression = bool(
+            self.direct_policy_executive_post_exit_smell_progression
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_exit_smell_progression",
+            executive_post_exit_smell_progression,
+        )
+        executive_post_exit_corridor_progression = bool(
+            self.direct_policy_executive_post_exit_corridor_progression
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_exit_corridor_progression",
+            executive_post_exit_corridor_progression,
+        )
+        executive_post_exit_corridor_affordance_progression = bool(
+            self.direct_policy_executive_post_exit_corridor_affordance_progression
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_exit_corridor_affordance_progression",
+            executive_post_exit_corridor_affordance_progression,
+        )
+        executive_post_food_return = bool(
+            self.direct_policy_executive_post_food_return
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_food_return",
+            executive_post_food_return,
+        )
+        executive_post_food_vector_return = bool(
+            self.direct_policy_executive_post_food_vector_return
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_food_vector_return",
+            executive_post_food_vector_return,
+        )
+        executive_post_food_path_return = bool(
+            self.direct_policy_executive_post_food_path_return
+        )
+        object.__setattr__(
+            self,
+            "direct_policy_executive_post_food_path_return",
+            executive_post_food_path_return,
+        )
+        if continuation_replay_passes > 0:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_continuation_replay_passes is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_handoff_option_teacher):
+                raise ValueError(
+                    "direct_policy_continuation_replay_passes requires direct_policy_handoff_option_teacher=True."
+                )
+            if continuation_replay_lr_scale <= 0.0:
+                raise ValueError(
+                    "direct_policy_continuation_replay_lr_scale must be > 0.0 when continuation replay is enabled."
+                )
+        if continuation_margin_weight > 0.0:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_continuation_margin_weight is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_handoff_option_teacher):
+                raise ValueError(
+                    "direct_policy_continuation_margin_weight requires direct_policy_handoff_option_teacher=True."
+                )
+            if not bool(self.direct_policy_phase_head):
+                raise ValueError(
+                    "direct_policy_continuation_margin_weight requires direct_policy_phase_head=True."
+                )
+        if phase_option_feedback:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_phase_option_feedback is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_phase_head):
+                raise ValueError(
+                    "direct_policy_phase_option_feedback requires direct_policy_phase_head=True."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_phase_option_feedback requires direct_policy_option_head=True."
+                )
+        if option_transition_feedback:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_transition_feedback is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_transition_feedback requires direct_policy_option_head=True."
+                )
+        if option_termination_cooldown:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_termination_cooldown is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_termination_cooldown requires direct_policy_option_head=True."
+                )
+        if option_action_head:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_action_head is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_action_head requires direct_policy_option_head=True."
+                )
+        if option_decoder_state:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_decoder_state is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_decoder_state requires direct_policy_option_head=True."
+                )
+        if option_recurrent_dynamics:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_recurrent_dynamics is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_recurrent_dynamics requires direct_policy_option_head=True."
+                )
+        if option_sequence_head:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_sequence_head is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_sequence_head requires direct_policy_option_head=True."
+                )
+        if option_decoder_recurrent_state:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_decoder_recurrent_state is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_decoder_recurrent_state requires direct_policy_option_head=True."
+                )
+        if option_action_transition_state:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_action_transition_state is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_action_transition_state requires direct_policy_option_head=True."
+                )
+        if option_action_controller_state:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_action_controller_state is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_action_controller_state requires direct_policy_option_head=True."
+                )
+        if option_action_token_decoder:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_action_token_decoder is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_action_token_decoder requires direct_policy_option_head=True."
+                )
+        if option_action_recurrent_core:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_action_recurrent_core is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_action_recurrent_core requires direct_policy_option_head=True."
+                )
+        if option_action_separate_recurrent_head:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_action_separate_recurrent_head is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_action_separate_recurrent_head requires direct_policy_option_head=True."
+                )
+            if not option_action_recurrent_core:
+                raise ValueError(
+                    "direct_policy_option_action_separate_recurrent_head requires direct_policy_option_action_recurrent_core=True."
+                )
+        if option_action_separate_policy_path:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_action_separate_policy_path is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_action_separate_policy_path requires direct_policy_option_head=True."
+                )
+            if not option_action_recurrent_core:
+                raise ValueError(
+                    "direct_policy_option_action_separate_policy_path requires direct_policy_option_action_recurrent_core=True."
+                )
+        if option_action_separate_backbone:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_option_action_separate_backbone is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_option_action_separate_backbone requires direct_policy_option_head=True."
+                )
+            if not option_action_separate_policy_path:
+                raise ValueError(
+                    "direct_policy_option_action_separate_backbone requires direct_policy_option_action_separate_policy_path=True."
+                )
+        if executive_physiology_option_gating:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_physiology_option_gating is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_executive_physiology_option_gating requires direct_policy_option_head=True."
+                )
+        if executive_affordance_action_gating:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_affordance_action_gating is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_executive_affordance_action_gating requires direct_policy_option_head=True."
+                )
+            if not bool(self.direct_policy_affordance_head):
+                raise ValueError(
+                    "direct_policy_executive_affordance_action_gating requires direct_policy_affordance_head=True."
+                )
+            if not bool(self.direct_policy_geometry_head):
+                raise ValueError(
+                    "direct_policy_executive_affordance_action_gating requires direct_policy_geometry_head=True."
+                )
+            if not bool(self.direct_policy_shelter_position_head):
+                raise ValueError(
+                    "direct_policy_executive_affordance_action_gating requires direct_policy_shelter_position_head=True."
+                )
+        if executive_option_action_masking:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_option_action_masking is only supported for true_monolithic architectures."
+                )
+            if not executive_affordance_action_gating:
+                raise ValueError(
+                    "direct_policy_executive_option_action_masking requires direct_policy_executive_affordance_action_gating=True."
+                )
+        if executive_event_release_latching:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_event_release_latching is only supported for true_monolithic architectures."
+                )
+            if not executive_physiology_option_gating:
+                raise ValueError(
+                    "direct_policy_executive_event_release_latching requires direct_policy_executive_physiology_option_gating=True."
+                )
+            if not executive_affordance_action_gating:
+                raise ValueError(
+                    "direct_policy_executive_event_release_latching requires direct_policy_executive_affordance_action_gating=True."
+                )
+        if executive_event_release_action_commitment:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_event_release_action_commitment is only supported for true_monolithic architectures."
+                )
+            if not executive_event_release_latching:
+                raise ValueError(
+                    "direct_policy_executive_event_release_action_commitment requires direct_policy_executive_event_release_latching=True."
+                )
+        if executive_release_phase_state:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_release_phase_state is only supported for true_monolithic architectures."
+                )
+            if not executive_event_release_action_commitment:
+                raise ValueError(
+                    "direct_policy_executive_release_phase_state requires direct_policy_executive_event_release_action_commitment=True."
+                )
+        if executive_release_progression:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_release_progression is only supported for true_monolithic architectures."
+                )
+            if not executive_release_phase_state:
+                raise ValueError(
+                    "direct_policy_executive_release_progression requires direct_policy_executive_release_phase_state=True."
+                )
+        if executive_release_exit_contract:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_release_exit_contract is only supported for true_monolithic architectures."
+                )
+            if not executive_release_phase_state:
+                raise ValueError(
+                    "direct_policy_executive_release_exit_contract requires direct_policy_executive_release_phase_state=True."
+                )
+        if executive_release_substate_progression:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_release_substate_progression is only supported for true_monolithic architectures."
+                )
+            if not executive_release_phase_state:
+                raise ValueError(
+                    "direct_policy_executive_release_substate_progression requires direct_policy_executive_release_phase_state=True."
+                )
+            if not executive_release_exit_contract:
+                raise ValueError(
+                    "direct_policy_executive_release_substate_progression requires direct_policy_executive_release_exit_contract=True."
+                )
+        if executive_post_exit_continuation:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_exit_continuation is only supported for true_monolithic architectures."
+                )
+            if not executive_release_substate_progression:
+                raise ValueError(
+                    "direct_policy_executive_post_exit_continuation requires direct_policy_executive_release_substate_progression=True."
+                )
+        if executive_post_exit_food_guidance:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_exit_food_guidance is only supported for true_monolithic architectures."
+                )
+            if not executive_post_exit_continuation:
+                raise ValueError(
+                    "direct_policy_executive_post_exit_food_guidance requires direct_policy_executive_post_exit_continuation=True."
+                )
+        if executive_post_exit_food_commitment:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_exit_food_commitment is only supported for true_monolithic architectures."
+                )
+            if not executive_post_exit_food_guidance:
+                raise ValueError(
+                    "direct_policy_executive_post_exit_food_commitment requires direct_policy_executive_post_exit_food_guidance=True."
+                )
+        if executive_post_exit_food_progression:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_exit_food_progression is only supported for true_monolithic architectures."
+                )
+            if not executive_post_exit_food_guidance:
+                raise ValueError(
+                    "direct_policy_executive_post_exit_food_progression requires direct_policy_executive_post_exit_food_guidance=True."
+                )
+        if executive_post_exit_food_heading_progression:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_exit_food_heading_progression is only supported for true_monolithic architectures."
+                )
+            if not executive_post_exit_food_guidance:
+                raise ValueError(
+                    "direct_policy_executive_post_exit_food_heading_progression requires direct_policy_executive_post_exit_food_guidance=True."
+                )
+        if executive_post_exit_smell_progression:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_exit_smell_progression is only supported for true_monolithic architectures."
+                )
+            if not executive_post_exit_food_guidance:
+                raise ValueError(
+                    "direct_policy_executive_post_exit_smell_progression requires direct_policy_executive_post_exit_food_guidance=True."
+                )
+        if executive_post_exit_corridor_progression:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_exit_corridor_progression is only supported for true_monolithic architectures."
+                )
+            if not executive_post_exit_continuation:
+                raise ValueError(
+                    "direct_policy_executive_post_exit_corridor_progression requires direct_policy_executive_post_exit_continuation=True."
+                )
+        if executive_post_exit_corridor_affordance_progression:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_exit_corridor_affordance_progression is only supported for true_monolithic architectures."
+                )
+            if not executive_post_exit_corridor_progression:
+                raise ValueError(
+                    "direct_policy_executive_post_exit_corridor_affordance_progression requires direct_policy_executive_post_exit_corridor_progression=True."
+                )
+        if executive_post_food_return:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_food_return is only supported for true_monolithic architectures."
+                )
+            if not executive_post_exit_continuation:
+                raise ValueError(
+                    "direct_policy_executive_post_food_return requires direct_policy_executive_post_exit_continuation=True."
+                )
+        if executive_post_food_vector_return:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_food_vector_return is only supported for true_monolithic architectures."
+                )
+            if not executive_post_food_return:
+                raise ValueError(
+                    "direct_policy_executive_post_food_vector_return requires direct_policy_executive_post_food_return=True."
+                )
+        if executive_post_food_path_return:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_executive_post_food_path_return is only supported for true_monolithic architectures."
+                )
+            if not executive_post_food_return:
+                raise ValueError(
+                    "direct_policy_executive_post_food_path_return requires direct_policy_executive_post_food_return=True."
+                )
         legacy_integration_hidden_dim = (
             None
             if self.integration_hidden_dim is None
@@ -456,7 +1638,7 @@ class BrainAblationConfig:
         Returns:
             `true` if `recurrent_modules` is non-empty, `false` otherwise.
         """
-        return bool(self.recurrent_modules)
+        return bool(self.recurrent_modules) or bool(self.direct_policy_recurrent)
 
     @property
     def monolithic_hidden_dim(self) -> int:
@@ -530,6 +1712,220 @@ class BrainAblationConfig:
             "capacity_scale_factor": resolved_capacity_profile.scale_factor,
             "module_hidden_dims": dict(self.module_hidden_dims),
             "direct_policy_hidden_dims": list(self.direct_policy_hidden_dims),
+            "direct_policy_recurrent": bool(self.direct_policy_recurrent),
+            "direct_policy_phase_head": bool(self.direct_policy_phase_head),
+            "direct_policy_event_attention": bool(
+                self.direct_policy_event_attention
+            ),
+            "direct_policy_event_buffer_size": int(
+                self.direct_policy_event_buffer_size
+            ),
+            "direct_policy_option_head": bool(self.direct_policy_option_head),
+            "direct_policy_option_ttl": int(self.direct_policy_option_ttl),
+            "direct_policy_affordance_head": bool(
+                self.direct_policy_affordance_head
+            ),
+            "direct_policy_affordance_feedback": bool(
+                self.direct_policy_affordance_feedback
+            ),
+            "direct_policy_geometry_head": bool(
+                self.direct_policy_geometry_head
+            ),
+            "direct_policy_shelter_column_head": bool(
+                self.direct_policy_shelter_column_head
+            ),
+            "direct_policy_shelter_position_head": bool(
+                self.direct_policy_shelter_position_head
+            ),
+            "direct_policy_local_affordance_inputs": bool(
+                self.direct_policy_local_affordance_inputs
+            ),
+            "direct_policy_local_spatial_inputs": bool(
+                self.direct_policy_local_spatial_inputs
+            ),
+            "direct_policy_local_transition_inputs": bool(
+                self.direct_policy_local_transition_inputs
+            ),
+            "direct_policy_local_transition_rollout_inputs": bool(
+                self.direct_policy_local_transition_rollout_inputs
+            ),
+            "direct_policy_local_geodesic_inputs": bool(
+                self.direct_policy_local_geodesic_inputs
+            ),
+            "direct_policy_transition_prediction_head": bool(
+                self.direct_policy_transition_prediction_head
+            ),
+            "direct_policy_transition_prediction_feedback": bool(
+                self.direct_policy_transition_prediction_feedback
+            ),
+            "direct_policy_transition_rollout_prediction_head": bool(
+                self.direct_policy_transition_rollout_prediction_head
+            ),
+            "direct_policy_transition_rollout_prediction_feedback": bool(
+                self.direct_policy_transition_rollout_prediction_feedback
+            ),
+            "direct_policy_handoff_teacher": bool(
+                self.direct_policy_handoff_teacher
+            ),
+            "direct_policy_handoff_option_teacher": bool(
+                self.direct_policy_handoff_option_teacher
+            ),
+            "direct_policy_post_rest_action_teacher": bool(
+                self.direct_policy_post_rest_action_teacher
+            ),
+            "direct_policy_post_rest_release_sequence_teacher": bool(
+                self.direct_policy_post_rest_release_sequence_teacher
+            ),
+            "direct_policy_post_rest_release_sequence_replay_boost": bool(
+                self.direct_policy_post_rest_release_sequence_replay_boost
+            ),
+            "direct_policy_post_rest_release_sequence_distill": bool(
+                self.direct_policy_post_rest_release_sequence_distill
+            ),
+            "direct_policy_post_rest_probe_distillation": bool(
+                self.direct_policy_post_rest_probe_distillation
+            ),
+            "direct_policy_post_rest_probe_sequence_distillation": bool(
+                self.direct_policy_post_rest_probe_sequence_distillation
+            ),
+            "direct_policy_post_rest_probe_family_distillation": bool(
+                self.direct_policy_post_rest_probe_family_distillation
+            ),
+            "direct_policy_post_rest_probe_handoff_distillation": bool(
+                self.direct_policy_post_rest_probe_handoff_distillation
+            ),
+            "direct_policy_post_rest_probe_trajectory_distillation": bool(
+                self.direct_policy_post_rest_probe_trajectory_distillation
+            ),
+            "direct_policy_post_rest_probe_cycle_distillation": bool(
+                self.direct_policy_post_rest_probe_cycle_distillation
+            ),
+            "direct_policy_post_rest_probe_trace_distillation": bool(
+                self.direct_policy_post_rest_probe_trace_distillation
+            ),
+            "direct_policy_post_rest_probe_rollout_distillation": bool(
+                self.direct_policy_post_rest_probe_rollout_distillation
+            ),
+            "direct_policy_post_rest_probe_frontier_teacher_distillation": bool(
+                self.direct_policy_post_rest_probe_frontier_teacher_distillation
+            ),
+            "direct_policy_post_rest_probe_replayable_teacher_distillation": bool(
+                self.direct_policy_post_rest_probe_replayable_teacher_distillation
+            ),
+            "direct_policy_continuation_replay_passes": int(
+                self.direct_policy_continuation_replay_passes
+            ),
+            "direct_policy_continuation_replay_lr_scale": float(
+                self.direct_policy_continuation_replay_lr_scale
+            ),
+            "direct_policy_continuation_margin_weight": float(
+                self.direct_policy_continuation_margin_weight
+            ),
+            "direct_policy_phase_option_feedback": bool(
+                self.direct_policy_phase_option_feedback
+            ),
+            "direct_policy_option_transition_feedback": bool(
+                self.direct_policy_option_transition_feedback
+            ),
+            "direct_policy_option_termination_cooldown": bool(
+                self.direct_policy_option_termination_cooldown
+            ),
+            "direct_policy_option_action_head": bool(
+                self.direct_policy_option_action_head
+            ),
+            "direct_policy_option_decoder_state": bool(
+                self.direct_policy_option_decoder_state
+            ),
+            "direct_policy_option_recurrent_dynamics": bool(
+                self.direct_policy_option_recurrent_dynamics
+            ),
+            "direct_policy_option_sequence_head": bool(
+                self.direct_policy_option_sequence_head
+            ),
+            "direct_policy_option_decoder_recurrent_state": bool(
+                self.direct_policy_option_decoder_recurrent_state
+            ),
+            "direct_policy_option_action_transition_state": bool(
+                self.direct_policy_option_action_transition_state
+            ),
+            "direct_policy_option_action_controller_state": bool(
+                self.direct_policy_option_action_controller_state
+            ),
+            "direct_policy_option_action_token_decoder": bool(
+                self.direct_policy_option_action_token_decoder
+            ),
+            "direct_policy_option_action_recurrent_core": bool(
+                self.direct_policy_option_action_recurrent_core
+            ),
+            "direct_policy_option_action_separate_recurrent_head": bool(
+                self.direct_policy_option_action_separate_recurrent_head
+            ),
+            "direct_policy_option_action_separate_policy_path": bool(
+                self.direct_policy_option_action_separate_policy_path
+            ),
+            "direct_policy_option_action_separate_backbone": bool(
+                self.direct_policy_option_action_separate_backbone
+            ),
+            "direct_policy_executive_physiology_option_gating": bool(
+                self.direct_policy_executive_physiology_option_gating
+            ),
+            "direct_policy_executive_affordance_action_gating": bool(
+                self.direct_policy_executive_affordance_action_gating
+            ),
+            "direct_policy_executive_option_action_masking": bool(
+                self.direct_policy_executive_option_action_masking
+            ),
+            "direct_policy_executive_event_release_latching": bool(
+                self.direct_policy_executive_event_release_latching
+            ),
+            "direct_policy_executive_event_release_action_commitment": bool(
+                self.direct_policy_executive_event_release_action_commitment
+            ),
+            "direct_policy_executive_release_phase_state": bool(
+                self.direct_policy_executive_release_phase_state
+            ),
+            "direct_policy_executive_release_progression": bool(
+                self.direct_policy_executive_release_progression
+            ),
+            "direct_policy_executive_release_exit_contract": bool(
+                self.direct_policy_executive_release_exit_contract
+            ),
+            "direct_policy_executive_release_substate_progression": bool(
+                self.direct_policy_executive_release_substate_progression
+            ),
+            "direct_policy_executive_post_exit_continuation": bool(
+                self.direct_policy_executive_post_exit_continuation
+            ),
+            "direct_policy_executive_post_exit_food_guidance": bool(
+                self.direct_policy_executive_post_exit_food_guidance
+            ),
+            "direct_policy_executive_post_exit_food_commitment": bool(
+                self.direct_policy_executive_post_exit_food_commitment
+            ),
+            "direct_policy_executive_post_exit_food_progression": bool(
+                self.direct_policy_executive_post_exit_food_progression
+            ),
+            "direct_policy_executive_post_exit_food_heading_progression": bool(
+                self.direct_policy_executive_post_exit_food_heading_progression
+            ),
+            "direct_policy_executive_post_exit_smell_progression": bool(
+                self.direct_policy_executive_post_exit_smell_progression
+            ),
+            "direct_policy_executive_post_exit_corridor_progression": bool(
+                self.direct_policy_executive_post_exit_corridor_progression
+            ),
+            "direct_policy_executive_post_exit_corridor_affordance_progression": bool(
+                self.direct_policy_executive_post_exit_corridor_affordance_progression
+            ),
+            "direct_policy_executive_post_food_return": bool(
+                self.direct_policy_executive_post_food_return
+            ),
+            "direct_policy_executive_post_food_vector_return": bool(
+                self.direct_policy_executive_post_food_vector_return
+            ),
+            "direct_policy_executive_post_food_path_return": bool(
+                self.direct_policy_executive_post_food_path_return
+            ),
             "action_center_hidden_dim": int(self.action_center_hidden_dim or 0),
             "arbitration_hidden_dim": int(self.arbitration_hidden_dim or 0),
             "motor_hidden_dim": int(self.motor_hidden_dim or 0),
@@ -626,6 +2022,338 @@ class BrainAblationConfig:
             module_hidden_dims=dict(summary.get("module_hidden_dims", {}) or {}),
             direct_policy_hidden_dims=tuple(
                 summary.get("direct_policy_hidden_dims", ()) or ()
+            ),
+            direct_policy_recurrent=bool(
+                summary.get("direct_policy_recurrent", False)
+            ),
+            direct_policy_phase_head=bool(
+                summary.get("direct_policy_phase_head", False)
+            ),
+            direct_policy_event_attention=bool(
+                summary.get("direct_policy_event_attention", False)
+            ),
+            direct_policy_event_buffer_size=int(
+                summary.get("direct_policy_event_buffer_size", 0)
+            ),
+            direct_policy_option_head=bool(
+                summary.get("direct_policy_option_head", False)
+            ),
+            direct_policy_option_ttl=int(
+                summary.get("direct_policy_option_ttl", 0)
+            ),
+            direct_policy_affordance_head=bool(
+                summary.get("direct_policy_affordance_head", False)
+            ),
+            direct_policy_affordance_feedback=bool(
+                summary.get("direct_policy_affordance_feedback", False)
+            ),
+            direct_policy_geometry_head=bool(
+                summary.get("direct_policy_geometry_head", False)
+            ),
+            direct_policy_shelter_column_head=bool(
+                summary.get("direct_policy_shelter_column_head", False)
+            ),
+            direct_policy_shelter_position_head=bool(
+                summary.get("direct_policy_shelter_position_head", False)
+            ),
+            direct_policy_local_affordance_inputs=bool(
+                summary.get("direct_policy_local_affordance_inputs", False)
+            ),
+            direct_policy_local_spatial_inputs=bool(
+                summary.get("direct_policy_local_spatial_inputs", False)
+            ),
+            direct_policy_local_transition_inputs=bool(
+                summary.get("direct_policy_local_transition_inputs", False)
+            ),
+            direct_policy_local_transition_rollout_inputs=bool(
+                summary.get("direct_policy_local_transition_rollout_inputs", False)
+            ),
+            direct_policy_local_geodesic_inputs=bool(
+                summary.get("direct_policy_local_geodesic_inputs", False)
+            ),
+            direct_policy_transition_prediction_head=bool(
+                summary.get("direct_policy_transition_prediction_head", False)
+            ),
+            direct_policy_transition_prediction_feedback=bool(
+                summary.get("direct_policy_transition_prediction_feedback", False)
+            ),
+            direct_policy_transition_rollout_prediction_head=bool(
+                summary.get("direct_policy_transition_rollout_prediction_head", False)
+            ),
+            direct_policy_transition_rollout_prediction_feedback=bool(
+                summary.get(
+                    "direct_policy_transition_rollout_prediction_feedback", False
+                )
+            ),
+            direct_policy_handoff_teacher=bool(
+                summary.get("direct_policy_handoff_teacher", False)
+            ),
+            direct_policy_handoff_option_teacher=bool(
+                summary.get("direct_policy_handoff_option_teacher", False)
+            ),
+            direct_policy_post_rest_action_teacher=bool(
+                summary.get("direct_policy_post_rest_action_teacher", False)
+            ),
+            direct_policy_post_rest_release_sequence_teacher=bool(
+                summary.get(
+                    "direct_policy_post_rest_release_sequence_teacher",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_release_sequence_replay_boost=bool(
+                summary.get(
+                    "direct_policy_post_rest_release_sequence_replay_boost",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_release_sequence_distill=bool(
+                summary.get(
+                    "direct_policy_post_rest_release_sequence_distill",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_sequence_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_sequence_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_family_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_family_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_handoff_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_handoff_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_trajectory_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_trajectory_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_cycle_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_cycle_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_trace_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_trace_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_rollout_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_rollout_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_frontier_teacher_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_frontier_teacher_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_replayable_teacher_distillation=bool(
+                summary.get(
+                    "direct_policy_post_rest_probe_replayable_teacher_distillation",
+                    False,
+                )
+            ),
+            direct_policy_continuation_replay_passes=int(
+                summary.get("direct_policy_continuation_replay_passes", 0)
+            ),
+            direct_policy_continuation_replay_lr_scale=float(
+                summary.get("direct_policy_continuation_replay_lr_scale", 0.0)
+            ),
+            direct_policy_continuation_margin_weight=float(
+                summary.get("direct_policy_continuation_margin_weight", 0.0)
+            ),
+            direct_policy_phase_option_feedback=bool(
+                summary.get("direct_policy_phase_option_feedback", False)
+            ),
+            direct_policy_option_transition_feedback=bool(
+                summary.get("direct_policy_option_transition_feedback", False)
+            ),
+            direct_policy_option_termination_cooldown=bool(
+                summary.get("direct_policy_option_termination_cooldown", False)
+            ),
+            direct_policy_option_action_head=bool(
+                summary.get("direct_policy_option_action_head", False)
+            ),
+            direct_policy_option_decoder_state=bool(
+                summary.get("direct_policy_option_decoder_state", False)
+            ),
+            direct_policy_option_recurrent_dynamics=bool(
+                summary.get("direct_policy_option_recurrent_dynamics", False)
+            ),
+            direct_policy_option_sequence_head=bool(
+                summary.get("direct_policy_option_sequence_head", False)
+            ),
+            direct_policy_option_decoder_recurrent_state=bool(
+                summary.get("direct_policy_option_decoder_recurrent_state", False)
+            ),
+            direct_policy_option_action_transition_state=bool(
+                summary.get("direct_policy_option_action_transition_state", False)
+            ),
+            direct_policy_option_action_controller_state=bool(
+                summary.get("direct_policy_option_action_controller_state", False)
+            ),
+            direct_policy_option_action_token_decoder=bool(
+                summary.get("direct_policy_option_action_token_decoder", False)
+            ),
+            direct_policy_option_action_recurrent_core=bool(
+                summary.get("direct_policy_option_action_recurrent_core", False)
+            ),
+            direct_policy_option_action_separate_recurrent_head=bool(
+                summary.get(
+                    "direct_policy_option_action_separate_recurrent_head",
+                    False,
+                )
+            ),
+            direct_policy_option_action_separate_policy_path=bool(
+                summary.get(
+                    "direct_policy_option_action_separate_policy_path",
+                    False,
+                )
+            ),
+            direct_policy_option_action_separate_backbone=bool(
+                summary.get(
+                    "direct_policy_option_action_separate_backbone",
+                    False,
+                )
+            ),
+            direct_policy_executive_physiology_option_gating=bool(
+                summary.get(
+                    "direct_policy_executive_physiology_option_gating",
+                    False,
+                )
+            ),
+            direct_policy_executive_affordance_action_gating=bool(
+                summary.get(
+                    "direct_policy_executive_affordance_action_gating",
+                    False,
+                )
+            ),
+            direct_policy_executive_option_action_masking=bool(
+                summary.get(
+                    "direct_policy_executive_option_action_masking",
+                    False,
+                )
+            ),
+            direct_policy_executive_event_release_latching=bool(
+                summary.get(
+                    "direct_policy_executive_event_release_latching",
+                    False,
+                )
+            ),
+            direct_policy_executive_event_release_action_commitment=bool(
+                summary.get(
+                    "direct_policy_executive_event_release_action_commitment",
+                    False,
+                )
+            ),
+            direct_policy_executive_release_phase_state=bool(
+                summary.get(
+                    "direct_policy_executive_release_phase_state",
+                    False,
+                )
+            ),
+            direct_policy_executive_release_progression=bool(
+                summary.get(
+                    "direct_policy_executive_release_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_release_exit_contract=bool(
+                summary.get(
+                    "direct_policy_executive_release_exit_contract",
+                    False,
+                )
+            ),
+            direct_policy_executive_release_substate_progression=bool(
+                summary.get(
+                    "direct_policy_executive_release_substate_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_continuation=bool(
+                summary.get(
+                    "direct_policy_executive_post_exit_continuation",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_food_guidance=bool(
+                summary.get(
+                    "direct_policy_executive_post_exit_food_guidance",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_food_commitment=bool(
+                summary.get(
+                    "direct_policy_executive_post_exit_food_commitment",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_food_progression=bool(
+                summary.get(
+                    "direct_policy_executive_post_exit_food_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_food_heading_progression=bool(
+                summary.get(
+                    "direct_policy_executive_post_exit_food_heading_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_smell_progression=bool(
+                summary.get(
+                    "direct_policy_executive_post_exit_smell_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_corridor_progression=bool(
+                summary.get(
+                    "direct_policy_executive_post_exit_corridor_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_corridor_affordance_progression=bool(
+                summary.get(
+                    "direct_policy_executive_post_exit_corridor_affordance_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_food_return=bool(
+                summary.get(
+                    "direct_policy_executive_post_food_return",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_food_vector_return=bool(
+                summary.get(
+                    "direct_policy_executive_post_food_vector_return",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_food_path_return=bool(
+                summary.get(
+                    "direct_policy_executive_post_food_path_return",
+                    False,
+                )
             ),
             action_center_hidden_dim=summary.get(
                 "action_center_hidden_dim",

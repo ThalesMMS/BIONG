@@ -14,6 +14,11 @@ if TYPE_CHECKING:
 
 # Backward-compatible alias for existing private imports from the old module.
 _policy_float = policy_float
+_RECENT_CONTACT_RESIDUAL_FLOOR = 0.01
+
+
+def _contact_exceeds_threshold(value: float, threshold: float) -> bool:
+    return float(value) > max(float(threshold), _RECENT_CONTACT_RESIDUAL_FLOOR)
 
 
 def empty_reward_components() -> dict[str, float]:
@@ -107,6 +112,10 @@ def compute_predator_threat(
 
     cfg = world.operational_profile.reward
     shelter_role = world.shelter_role_at(world.spider_pos())
+    recent_contact_active = _contact_exceeds_threshold(
+        world.state.recent_contact,
+        cfg["predator_threat_contact_threshold"],
+    )
     predator_smell_strength_now, _, _, _ = smell_gradient(
         world,
         [world.lizard_pos()],
@@ -115,7 +124,7 @@ def compute_predator_threat(
     )
     smell_only_interior_shelter = (
         shelter_role in {"inside", "deep"}
-        and world.state.recent_contact <= cfg["predator_threat_contact_threshold"]
+        and not recent_contact_active
         and world.state.recent_pain <= cfg["predator_threat_recent_pain_threshold"]
         and not prev_predator_visible
         and prev_predator_dist > cfg["predator_threat_distance_threshold"]
@@ -124,7 +133,7 @@ def compute_predator_threat(
     if smell_only_interior_shelter:
         return False
     return (
-        world.state.recent_contact > cfg["predator_threat_contact_threshold"]
+        recent_contact_active
         or world.state.recent_pain > cfg["predator_threat_recent_pain_threshold"]
         or prev_predator_visible
         or prev_predator_dist <= cfg["predator_threat_distance_threshold"]
@@ -180,6 +189,14 @@ def apply_progress_and_event_rewards(
     info = tick_context.info
     cfg = world.reward_config
     profile = world.operational_profile.reward
+    recent_contact_escape_active = _contact_exceeds_threshold(
+        world.state.recent_contact,
+        profile["predator_escape_contact_threshold"],
+    )
+    recent_contact_reset_active = _contact_exceeds_threshold(
+        world.state.recent_contact,
+        profile["reset_sleep_contact_threshold"],
+    )
 
     _, new_food_dist = world.nearest(world.food_positions)
     _, new_shelter_dist = world.nearest(world.shelter_deep_cells or world.shelter_cells)
@@ -242,7 +259,7 @@ def apply_progress_and_event_rewards(
                 + profile["shelter_progress_sleep_debt_weight"] * world.state.sleep_debt
             )
         )
-    if prev_predator_visible or world.state.recent_contact > profile["predator_escape_contact_threshold"]:
+    if prev_predator_visible or recent_contact_escape_active:
         reward_components["predator_escape"] += cfg["predator_escape"] * predator_distance_gain
         reward_components["shelter_progress"] += cfg["threat_shelter_progress"] * shelter_progress
         if action_name == "STAY" and not world.on_shelter():
@@ -274,7 +291,7 @@ def apply_progress_and_event_rewards(
     predator_escape = False
     escape_context_active = bool(
         prev_predator_visible
-        or world.state.recent_contact > profile["predator_escape_contact_threshold"]
+        or recent_contact_escape_active
     )
     threat_episode_active_now = bool(
         escape_context_active
@@ -311,7 +328,7 @@ def apply_progress_and_event_rewards(
 
     if (
         new_predator_dist <= profile["reset_sleep_predator_distance_threshold"]
-        or world.state.recent_contact > profile["reset_sleep_contact_threshold"]
+        or recent_contact_reset_active
         or world.state.recent_pain > profile["reset_sleep_recent_pain_threshold"]
     ):
         reset_sleep_state(world)

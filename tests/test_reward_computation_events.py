@@ -198,6 +198,40 @@ class RewardComputationEventsTest(RewardComputationModuleTestBase):
             entry_event = next(e for e in context.event_log if e.name == "shelter_entry")
             self.assertIn("shelter_role", entry_event.payload)
 
+    def test_apply_progress_and_event_rewards_does_not_reset_sleep_for_tiny_contact_residue(self) -> None:
+        world = SpiderWorld(
+            seed=1,
+            lizard_move_interval=999999,
+            map_template="central_burrow",
+        )
+        world.reset(seed=1)
+        world.state.x, world.state.y = 5, 7
+        world.lizard.x, world.lizard.y = 8, 8
+        world.state.recent_contact = 0.001
+        world.state.recent_pain = 0.05
+
+        prev_spider_pos = world.spider_pos()
+        prev_lizard_pos = world.lizard_pos()
+        context = self._tick_context(
+            world,
+            action_name="STAY",
+            moved=False,
+            night=False,
+            terrain_now=world.terrain_at(world.spider_pos()),
+            was_on_shelter=True,
+            prev_food_dist=5,
+            prev_shelter_dist=0,
+            prev_predator_dist=4,
+            prev_predator_visible=False,
+            prev_spider_pos=prev_spider_pos,
+            prev_lizard_pos=prev_lizard_pos,
+        )
+
+        apply_progress_and_event_rewards(world, tick_context=context)
+
+        event_names = [e.name for e in context.event_log]
+        self.assertNotIn("sleep_reset_due_to_threat", event_names)
+
     def test_apply_progress_and_event_rewards_predator_escape_sets_context_flag(self) -> None:
         world = SpiderWorld(seed=1, lizard_move_interval=999999)
         world.reset(seed=1)

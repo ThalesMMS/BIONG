@@ -9,6 +9,7 @@ from ..predator import (
     PredatorProfile,
     VISUAL_HUNTER_PROFILE,
 )
+from ..world_types import MemorySlot
 from ..world import SpiderWorld
 from .specs import (
     FAST_VISUAL_HUNTER_PROFILE,
@@ -497,6 +498,206 @@ def _continuous_survival_medium_v1(world: SpiderWorld) -> None:
         ),
     )
     world.refresh_memory(initial=True)
+
+
+def _configure_continuous_survival_post_rest(
+    world: SpiderWorld,
+    *,
+    start_cell: tuple[int, int],
+    food: tuple[int, int],
+    predator: LizardState,
+) -> None:
+    """Configure a recovered post-rest continuation state for training-only scenarios."""
+    deep = _first_cell(
+        world.shelter_deep_cells
+        or world.shelter_interior_cells
+        or world.shelter_entrance_cells
+    )
+    corridor_food_cells = tuple(_continuous_survival_food_corridor(world, deep))
+    entrance = _first_cell(world.shelter_entrance_cells)
+    world.tick = 2
+    _teleport_spider(world, start_cell)
+    world._scenario_food_spawn_cells = corridor_food_cells
+    world.food_positions = [food]
+    world.state.hunger = 0.84
+    world.state.fatigue = 0.10
+    world.state.sleep_debt = 0.08
+    world.state.sleep_phase = "AWAKE"
+    world.state.rest_streak = 0
+    world.state.food_eaten = 2
+    world.state.sleep_events = 1
+    world.state.shelter_entries = max(1, int(world.state.shelter_entries))
+    world.state.heading_dx, world.state.heading_dy = world._heading_toward(
+        food,
+        origin=start_cell,
+    )
+    world.lizard = predator
+    world.refresh_memory(initial=True)
+    world.state.food_memory = MemorySlot(target=food, age=0)
+    world.state.shelter_memory = MemorySlot(target=entrance, age=0)
+
+
+def _configure_continuous_survival_late_cycle(
+    world: SpiderWorld,
+    *,
+    start_cell: tuple[int, int],
+    food: tuple[int, int],
+    predator: LizardState,
+    tick: int,
+    hunger: float,
+    fatigue: float,
+    sleep_debt: float,
+    heading_target: tuple[int, int],
+) -> None:
+    """Configure a late-cycle continuation state after a prior rest and multiple meals."""
+    deep = _first_cell(
+        world.shelter_deep_cells
+        or world.shelter_interior_cells
+        or world.shelter_entrance_cells
+    )
+    corridor_food_cells = tuple(_continuous_survival_food_corridor(world, deep))
+    entrance = _first_cell(world.shelter_entrance_cells)
+    world.tick = tick
+    _teleport_spider(world, start_cell)
+    world._scenario_food_spawn_cells = corridor_food_cells
+    world.food_positions = [food]
+    world.state.hunger = hunger
+    world.state.fatigue = fatigue
+    world.state.sleep_debt = sleep_debt
+    world.state.sleep_phase = "AWAKE"
+    world.state.rest_streak = 0
+    world.state.food_eaten = 4
+    world.state.sleep_events = 2
+    world.state.shelter_entries = max(2, int(world.state.shelter_entries))
+    world.state.heading_dx, world.state.heading_dy = world._heading_toward(
+        heading_target,
+        origin=start_cell,
+    )
+    world.lizard = predator
+    world.refresh_memory(initial=True)
+    world.state.food_memory = MemorySlot(target=food, age=1)
+    world.state.shelter_memory = MemorySlot(target=entrance, age=0)
+
+
+def _continuous_survival_post_rest_inside_v1(world: SpiderWorld) -> None:
+    """Configure a recovered inside-shelter continuation state with food still outside."""
+    deep = _first_cell(
+        world.shelter_deep_cells
+        or world.shelter_interior_cells
+        or world.shelter_entrance_cells
+    )
+    inside = _first_cell(world.shelter_interior_cells or world.shelter_deep_cells)
+    corridor_food_cells = tuple(_continuous_survival_food_corridor(world, deep))
+    food = corridor_food_cells[min(1, len(corridor_food_cells) - 1)]
+    lx, ly = _continuous_survival_predator_cell(
+        world,
+        excluded={food, inside},
+        corridor_food_cells=corridor_food_cells,
+    )
+    _configure_continuous_survival_post_rest(
+        world,
+        start_cell=inside,
+        food=food,
+        predator=LizardState(
+            x=lx,
+            y=ly,
+            mode="PATROL",
+            profile=VISUAL_HUNTER_PROFILE,
+        ),
+    )
+
+
+def _continuous_survival_post_rest_entrance_v1(world: SpiderWorld) -> None:
+    """Configure a recovered entrance-handoff state with nearby residual predator pressure."""
+    deep = _first_cell(
+        world.shelter_deep_cells
+        or world.shelter_interior_cells
+        or world.shelter_entrance_cells
+    )
+    entrance = _first_cell(world.shelter_entrance_cells)
+    corridor_food_cells = tuple(_continuous_survival_food_corridor(world, deep))
+    food = corridor_food_cells[min(1, len(corridor_food_cells) - 1)]
+    lx, ly = _entrance_ambush_cell(world, entrance)
+    _configure_continuous_survival_post_rest(
+        world,
+        start_cell=entrance,
+        food=food,
+        predator=LizardState(
+            x=lx,
+            y=ly,
+            mode="WAIT",
+            wait_target=entrance,
+            profile=OLFACTORY_HUNTER_PROFILE,
+            failed_chases=1,
+        ),
+    )
+    world.state.predator_memory = MemorySlot(target=(lx, ly), age=0)
+
+
+def _continuous_survival_return_after_late_forage_v1(world: SpiderWorld) -> None:
+    """Configure a late-forage outside state that should favor returning deeply to shelter."""
+    deep = _first_cell(
+        world.shelter_deep_cells
+        or world.shelter_interior_cells
+        or world.shelter_entrance_cells
+    )
+    corridor_food_cells = tuple(_continuous_survival_food_corridor(world, deep))
+    start_cell = corridor_food_cells[-1]
+    food = corridor_food_cells[0]
+    lx, ly = _continuous_survival_predator_cell(
+        world,
+        excluded={start_cell, food},
+        corridor_food_cells=corridor_food_cells,
+    )
+    _configure_continuous_survival_late_cycle(
+        world,
+        start_cell=start_cell,
+        food=food,
+        predator=LizardState(
+            x=lx,
+            y=ly,
+            mode="PATROL",
+            profile=VISUAL_HUNTER_PROFILE,
+        ),
+        tick=world.day_length - 4,
+        hunger=0.34,
+        fatigue=0.42,
+        sleep_debt=0.40,
+        heading_target=deep,
+    )
+
+
+def _continuous_survival_re_rest_after_return_v1(world: SpiderWorld) -> None:
+    """Configure an inside-shelter late-cycle state that should settle into a second rest."""
+    deep = _first_cell(
+        world.shelter_deep_cells
+        or world.shelter_interior_cells
+        or world.shelter_entrance_cells
+    )
+    inside = _first_cell(world.shelter_interior_cells or world.shelter_deep_cells)
+    corridor_food_cells = tuple(_continuous_survival_food_corridor(world, deep))
+    food = corridor_food_cells[-1]
+    lx, ly = _continuous_survival_predator_cell(
+        world,
+        excluded={food, inside},
+        corridor_food_cells=corridor_food_cells,
+    )
+    _configure_continuous_survival_late_cycle(
+        world,
+        start_cell=inside,
+        food=food,
+        predator=LizardState(
+            x=lx,
+            y=ly,
+            mode="PATROL",
+            profile=VISUAL_HUNTER_PROFILE,
+        ),
+        tick=world.day_length + 2,
+        hunger=0.40,
+        fatigue=0.48,
+        sleep_debt=0.46,
+        heading_target=food,
+    )
 
 
 def _predator_edge(world: SpiderWorld) -> None:

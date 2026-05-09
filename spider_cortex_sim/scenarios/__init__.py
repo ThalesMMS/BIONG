@@ -14,12 +14,15 @@ from .scoring import (
     EXPOSED_DAY_FORAGING_CHECKS,
     FOOD_DEPRIVATION_CHECKS,
     FOOD_VS_PREDATOR_CONFLICT_CHECKS,
+    LATE_FORAGE_RETURN_CHECKS,
     NIGHT_REST_CHECKS,
     OLFACTORY_AMBUSH_CHECKS,
     OLFACTORY_AMBUSH_WINDOW_TICKS,
     OPEN_FIELD_FORAGING_CHECKS,
+    POST_REST_CONTINUATION_CHECKS,
     PREDATOR_EDGE_CHECKS,
     RECOVER_AFTER_FAILED_CHASE_CHECKS,
+    RE_REST_AFTER_RETURN_CHECKS,
     SHELTER_BLOCKADE_CHECKS,
     SLEEP_VS_EXPLORATION_CONFLICT_CHECKS,
     TWO_SHELTER_TRADEOFF_CHECKS,
@@ -38,6 +41,9 @@ from .scoring import (
     _progress_band,
     _score_corridor_gauntlet,
     _score_continuous_survival_canonical,
+    _score_continuous_survival_post_rest_continuation,
+    _score_continuous_survival_re_rest_after_return,
+    _score_continuous_survival_return_after_late_forage,
     _score_entrance_ambush,
     _score_exposed_day_foraging,
     _score_food_deprivation,
@@ -83,6 +89,10 @@ from .setup import (
     _continuous_survival_canonical,
     _continuous_survival_easy_v1,
     _continuous_survival_medium_v1,
+    _continuous_survival_post_rest_inside_v1,
+    _continuous_survival_post_rest_entrance_v1,
+    _continuous_survival_return_after_late_forage_v1,
+    _continuous_survival_re_rest_after_return_v1,
 )
 from .specs import (
     FAST_VISUAL_HUNTER_PROFILE,
@@ -233,6 +243,78 @@ SCENARIOS: Dict[str, ScenarioSpec] = {
         map_template="central_burrow",
         setup=_continuous_survival_medium_v1,
         score_episode=_score_continuous_survival_canonical,
+        expected_owner_modules=("sleep_center", "hunger_center", "threat_center"),
+    ),
+    "continuous_survival_post_rest_inside_v1": ScenarioSpec(
+        name="continuous_survival_post_rest_inside_v1",
+        description="Training-only recovered inside-shelter continuation with food still outside shelter.",
+        objective="Teach the controller to reopen a post-rest forage cycle from an inside-shelter recovered state.",
+        behavior_checks=POST_REST_CONTINUATION_CHECKS,
+        diagnostic_focus=(
+            "Starts after a completed rest event with low sleep debt, food still outside shelter, "
+            "and enough residual food memory to require a real inside-shelter continuation rather than bootstrap feeding."
+        ),
+        success_interpretation="Use as curriculum evidence that the policy can leave a recovered shelter state and resume the external food loop.",
+        failure_interpretation="Failure indicates the post-rest one-exit attractor still blocks continuation even when the episode starts from the recovered sheltered phase.",
+        budget_note="Training-only continuation scenario; do not use it as final acceptance evidence.",
+        max_steps=180,
+        map_template="central_burrow",
+        setup=_continuous_survival_post_rest_inside_v1,
+        score_episode=_score_continuous_survival_post_rest_continuation,
+        expected_owner_modules=("sleep_center", "hunger_center", "threat_center"),
+    ),
+    "continuous_survival_post_rest_entrance_v1": ScenarioSpec(
+        name="continuous_survival_post_rest_entrance_v1",
+        description="Training-only recovered entrance-handoff continuation with residual predator pressure.",
+        objective="Teach the controller to resolve the recovered entrance handoff and commit back into post-rest foraging.",
+        behavior_checks=POST_REST_CONTINUATION_CHECKS,
+        diagnostic_focus=(
+            "Starts after a completed rest event near the shelter entrance, with food outside shelter "
+            "and local predator pressure that forces a real handoff instead of a static stay basin."
+        ),
+        success_interpretation="Use as curriculum evidence that the policy can transition from recovered sheltering into renewed external foraging under mild threat.",
+        failure_interpretation="Failure indicates the controller still collapses at the entrance handoff even when the rest cycle has already completed.",
+        budget_note="Training-only continuation scenario; keep canonical long-run evaluation separate.",
+        max_steps=180,
+        map_template="central_burrow",
+        setup=_continuous_survival_post_rest_entrance_v1,
+        score_episode=_score_continuous_survival_post_rest_continuation,
+        expected_owner_modules=("sleep_center", "hunger_center", "threat_center"),
+    ),
+    "continuous_survival_return_after_late_forage_v1": ScenarioSpec(
+        name="continuous_survival_return_after_late_forage_v1",
+        description="Training-only late-forage outside state that should favor returning and deepening in shelter.",
+        objective="Teach the controller to terminate a later forage leg by returning from the outer corridor into safe shelter.",
+        behavior_checks=LATE_FORAGE_RETURN_CHECKS,
+        diagnostic_focus=(
+            "Starts after multiple meals from an outside corridor state with low hunger and elevated fatigue/sleep debt, "
+            "so the policy must choose return-to-shelter over another shallow outside loop."
+        ),
+        success_interpretation="Use as curriculum evidence that late-cycle foraging can terminate in a real return trajectory rather than another exposed stall.",
+        failure_interpretation="Failure indicates the controller still does not close the loop after later meals even when started directly from a late-forage continuation state.",
+        budget_note="Training-only continuation scenario; keep canonical acceptance separate.",
+        max_steps=180,
+        map_template="central_burrow",
+        setup=_continuous_survival_return_after_late_forage_v1,
+        score_episode=_score_continuous_survival_return_after_late_forage,
+        expected_owner_modules=("sleep_center", "hunger_center", "threat_center"),
+    ),
+    "continuous_survival_re_rest_after_return_v1": ScenarioSpec(
+        name="continuous_survival_re_rest_after_return_v1",
+        description="Training-only inside-shelter late-cycle state that should settle into a second real rest.",
+        objective="Teach the controller to re-enter rest after a later return instead of reopening a shallow awake basin in shelter.",
+        behavior_checks=RE_REST_AFTER_RETURN_CHECKS,
+        diagnostic_focus=(
+            "Starts after multiple meals and a late return from inside shelter at night with elevated fatigue/sleep debt, "
+            "so the controller must settle and rest again while food remains outside shelter."
+        ),
+        success_interpretation="Use as curriculum evidence that later return cycles can end in real rest rather than an inert awake plateau.",
+        failure_interpretation="Failure indicates the controller still does not complete the return-to-rest half of the later ecological cycle.",
+        budget_note="Training-only continuation scenario; do not use it as final acceptance evidence.",
+        max_steps=180,
+        map_template="central_burrow",
+        setup=_continuous_survival_re_rest_after_return_v1,
+        score_episode=_score_continuous_survival_re_rest_after_return,
         expected_owner_modules=("sleep_center", "hunger_center", "threat_center"),
     ),
     "predator_edge": ScenarioSpec(

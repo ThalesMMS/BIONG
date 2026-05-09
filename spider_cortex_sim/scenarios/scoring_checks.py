@@ -68,6 +68,24 @@ CONTINUOUS_SURVIVAL_CHECKS: Sequence[BehaviorCheckSpec] = (
     BehaviorCheckSpec("low_contact_survival", "Keeps predator contact low during the long run.", "predator_contacts <= 1"),
 )
 
+POST_REST_CONTINUATION_CHECKS: Sequence[BehaviorCheckSpec] = (
+    BehaviorCheckSpec("post_rest_exit_committed", "Leaves shelter after the recovered post-rest start.", "shelter_exits >= 1"),
+    BehaviorCheckSpec("post_rest_food_reacquired", "Reacquires outside food after the recovered post-rest start.", "food_eaten >= 1"),
+    BehaviorCheckSpec("post_rest_cycle_reclosed", "Returns to shelter after the post-rest forage leg.", "shelter_returns >= 1"),
+)
+
+LATE_FORAGE_RETURN_CHECKS: Sequence[BehaviorCheckSpec] = (
+    BehaviorCheckSpec("late_cycle_return_completed", "Returns from the late forage state back into shelter.", "shelter_returns >= 1"),
+    BehaviorCheckSpec("late_cycle_shelter_reached", "Ends the late-forage continuation inside shelter.", "final shelter role is sheltered"),
+    BehaviorCheckSpec("late_cycle_survives_without_contact", "Survives the late-forage return with low predator contact.", "alive and predator_contacts <= 1"),
+)
+
+RE_REST_AFTER_RETURN_CHECKS: Sequence[BehaviorCheckSpec] = (
+    BehaviorCheckSpec("late_cycle_re_rest_started", "Re-enters real rest after the later shelter return.", "sleep_events >= 1 or sleep_debt decreases"),
+    BehaviorCheckSpec("late_cycle_stays_sheltered", "Stays in shelter during the re-rest recovery window.", "shelter_exits == 0"),
+    BehaviorCheckSpec("late_cycle_survives_without_contact", "Survives the late-cycle re-rest window with low predator contact.", "alive and predator_contacts <= 1"),
+)
+
 SHELTER_BLOCKADE_CHECKS: Sequence[BehaviorCheckSpec] = (
     BehaviorCheckSpec("survives_blockade", "Survives the nighttime entrance blockade.", "true"),
     BehaviorCheckSpec("avoids_blockade_contact", "Avoids direct contact during the blockade.", "true"),

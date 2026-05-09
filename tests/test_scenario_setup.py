@@ -42,6 +42,10 @@ class ScenarioSetupRegressionTest(ScenarioWorldHelpers, unittest.TestCase):
                 "continuous_survival_canonical",
                 "continuous_survival_easy_v1",
                 "continuous_survival_medium_v1",
+                "continuous_survival_post_rest_inside_v1",
+                "continuous_survival_post_rest_entrance_v1",
+                "continuous_survival_return_after_late_forage_v1",
+                "continuous_survival_re_rest_after_return_v1",
             }:
                 continue
             with self.subTest(scenario=name):
@@ -148,6 +152,52 @@ class ScenarioSetupRegressionTest(ScenarioWorldHelpers, unittest.TestCase):
         self.assertEqual(world.food_positions[0], (10, 7))
         self.assertEqual(world.lizard.profile.move_interval, 3)
         self.assertGreater(world.lizard.profile.detection_threshold, VISUAL_HUNTER_PROFILE.detection_threshold)
+
+    def test_continuous_survival_post_rest_inside_v1_starts_recovered_inside_shelter(self) -> None:
+        world = self._setup_world("continuous_survival_post_rest_inside_v1")
+        self.assertFalse(world.is_night())
+        self.assertEqual(world.state.sleep_events, 1)
+        self.assertEqual(world.state.food_eaten, 2)
+        self.assertLessEqual(world.state.sleep_debt, 0.08)
+        self.assertEqual(world.shelter_role_at(world.spider_pos()), "inside")
+        self.assertNotIn(world.food_positions[0], world.shelter_cells)
+        self.assertEqual(
+            (world.state.heading_dx, world.state.heading_dy),
+            world._heading_toward(world.food_positions[0], origin=world.spider_pos()),
+        )
+
+    def test_continuous_survival_post_rest_entrance_v1_starts_with_residual_threat(self) -> None:
+        world = self._setup_world("continuous_survival_post_rest_entrance_v1")
+        self.assertFalse(world.is_night())
+        self.assertEqual(world.state.sleep_events, 1)
+        self.assertEqual(world.state.food_eaten, 2)
+        self.assertEqual(world.shelter_role_at(world.spider_pos()), "entrance")
+        self.assertNotIn(world.food_positions[0], world.shelter_cells)
+        self.assertEqual(world.lizard.profile, OLFACTORY_HUNTER_PROFILE)
+        self.assertEqual(world.lizard.mode, "WAIT")
+        self.assertEqual(world.state.predator_memory.target, world.lizard_pos())
+
+    def test_continuous_survival_return_after_late_forage_v1_starts_outside_after_late_cycle(self) -> None:
+        world = self._setup_world("continuous_survival_return_after_late_forage_v1")
+        self.assertFalse(world.is_night())
+        self.assertEqual(world.state.food_eaten, 4)
+        self.assertEqual(world.state.sleep_events, 2)
+        self.assertFalse(world.on_shelter())
+        self.assertLess(world.state.hunger, 0.4)
+        self.assertGreaterEqual(world.state.fatigue, 0.42)
+        self.assertGreaterEqual(world.state.sleep_debt, 0.40)
+        self.assertNotIn(world.food_positions[0], world.shelter_cells)
+        self.assertEqual((world.state.heading_dx, world.state.heading_dy), (-1, 0))
+
+    def test_continuous_survival_re_rest_after_return_v1_starts_inside_at_night_with_sleep_pressure(self) -> None:
+        world = self._setup_world("continuous_survival_re_rest_after_return_v1")
+        self.assertTrue(world.is_night())
+        self.assertEqual(world.state.food_eaten, 4)
+        self.assertEqual(world.state.sleep_events, 2)
+        self.assertEqual(world.shelter_role_at(world.spider_pos()), "inside")
+        self.assertGreaterEqual(world.state.fatigue, 0.48)
+        self.assertGreaterEqual(world.state.sleep_debt, 0.46)
+        self.assertNotIn(world.food_positions[0], world.shelter_cells)
 
     def test_open_field_foraging_first_route_avoids_blocked_east_wall(self) -> None:
         """

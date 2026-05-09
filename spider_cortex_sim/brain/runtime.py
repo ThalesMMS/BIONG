@@ -10,6 +10,7 @@ from typing import Dict, List, Sequence
 import numpy as np
 
 from ..ablations import BrainAblationConfig, default_brain_config
+from ..direct_policy_affordances import AFFORDANCE_SHELTER_ROLE_NAMES
 from ..arbitration import (
     ARBITRATION_EVIDENCE_FIELDS as DEFAULT_ARBITRATION_EVIDENCE_FIELDS,
     ARBITRATION_GATE_MODULE_ORDER as DEFAULT_ARBITRATION_GATE_MODULE_ORDER,
@@ -44,12 +45,16 @@ from ..nn import (
     ArbitrationNetwork,
     MotorNetwork,
     ProposalNetwork,
+    RecurrentEventAttentionTrueMonolithicNetwork,
+    RecurrentOptionAffordanceTrueMonolithicNetwork,
+    RecurrentOptionTrueMonolithicNetwork,
     RecurrentProposalNetwork,
     one_hot,
     softmax,
 )
 from ..noise import _compute_execution_difficulty_core
 from ..operational_profiles import OperationalProfile, runtime_operational_profile
+from ..phase import PHASE_LABELS
 from ..reflexes import (
     _apply_reflex_path as apply_reflex_path,
     _direction_action as direction_action,
@@ -58,6 +63,10 @@ from ..reflexes import (
 from ..world import ACTIONS
 
 from .types import BrainStep
+
+TRUE_MONOLITHIC_NO_FOOD_DIRECTION_VARIANTS = {
+    "true_monolithic_executive_option_guarded_policy",
+}
 
 TRUE_MONOLITHIC_DIRECTION_BIAS_LOGIT = 3.0
 MODULAR_DIRECTION_BIAS_LOGIT = 3.0
@@ -74,6 +83,59 @@ class BrainRuntimeMixin:
                 network.input_dim * network.hidden_dim
                 + network.hidden_dim * network.hidden_dim
                 + network.hidden_dim * network.output_dim
+            )
+        if isinstance(network, RecurrentEventAttentionTrueMonolithicNetwork):
+            recurrent_input_dim = (
+                network.input_dim + network.event_context_dim
+            )
+            event_raw_dim = (
+                network.event_embedding_dim + network.event_feature_dim + 1
+            )
+            return int(
+                recurrent_input_dim * network.hidden_dim
+                + network.hidden_dim * network.hidden_dim
+                + network.hidden_dim * network.output_dim
+                + network.hidden_dim
+                + network.event_context_dim * (network.input_dim + network.hidden_dim)
+                + 2 * (network.event_context_dim * event_raw_dim)
+            )
+        if isinstance(network, RecurrentOptionAffordanceTrueMonolithicNetwork):
+            recurrent_input_dim = (
+                network.input_dim + network.event_context_dim + network.option_dim
+            )
+            event_raw_dim = (
+                network.event_embedding_dim + network.event_feature_dim + 1
+            )
+            return int(
+                recurrent_input_dim * network.hidden_dim
+                + network.hidden_dim * network.hidden_dim
+                + network.hidden_dim * network.output_dim
+                + network.hidden_dim
+                + network.hidden_dim * network.option_dim
+                + network.option_dim * network.output_dim
+                + network.hidden_dim * network.output_dim
+                + network.hidden_dim
+                + network.hidden_dim * network.output_dim * network.affordance_role_dim
+                + network.output_dim * network.affordance_role_dim
+                + network.event_context_dim * (network.input_dim + network.hidden_dim)
+                + 2 * (network.event_context_dim * event_raw_dim)
+            )
+        if isinstance(network, RecurrentOptionTrueMonolithicNetwork):
+            recurrent_input_dim = (
+                network.input_dim + network.event_context_dim + network.option_dim
+            )
+            event_raw_dim = (
+                network.event_embedding_dim + network.event_feature_dim + 1
+            )
+            return int(
+                recurrent_input_dim * network.hidden_dim
+                + network.hidden_dim * network.hidden_dim
+                + network.hidden_dim * network.output_dim
+                + network.hidden_dim
+                + network.hidden_dim * network.option_dim
+                + network.option_dim * network.output_dim
+                + network.event_context_dim * (network.input_dim + network.hidden_dim)
+                + 2 * (network.event_context_dim * event_raw_dim)
             )
         if isinstance(network, ArbitrationNetwork):
             return int(
@@ -398,6 +460,9 @@ class BrainRuntimeMixin:
             * float(self.config.module_reflex_scales.get(module_name, 1.0)),
         )
 
+    def _true_monolithic_allows_food_direction_bias(self) -> bool:
+        return self.config.name not in TRUE_MONOLITHIC_NO_FOOD_DIRECTION_VARIANTS
+
     def act(
         self,
         observation: Dict[str, np.ndarray],
@@ -451,16 +516,661 @@ class BrainRuntimeMixin:
         motor_correction_logits = np.zeros(self.action_dim, dtype=float)
         value = 0.0
         arbitration = None
+        direct_policy_trace_payload: Dict[str, object] = {}
+        phase_logits = np.zeros(0, dtype=float)
+        phase_prediction: str | None = None
+        phase_prediction_confidence = 0.0
+        event_attention_top_type: str | None = None
+        event_attention_top_age = -1
+        event_attention_entropy = 0.0
+        selected_option: str | None = None
+        option_age = -1
+        option_termination_reason = "none"
+        option_logits = np.zeros(0, dtype=float)
+        affordance_blocked_logits = np.zeros(0, dtype=float)
+        affordance_role_logits = np.zeros(0, dtype=float)
+        geometry_logits = np.zeros(0, dtype=float)
+        shelter_column_logits = np.zeros(0, dtype=float)
+        shelter_position_logits = np.zeros(0, dtype=float)
+        transition_prediction_logits = np.zeros(0, dtype=float)
+        transition_rollout_prediction_logits = np.zeros(0, dtype=float)
         if self.config.is_true_monolithic:
             if self.true_monolithic_policy is None:
                 raise RuntimeError(
                     "True monolithic network unavailable for the configured architecture."
-                )
+            )
             monolithic_observation = self._build_monolithic_observation(observation)
-            policy_logits, value = self.true_monolithic_policy.forward(
+            if hasattr(self.true_monolithic_policy, "set_runtime_observation_meta"):
+                self.true_monolithic_policy.set_runtime_observation_meta(
+                    observation.get("meta", {})
+                )
+            hidden_before = self.snapshot_direct_policy_hidden_state()
+            direct_forward = self.true_monolithic_policy.forward(
                 monolithic_observation,
                 store_cache=store_cache,
             )
+            if len(direct_forward) == 4:
+                policy_logits, value, option_logits_raw, phase_logits_raw = direct_forward
+                option_logits = np.asarray(option_logits_raw, dtype=float).copy()
+            elif len(direct_forward) == 3:
+                policy_logits, value, aux_logits_raw = direct_forward
+                phase_logits_raw = (
+                    aux_logits_raw if self.config.direct_policy_phase_head else None
+                )
+                if self.config.direct_policy_option_head:
+                    option_logits = np.asarray(aux_logits_raw, dtype=float).copy()
+            else:
+                policy_logits, value = direct_forward
+                phase_logits_raw = None
+            if phase_logits_raw is not None:
+                phase_logits = np.asarray(phase_logits_raw, dtype=float).copy()
+                phase_probs = softmax(phase_logits)
+                phase_prediction_idx = int(np.argmax(phase_probs))
+                phase_prediction = PHASE_LABELS[phase_prediction_idx]
+                phase_prediction_confidence = float(phase_probs[phase_prediction_idx])
+            hidden_after = self.snapshot_direct_policy_hidden_state()
+            if hidden_after is not None:
+                hidden_before_array = (
+                    hidden_before
+                    if hidden_before is not None
+                    else np.zeros_like(hidden_after, dtype=float)
+                )
+                direct_policy_trace_payload = {
+                    "recurrent_hidden_norm": round(float(np.linalg.norm(hidden_after)), 6),
+                    "recurrent_hidden_delta_norm": round(
+                        float(np.linalg.norm(hidden_after - hidden_before_array)),
+                        6,
+                    ),
+                    "hidden_reset_event": bool(self._direct_policy_hidden_reset_pending),
+                    "architecture_metadata": {
+                        "direct_policy_recurrent": bool(self.config.direct_policy_recurrent),
+                        "direct_policy_hidden_dims": list(self.config.direct_policy_hidden_dims),
+                        "direct_policy_phase_head": bool(self.config.direct_policy_phase_head),
+                        "direct_policy_event_attention": bool(
+                            self.config.direct_policy_event_attention
+                        ),
+                        "direct_policy_event_buffer_size": int(
+                            self.config.direct_policy_event_buffer_size
+                        ),
+                        "direct_policy_option_head": bool(
+                            self.config.direct_policy_option_head
+                        ),
+                        "direct_policy_option_ttl": int(
+                            self.config.direct_policy_option_ttl
+                        ),
+                        "direct_policy_affordance_head": bool(
+                            self.config.direct_policy_affordance_head
+                        ),
+                        "direct_policy_affordance_feedback": bool(
+                            self.config.direct_policy_affordance_feedback
+                        ),
+                        "direct_policy_geometry_head": bool(
+                            self.config.direct_policy_geometry_head
+                        ),
+                        "direct_policy_shelter_column_head": bool(
+                            self.config.direct_policy_shelter_column_head
+                        ),
+                        "direct_policy_shelter_position_head": bool(
+                            self.config.direct_policy_shelter_position_head
+                        ),
+                        "direct_policy_local_affordance_inputs": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_local_affordance_inputs",
+                                False,
+                            )
+                        ),
+                        "direct_policy_local_spatial_inputs": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_local_spatial_inputs",
+                                False,
+                            )
+                        ),
+                        "direct_policy_local_transition_inputs": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_local_transition_inputs",
+                                False,
+                            )
+                        ),
+                        "direct_policy_local_transition_rollout_inputs": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_local_transition_rollout_inputs",
+                                False,
+                            )
+                        ),
+                        "direct_policy_transition_prediction_head": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_transition_prediction_head",
+                                False,
+                            )
+                        ),
+                        "direct_policy_transition_prediction_feedback": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_transition_prediction_feedback",
+                                False,
+                            )
+                        ),
+                        "direct_policy_transition_rollout_prediction_head": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_transition_rollout_prediction_head",
+                                False,
+                            )
+                        ),
+                        "direct_policy_transition_rollout_prediction_feedback": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_transition_rollout_prediction_feedback",
+                                False,
+                            )
+                        ),
+                        "direct_policy_handoff_teacher": bool(
+                            self.config.direct_policy_handoff_teacher
+                        ),
+                        "direct_policy_handoff_option_teacher": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_handoff_option_teacher",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_action_teacher": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_action_teacher",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_release_sequence_teacher": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_release_sequence_teacher",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_release_sequence_replay_boost": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_release_sequence_replay_boost",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_release_sequence_distill": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_release_sequence_distill",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_sequence_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_sequence_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_family_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_family_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_handoff_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_handoff_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_trajectory_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_trajectory_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_cycle_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_cycle_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_trace_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_trace_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_rollout_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_rollout_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_frontier_teacher_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_frontier_teacher_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_post_rest_probe_replayable_teacher_distillation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_post_rest_probe_replayable_teacher_distillation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_continuation_replay_passes": int(
+                            getattr(
+                                self.config,
+                                "direct_policy_continuation_replay_passes",
+                                0,
+                            )
+                        ),
+                        "direct_policy_continuation_replay_lr_scale": float(
+                            getattr(
+                                self.config,
+                                "direct_policy_continuation_replay_lr_scale",
+                                0.0,
+                            )
+                        ),
+                        "direct_policy_continuation_margin_weight": float(
+                            getattr(
+                                self.config,
+                                "direct_policy_continuation_margin_weight",
+                                0.0,
+                            )
+                        ),
+                        "direct_policy_phase_option_feedback": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_phase_option_feedback",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_transition_feedback": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_transition_feedback",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_termination_cooldown": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_termination_cooldown",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_action_head": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_action_head",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_decoder_state": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_decoder_state",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_recurrent_dynamics": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_recurrent_dynamics",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_sequence_head": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_sequence_head",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_decoder_recurrent_state": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_decoder_recurrent_state",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_action_transition_state": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_action_transition_state",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_action_controller_state": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_action_controller_state",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_action_token_decoder": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_action_token_decoder",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_action_recurrent_core": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_action_recurrent_core",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_action_separate_recurrent_head": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_action_separate_recurrent_head",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_action_separate_policy_path": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_action_separate_policy_path",
+                                False,
+                            )
+                        ),
+                        "direct_policy_option_action_separate_backbone": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_option_action_separate_backbone",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_physiology_option_gating": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_physiology_option_gating",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_affordance_action_gating": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_affordance_action_gating",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_option_action_masking": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_option_action_masking",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_event_release_latching": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_event_release_latching",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_event_release_action_commitment": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_event_release_action_commitment",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_release_phase_state": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_release_phase_state",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_release_progression": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_release_progression",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_release_exit_contract": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_release_exit_contract",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_release_substate_progression": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_release_substate_progression",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_exit_continuation": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_exit_continuation",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_exit_food_guidance": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_exit_food_guidance",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_exit_food_commitment": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_exit_food_commitment",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_exit_food_progression": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_exit_food_progression",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_exit_food_heading_progression": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_exit_food_heading_progression",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_exit_smell_progression": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_exit_smell_progression",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_exit_corridor_progression": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_exit_corridor_progression",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_exit_corridor_affordance_progression": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_exit_corridor_affordance_progression",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_food_return": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_food_return",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_food_vector_return": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_food_vector_return",
+                                False,
+                            )
+                        ),
+                        "direct_policy_executive_post_food_path_return": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_executive_post_food_path_return",
+                                False,
+                            )
+                        ),
+                    },
+                }
+            if phase_prediction is not None:
+                direct_policy_trace_payload.update(
+                    {
+                        "phase_prediction": phase_prediction,
+                        "phase_prediction_confidence": round(
+                            float(phase_prediction_confidence),
+                            6,
+                        ),
+                    }
+                )
+            attention_summary = getattr(
+                self.true_monolithic_policy,
+                "last_attention_summary",
+                None,
+            )
+            if isinstance(attention_summary, dict):
+                event_attention_top_type = attention_summary.get(
+                    "event_attention_top_type"
+                )
+                event_attention_top_age = int(
+                    attention_summary.get("event_attention_top_age", -1)
+                )
+                event_attention_entropy = float(
+                    attention_summary.get("event_attention_entropy", 0.0)
+                )
+                if event_attention_top_type is not None:
+                    direct_policy_trace_payload.update(
+                        {
+                            "event_attention_top_type": str(
+                                event_attention_top_type
+                            ),
+                            "event_attention_top_age": int(
+                                event_attention_top_age
+                            ),
+                            "event_attention_entropy": round(
+                                float(event_attention_entropy),
+                                6,
+                            ),
+                        }
+                    )
+            option_summary = getattr(self.true_monolithic_policy, "last_option_summary", None)
+            if isinstance(option_summary, dict):
+                selected_option_raw = option_summary.get("selected_option")
+                if selected_option_raw is not None:
+                    selected_option = str(selected_option_raw)
+                    option_age = int(option_summary.get("option_age", -1))
+                    option_termination_reason = str(
+                        option_summary.get("option_termination_reason", "none")
+                    )
+                    option_logits = np.asarray(
+                        option_summary.get("option_logits", []),
+                        dtype=float,
+                    ).copy()
+                    direct_policy_trace_payload.update(
+                        {
+                            "selected_option": selected_option,
+                            "option_age": int(option_age),
+                            "option_termination_reason": option_termination_reason,
+                            "option_logits": option_logits.round(6).tolist(),
+                        }
+                    )
+            affordance_summary = getattr(
+                self.true_monolithic_policy,
+                "last_affordance_summary",
+                None,
+            )
+            if isinstance(affordance_summary, dict):
+                affordance_blocked_logits = np.asarray(
+                    affordance_summary.get("blocked_logits", []),
+                    dtype=float,
+                ).copy()
+                affordance_role_logits = np.asarray(
+                    affordance_summary.get("role_logits", []),
+                    dtype=float,
+                ).copy()
+                if affordance_blocked_logits.size > 0:
+                    direct_policy_trace_payload["affordance_blocked_logits"] = (
+                        affordance_blocked_logits.round(6).tolist()
+                    )
+                if affordance_role_logits.size > 0:
+                    direct_policy_trace_payload["affordance_role_logits"] = (
+                        affordance_role_logits.round(6).tolist()
+                    )
+                geometry_logits = np.asarray(
+                    affordance_summary.get("geometry_logits", []),
+                    dtype=float,
+                ).copy()
+                if geometry_logits.size > 0:
+                    direct_policy_trace_payload["geometry_logits"] = (
+                        geometry_logits.round(6).tolist()
+                    )
+                shelter_column_logits = np.asarray(
+                    affordance_summary.get("shelter_column_logits", []),
+                    dtype=float,
+                ).copy()
+                if shelter_column_logits.size > 0:
+                    direct_policy_trace_payload["shelter_column_logits"] = (
+                        shelter_column_logits.round(6).tolist()
+                    )
+                shelter_position_logits = np.asarray(
+                    affordance_summary.get("shelter_position_logits", []),
+                    dtype=float,
+                ).copy()
+                if shelter_position_logits.size > 0:
+                    direct_policy_trace_payload["shelter_position_logits"] = (
+                        shelter_position_logits.round(6).tolist()
+                    )
+                transition_prediction_logits = np.asarray(
+                    affordance_summary.get("transition_prediction_logits", []),
+                    dtype=float,
+                ).copy()
+                if transition_prediction_logits.size > 0:
+                    direct_policy_trace_payload["transition_prediction_logits"] = (
+                        transition_prediction_logits.round(6).tolist()
+                    )
+                transition_rollout_prediction_logits = np.asarray(
+                    affordance_summary.get(
+                        "transition_rollout_prediction_logits",
+                        [],
+                    ),
+                    dtype=float,
+                ).copy()
+                if transition_rollout_prediction_logits.size > 0:
+                    direct_policy_trace_payload[
+                        "transition_rollout_prediction_logits"
+                    ] = transition_rollout_prediction_logits.round(6).tolist()
             direct_result = ModuleResult(
                 interface=None,
                 name=self.TRUE_MONOLITHIC_POLICY_NAME,
@@ -503,7 +1213,10 @@ class BrainRuntimeMixin:
                 bias_action = self._threat_escape_bias_action(observation)
                 if bias_action is None:
                     bias_action = self._sleep_rest_bias_action(observation)
-                if bias_action is None:
+                if (
+                    bias_action is None
+                    and self._true_monolithic_allows_food_direction_bias()
+                ):
                     bias_action = self._food_direction_bias_action(observation)
                 if bias_action is not None:
                     total_logits = total_logits.copy()
@@ -535,6 +1248,8 @@ class BrainRuntimeMixin:
                 action_idx = int(self.rng.choice(self.action_dim, p=policy))
             else:
                 action_idx = motor_action_idx
+            if hasattr(self.true_monolithic_policy, "record_executed_action"):
+                self.true_monolithic_policy.record_executed_action(action_idx)
             motor_override = False
             final_reflex_override = False
         else:
@@ -639,6 +1354,11 @@ class BrainRuntimeMixin:
                         "gated_logits": result.gated_logits.round(6).tolist() if result.gated_logits is not None else None,
                         "intent_before_gating": result.intent_before_gating,
                         "intent_after_gating": result.intent_after_gating,
+                        **(
+                            direct_policy_trace_payload
+                            if result.name == self.TRUE_MONOLITHIC_POLICY_NAME
+                            else {}
+                        ),
                     },
                 )
 
@@ -746,8 +1466,10 @@ class BrainRuntimeMixin:
                         "selected_action": ACTIONS[motor_action_idx],
                         "executed_action": ACTIONS[action_idx],
                         "value_estimate": round(float(value), 6),
+                        **direct_policy_trace_payload,
                     },
                 )
+                self._direct_policy_hidden_reset_pending = False
             else:
                 arbitration_payload = arbitration.to_payload() if arbitration is not None else {}
                 bus.publish(
@@ -790,14 +1512,20 @@ class BrainRuntimeMixin:
                 )
 
         step_observation: Dict[str, np.ndarray] = {}
-        if (
+        if policy_mode == "normal" and self.config.is_true_monolithic:
+            brain_observation_keys = set(observation.keys())
+            step_observation = {
+                key: np.asarray(observation[key], dtype=float).copy()
+                for key in brain_observation_keys
+                if key in observation
+            }
+        elif (
             policy_mode == "normal"
             and self.config.is_modular
             and self.config.uses_counterfactual_credit
         ):
             brain_observation_keys = {
-                spec.observation_key
-                for spec in MODULE_INTERFACES
+                spec.observation_key for spec in MODULE_INTERFACES
             }
             brain_observation_keys.update(
                 {
@@ -838,6 +1566,41 @@ class BrainRuntimeMixin:
             motor_input=motor_input,
             policy_mode=policy_mode,
             arbitration_decision=arbitration,
+            phase_logits=phase_logits,
+            phase_prediction=phase_prediction,
+            phase_prediction_confidence=float(phase_prediction_confidence),
+            event_attention_top_type=event_attention_top_type,
+            event_attention_top_age=int(event_attention_top_age),
+            event_attention_entropy=float(event_attention_entropy),
+            selected_option=selected_option,
+            option_age=int(option_age),
+            option_termination_reason=option_termination_reason,
+            option_logits=np.asarray(option_logits, dtype=float).copy(),
+            affordance_blocked_logits=np.asarray(
+                affordance_blocked_logits,
+                dtype=float,
+            ).copy(),
+            affordance_role_logits=np.asarray(
+                affordance_role_logits,
+                dtype=float,
+            ).copy(),
+            geometry_logits=np.asarray(geometry_logits, dtype=float).copy(),
+            shelter_column_logits=np.asarray(
+                shelter_column_logits,
+                dtype=float,
+            ).copy(),
+            shelter_position_logits=np.asarray(
+                shelter_position_logits,
+                dtype=float,
+            ).copy(),
+            transition_prediction_logits=np.asarray(
+                transition_prediction_logits,
+                dtype=float,
+            ).copy(),
+            transition_rollout_prediction_logits=np.asarray(
+                transition_rollout_prediction_logits,
+                dtype=float,
+            ).copy(),
         )
 
     def estimate_value(self, observation: Dict[str, np.ndarray]) -> float:
@@ -858,11 +1621,23 @@ class BrainRuntimeMixin:
                     "True monolithic network unavailable for the configured architecture."
                 )
             monolithic_observation = self._build_monolithic_observation(observation)
-            _, value = self.true_monolithic_policy.forward(
-                monolithic_observation,
-                store_cache=False,
-            )
-            return float(value)
+            if hasattr(self.true_monolithic_policy, "set_runtime_observation_meta"):
+                self.true_monolithic_policy.set_runtime_observation_meta(
+                    observation.get("meta", {})
+                )
+            runtime_state_snapshot = self.snapshot_direct_policy_runtime_state()
+            try:
+                direct_forward = self.true_monolithic_policy.forward(
+                    monolithic_observation,
+                    store_cache=False,
+                )
+                if len(direct_forward) >= 3:
+                    _, value, *_ = direct_forward
+                else:
+                    _, value = direct_forward
+                return float(value)
+            finally:
+                self.restore_direct_policy_runtime_state(runtime_state_snapshot)
         hidden_state_snapshot: Dict[str, np.ndarray] | None = None
         if self.module_bank is not None and self.module_bank.has_recurrent_modules:
             hidden_state_snapshot = self.module_bank.snapshot_hidden_states()
@@ -944,6 +1719,441 @@ class BrainRuntimeMixin:
             integration_hidden_dim=self.config.integration_hidden_dim,
             monolithic_hidden_dim=self.config.monolithic_hidden_dim,
             direct_policy_hidden_dims=self.config.direct_policy_hidden_dims or None,
+            direct_policy_recurrent=bool(self.config.direct_policy_recurrent),
+            direct_policy_phase_head=bool(self.config.direct_policy_phase_head),
+            direct_policy_event_attention=bool(
+                self.config.direct_policy_event_attention
+            ),
+            direct_policy_event_buffer_size=int(
+                self.config.direct_policy_event_buffer_size
+            ),
+            direct_policy_option_head=bool(self.config.direct_policy_option_head),
+            direct_policy_option_ttl=int(self.config.direct_policy_option_ttl),
+            direct_policy_affordance_head=bool(
+                self.config.direct_policy_affordance_head
+            ),
+            direct_policy_affordance_feedback=bool(
+                self.config.direct_policy_affordance_feedback
+            ),
+            direct_policy_geometry_head=bool(
+                self.config.direct_policy_geometry_head
+            ),
+            direct_policy_shelter_column_head=bool(
+                self.config.direct_policy_shelter_column_head
+            ),
+            direct_policy_shelter_position_head=bool(
+                self.config.direct_policy_shelter_position_head
+            ),
+            direct_policy_local_affordance_inputs=bool(
+                getattr(self.config, "direct_policy_local_affordance_inputs", False)
+            ),
+            direct_policy_local_spatial_inputs=bool(
+                getattr(self.config, "direct_policy_local_spatial_inputs", False)
+            ),
+            direct_policy_local_transition_inputs=bool(
+                getattr(self.config, "direct_policy_local_transition_inputs", False)
+            ),
+            direct_policy_local_transition_rollout_inputs=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_local_transition_rollout_inputs",
+                    False,
+                )
+            ),
+            direct_policy_transition_prediction_head=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_transition_prediction_head",
+                    False,
+                )
+            ),
+            direct_policy_transition_prediction_feedback=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_transition_prediction_feedback",
+                    False,
+                )
+            ),
+            direct_policy_transition_rollout_prediction_head=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_transition_rollout_prediction_head",
+                    False,
+                )
+            ),
+            direct_policy_transition_rollout_prediction_feedback=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_transition_rollout_prediction_feedback",
+                    False,
+                )
+            ),
+            direct_policy_handoff_teacher=bool(
+                self.config.direct_policy_handoff_teacher
+            ),
+            direct_policy_handoff_option_teacher=bool(
+                getattr(self.config, "direct_policy_handoff_option_teacher", False)
+            ),
+            direct_policy_post_rest_action_teacher=bool(
+                getattr(self.config, "direct_policy_post_rest_action_teacher", False)
+            ),
+            direct_policy_post_rest_release_sequence_teacher=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_release_sequence_teacher",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_release_sequence_replay_boost=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_release_sequence_replay_boost",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_release_sequence_distill=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_release_sequence_distill",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_sequence_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_sequence_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_family_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_family_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_handoff_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_handoff_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_trajectory_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_trajectory_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_cycle_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_cycle_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_trace_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_trace_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_rollout_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_rollout_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_frontier_teacher_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_frontier_teacher_distillation",
+                    False,
+                )
+            ),
+            direct_policy_post_rest_probe_replayable_teacher_distillation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_post_rest_probe_replayable_teacher_distillation",
+                    False,
+                )
+            ),
+            direct_policy_continuation_replay_passes=int(
+                getattr(
+                    self.config,
+                    "direct_policy_continuation_replay_passes",
+                    0,
+                )
+            ),
+            direct_policy_continuation_replay_lr_scale=float(
+                getattr(
+                    self.config,
+                    "direct_policy_continuation_replay_lr_scale",
+                    0.0,
+                )
+            ),
+            direct_policy_continuation_margin_weight=float(
+                getattr(
+                    self.config,
+                    "direct_policy_continuation_margin_weight",
+                    0.0,
+                )
+            ),
+            direct_policy_phase_option_feedback=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_phase_option_feedback",
+                    False,
+                )
+            ),
+            direct_policy_option_transition_feedback=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_transition_feedback",
+                    False,
+                )
+            ),
+            direct_policy_option_termination_cooldown=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_termination_cooldown",
+                    False,
+                )
+            ),
+            direct_policy_option_action_head=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_action_head",
+                    False,
+                )
+            ),
+            direct_policy_option_decoder_state=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_decoder_state",
+                    False,
+                )
+            ),
+            direct_policy_option_recurrent_dynamics=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_recurrent_dynamics",
+                    False,
+                )
+            ),
+            direct_policy_option_sequence_head=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_sequence_head",
+                    False,
+                )
+            ),
+            direct_policy_option_decoder_recurrent_state=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_decoder_recurrent_state",
+                    False,
+                )
+            ),
+            direct_policy_option_action_transition_state=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_action_transition_state",
+                    False,
+                )
+            ),
+            direct_policy_option_action_controller_state=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_action_controller_state",
+                    False,
+                )
+            ),
+            direct_policy_option_action_token_decoder=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_action_token_decoder",
+                    False,
+                )
+            ),
+            direct_policy_option_action_recurrent_core=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_action_recurrent_core",
+                    False,
+                )
+            ),
+            direct_policy_option_action_separate_recurrent_head=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_action_separate_recurrent_head",
+                    False,
+                )
+            ),
+            direct_policy_option_action_separate_policy_path=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_action_separate_policy_path",
+                    False,
+                )
+            ),
+            direct_policy_option_action_separate_backbone=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_option_action_separate_backbone",
+                    False,
+                )
+            ),
+            direct_policy_executive_physiology_option_gating=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_physiology_option_gating",
+                    False,
+                )
+            ),
+            direct_policy_executive_affordance_action_gating=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_affordance_action_gating",
+                    False,
+                )
+            ),
+            direct_policy_executive_option_action_masking=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_option_action_masking",
+                    False,
+                )
+            ),
+            direct_policy_executive_event_release_latching=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_event_release_latching",
+                    False,
+                )
+            ),
+            direct_policy_executive_event_release_action_commitment=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_event_release_action_commitment",
+                    False,
+                )
+            ),
+            direct_policy_executive_release_phase_state=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_release_phase_state",
+                    False,
+                )
+            ),
+            direct_policy_executive_release_progression=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_release_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_release_exit_contract=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_release_exit_contract",
+                    False,
+                )
+            ),
+            direct_policy_executive_release_substate_progression=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_release_substate_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_continuation=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_exit_continuation",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_food_guidance=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_exit_food_guidance",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_food_commitment=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_exit_food_commitment",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_food_progression=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_exit_food_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_food_heading_progression=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_exit_food_heading_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_smell_progression=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_exit_smell_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_corridor_progression=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_exit_corridor_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_exit_corridor_affordance_progression=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_exit_corridor_affordance_progression",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_food_return=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_food_return",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_food_vector_return=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_food_vector_return",
+                    False,
+                )
+            ),
+            direct_policy_executive_post_food_path_return=bool(
+                getattr(
+                    self.config,
+                    "direct_policy_executive_post_food_path_return",
+                    False,
+                )
+            ),
             capacity_profile=self.config.capacity_profile.to_summary(),
         )
 

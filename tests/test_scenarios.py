@@ -44,6 +44,10 @@ class ScenarioRegressionTest(ScenarioWorldHelpers, unittest.TestCase):
                 "continuous_survival_bootstrap",
                 "continuous_survival_easy_v1",
                 "continuous_survival_medium_v1",
+                "continuous_survival_post_rest_inside_v1",
+                "continuous_survival_post_rest_entrance_v1",
+                "continuous_survival_return_after_late_forage_v1",
+                "continuous_survival_re_rest_after_return_v1",
                 "continuous_survival_canonical",
             },
         )

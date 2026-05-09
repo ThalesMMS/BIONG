@@ -80,3 +80,60 @@ class BrainStep:
     motor_input: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
     policy_mode: str = "normal"
     arbitration_decision: ArbitrationDecision | None = None
+    phase_logits: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
+    phase_prediction: str | None = None
+    phase_prediction_confidence: float = 0.0
+    phase_target: str | None = None
+    phase_target_idx: int = -1
+    scenario_name: str | None = None
+    event_attention_top_type: str | None = None
+    event_attention_top_age: int = -1
+    event_attention_entropy: float = 0.0
+    selected_option: str | None = None
+    option_age: int = -1
+    option_termination_reason: str = "none"
+    option_logits: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
+    affordance_blocked_logits: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    affordance_blocked_targets: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    affordance_role_logits: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    affordance_role_targets: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    geometry_logits: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
+    geometry_targets: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
+    shelter_column_logits: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    shelter_column_targets: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    shelter_position_logits: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    shelter_position_targets: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    transition_prediction_logits: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    transition_prediction_targets: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    transition_rollout_prediction_logits: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    transition_rollout_prediction_targets: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    teacher_action_target_idx: int = -1
+    teacher_action_target_name: str | None = None
+    teacher_action_target_stage: str | None = None
+    teacher_option_target_idx: int = -1
+    teacher_option_target_name: str | None = None
+    teacher_option_target_stage: str | None = None
