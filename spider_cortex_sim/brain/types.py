@@ -93,6 +93,13 @@ class BrainStep:
     option_age: int = -1
     option_termination_reason: str = "none"
     option_logits: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
+    option_leaf_logits: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=float)
+    )
+    option_owned_action: str | None = None
+    safety_mask_applied: bool = False
+    safety_masked_actions: tuple[str, ...] = ()
+    external_override_count: int = 0
     affordance_blocked_logits: np.ndarray = field(
         default_factory=lambda: np.zeros(0, dtype=float)
     )
@@ -137,3 +144,20 @@ class BrainStep:
     teacher_option_target_idx: int = -1
     teacher_option_target_name: str | None = None
     teacher_option_target_stage: str | None = None
+    b_level: int = -1
+    b_effective_level: str | None = None
+    b_mode: str | None = None
+    semantic_action: str | None = None
+    semantic_action_idx: int = -1
+    learned_semantic_action: str | None = None
+    learned_semantic_action_idx: int = -1
+    semantic_action_source: str | None = None
+    semantic_action_reason: str | None = None
+    semantic_override_count: int = 0
+    semantic_logits: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
+    semantic_policy: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
+    bridge_primitive_action: str | None = None
+    bridge_reason: str | None = None
+    blocked_mask: dict[str, bool] = field(default_factory=dict)
+    food_delta_used: float = 0.0
+    shelter_delta_used: float = 0.0

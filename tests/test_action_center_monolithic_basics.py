@@ -47,9 +47,15 @@ from spider_cortex_sim.interfaces import (
     MotorContextObservation,
     architecture_signature,
 )
+from spider_cortex_sim.direct_policy_options import OPTION_TO_INDEX
 from spider_cortex_sim.maps import CLUTTER, NARROW, OPEN
 from spider_cortex_sim.modules import CorticalModuleBank, ModuleResult
-from spider_cortex_sim.nn import ArbitrationNetwork, MotorNetwork, ProposalNetwork
+from spider_cortex_sim.nn import (
+    ArbitrationNetwork,
+    MotorNetwork,
+    OwnedOptionControllerTrueMonolithicNetwork,
+    ProposalNetwork,
+)
 from spider_cortex_sim.noise import compute_execution_difficulty
 from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
 from spider_cortex_sim.phase import PHASE_TO_INDEX
@@ -77,6 +83,50 @@ from tests.fixtures.action_center_monolithic import MonolithicArchitectureFixtur
 
 
 class SpiderBrainMonolithicBasicsTest(MonolithicArchitectureFixtures, unittest.TestCase):
+    def _owned_option_config(self) -> BrainAblationConfig:
+        return resolve_ablation_configs(
+            ["true_monolithic_owned_option_controller_policy"],
+            module_dropout=0.0,
+        )[0]
+
+    def _owned_option_network(
+        self,
+        *,
+        seed: int = 1,
+    ) -> OwnedOptionControllerTrueMonolithicNetwork:
+        return OwnedOptionControllerTrueMonolithicNetwork(
+            input_dim=sum(spec.input_dim for spec in MODULE_INTERFACES),
+            hidden_dim=16,
+            output_dim=len(LOCOMOTION_ACTIONS),
+            rng=np.random.default_rng(seed),
+            event_buffer_size=4,
+            option_ttl=4,
+        )
+
+    def _monolithic_vector(self, values: dict[tuple[str, str], float]) -> np.ndarray:
+        x = np.zeros(sum(spec.input_dim for spec in MODULE_INTERFACES), dtype=float)
+        offset = 0
+        for spec in MODULE_INTERFACES:
+            for signal_name, value in (
+                (signal_name, value)
+                for (module_name, signal_name), value in values.items()
+                if module_name == spec.name
+            ):
+                x[offset + spec.signal_names.index(signal_name)] = float(value)
+            offset += spec.input_dim
+        return x
+
+    def _force_owned_option(
+        self,
+        network: OwnedOptionControllerTrueMonolithicNetwork,
+        option_name: str,
+    ) -> None:
+        network.W2_option.fill(0.0)
+        network.b2_option.fill(-8.0)
+        network.b2_option[OPTION_TO_INDEX[option_name]] = 8.0
+        network.W2_option_leaf.fill(0.0)
+        network.b2_option_leaf.fill(0.0)
+
     def test_monolithic_brain_has_no_module_bank(self) -> None:
         brain = SpiderBrain(seed=1, config=self._monolithic_config())
         self.assertIsNone(brain.module_bank)
@@ -123,6 +173,212 @@ class SpiderBrainMonolithicBasicsTest(MonolithicArchitectureFixtures, unittest.T
             step.arbitration_decision.module_gates[TRUE_MONOLITHIC_POLICY_NAME],
             1.0,
         )
+
+    def test_public_action_space_remains_primitive_for_owned_option_variant(self) -> None:
+        self.assertEqual(
+            tuple(LOCOMOTION_ACTIONS),
+            (
+                "MOVE_UP",
+                "MOVE_DOWN",
+                "MOVE_LEFT",
+                "MOVE_RIGHT",
+                "STAY",
+                "ORIENT_UP",
+                "ORIENT_DOWN",
+                "ORIENT_LEFT",
+                "ORIENT_RIGHT",
+            ),
+        )
+        self.assertNotIn("MOVE_TO_FOOD", LOCOMOTION_ACTIONS)
+        self.assertNotIn("MOVE_TO_SHELTER", LOCOMOTION_ACTIONS)
+
+    def test_owned_option_variant_instantiates_dedicated_controller(self) -> None:
+        config = self._owned_option_config()
+        self.assertTrue(config.direct_policy_owned_option_controller)
+        self.assertFalse(config.enable_food_direction_bias)
+        brain = SpiderBrain(seed=5, config=config)
+        self.assertIsInstance(
+            brain.true_monolithic_policy,
+            OwnedOptionControllerTrueMonolithicNetwork,
+        )
+
+    def test_owned_option_active_leaf_controls_final_logits(self) -> None:
+        network = self._owned_option_network()
+        self._force_owned_option(network, "RETURN_TO_SHELTER")
+        network.b2_option_leaf[
+            OPTION_TO_INDEX["FORAGE"],
+            ACTION_TO_INDEX["MOVE_LEFT"],
+        ] = 10.0
+        network.b2_option_leaf[
+            OPTION_TO_INDEX["RETURN_TO_SHELTER"],
+            ACTION_TO_INDEX["MOVE_RIGHT"],
+        ] = 4.0
+        logits, _, _ = network.forward(
+            np.zeros(network.input_dim, dtype=float),
+            store_cache=True,
+        )
+        self.assertEqual(network.last_option_summary["selected_option"], "RETURN_TO_SHELTER")
+        self.assertEqual(int(np.argmax(logits)), ACTION_TO_INDEX["MOVE_RIGHT"])
+        self.assertEqual(
+            int(np.argmax(network.last_option_summary["option_leaf_logits"])),
+            ACTION_TO_INDEX["MOVE_RIGHT"],
+        )
+
+    def test_owned_option_inactive_leaf_does_not_contribute_to_final_logits(self) -> None:
+        network = self._owned_option_network()
+        self._force_owned_option(network, "REST")
+        network.b2_option_leaf[
+            OPTION_TO_INDEX["FORAGE"],
+            ACTION_TO_INDEX["MOVE_RIGHT"],
+        ] = 12.0
+        network.b2_option_leaf[
+            OPTION_TO_INDEX["REST"],
+            ACTION_TO_INDEX["STAY"],
+        ] = 3.0
+        logits, _, _ = network.forward(
+            np.zeros(network.input_dim, dtype=float),
+            store_cache=True,
+        )
+        self.assertEqual(network.last_option_summary["selected_option"], "REST")
+        self.assertEqual(int(np.argmax(logits)), ACTION_TO_INDEX["STAY"])
+
+    def test_owned_option_safety_mask_only_masks_blocked_leaf_action(self) -> None:
+        network = self._owned_option_network()
+        self._force_owned_option(network, "FORAGE")
+        network.b2_option_leaf[
+            OPTION_TO_INDEX["FORAGE"],
+            ACTION_TO_INDEX["MOVE_RIGHT"],
+        ] = 4.0
+        network.b2_option_leaf[
+            OPTION_TO_INDEX["FORAGE"],
+            ACTION_TO_INDEX["MOVE_LEFT"],
+        ] = 3.0
+        network.set_runtime_observation_meta(
+            {
+                "local_affordances": {
+                    "MOVE_RIGHT": {"blocked": True},
+                    "MOVE_LEFT": {"blocked": False},
+                }
+            }
+        )
+        logits, _, _ = network.forward(
+            np.zeros(network.input_dim, dtype=float),
+            store_cache=True,
+        )
+        summary = network.last_option_summary
+        self.assertTrue(summary["safety_mask_applied"])
+        self.assertEqual(summary["safety_masked_actions"], ["MOVE_RIGHT"])
+        self.assertEqual(
+            int(np.argmax(summary["option_leaf_logits"])),
+            ACTION_TO_INDEX["MOVE_RIGHT"],
+        )
+        self.assertEqual(int(np.argmax(logits)), ACTION_TO_INDEX["MOVE_LEFT"])
+
+    def test_owned_forage_leaf_emits_primitive_move_toward_visible_food(self) -> None:
+        network = self._owned_option_network()
+        self._force_owned_option(network, "FORAGE")
+        logits, _, _ = network.forward(
+            self._monolithic_vector(
+                {
+                    ("hunger_center", "food_visible"): 1.0,
+                    ("hunger_center", "food_certainty"): 1.0,
+                    ("hunger_center", "food_dx"): 1.0,
+                    ("hunger_center", "food_dy"): 0.0,
+                }
+            ),
+            store_cache=True,
+        )
+        self.assertEqual(int(np.argmax(logits)), ACTION_TO_INDEX["MOVE_RIGHT"])
+
+    def test_owned_return_leaf_emits_primitive_move_toward_shelter_memory(self) -> None:
+        network = self._owned_option_network()
+        self._force_owned_option(network, "RETURN_TO_SHELTER")
+        logits, _, _ = network.forward(
+            self._monolithic_vector(
+                {
+                    ("sleep_center", "shelter_memory_dx"): -1.0,
+                    ("sleep_center", "shelter_memory_dy"): 0.0,
+                    ("sleep_center", "shelter_memory_age"): 0.0,
+                }
+            ),
+            store_cache=True,
+        )
+        self.assertEqual(int(np.argmax(logits)), ACTION_TO_INDEX["MOVE_LEFT"])
+
+    def test_owned_rest_leaf_favors_stay_in_shelter(self) -> None:
+        network = self._owned_option_network()
+        self._force_owned_option(network, "REST")
+        logits, _, _ = network.forward(
+            self._monolithic_vector(
+                {
+                    ("sleep_center", "on_shelter"): 1.0,
+                    ("sleep_center", "fatigue"): 0.8,
+                    ("sleep_center", "sleep_debt"): 0.6,
+                }
+            ),
+            store_cache=True,
+        )
+        self.assertEqual(int(np.argmax(logits)), ACTION_TO_INDEX["STAY"])
+
+    def test_owned_post_rest_leaf_favors_exit_without_external_bias(self) -> None:
+        network = self._owned_option_network()
+        self._force_owned_option(network, "POST_REST_REACTIVATE")
+        network.set_runtime_observation_meta(
+            {
+                "local_geodesic_consequences": {
+                    "MOVE_UP": {
+                        "exit_geodesic_delta": 1.0,
+                        "next_on_exit_target": True,
+                    },
+                    "MOVE_DOWN": {"exit_geodesic_delta": -1.0},
+                    "MOVE_LEFT": {"exit_geodesic_delta": 0.0},
+                    "MOVE_RIGHT": {"exit_geodesic_delta": 0.0},
+                    "STAY": {"exit_geodesic_delta": 0.0},
+                }
+            }
+        )
+        logits, _, _ = network.forward(
+            self._monolithic_vector({("sleep_center", "on_shelter"): 1.0}),
+            store_cache=True,
+        )
+        self.assertEqual(int(np.argmax(logits)), ACTION_TO_INDEX["MOVE_UP"])
+
+    def test_owned_option_checkpoint_round_trips_flag_and_leaf_weights(self) -> None:
+        config = self._owned_option_config()
+        brain = SpiderBrain(seed=5, config=config)
+        assert isinstance(
+            brain.true_monolithic_policy,
+            OwnedOptionControllerTrueMonolithicNetwork,
+        )
+        brain.true_monolithic_policy.b2_option_leaf[
+            OPTION_TO_INDEX["REST"],
+            ACTION_TO_INDEX["STAY"],
+        ] = 7.25
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = Path(tmpdir) / "brain"
+            brain.save(checkpoint_dir)
+            metadata = json.loads((checkpoint_dir / "metadata.json").read_text())
+            self.assertTrue(
+                metadata["ablation_config"]["direct_policy_owned_option_controller"]
+            )
+            self.assertTrue(
+                metadata["modules"][TRUE_MONOLITHIC_POLICY_NAME][
+                    "owned_option_controller"
+                ]
+            )
+            restored = SpiderBrain(seed=9, config=config)
+            restored.load(checkpoint_dir)
+            assert isinstance(
+                restored.true_monolithic_policy,
+                OwnedOptionControllerTrueMonolithicNetwork,
+            )
+            self.assertAlmostEqual(
+                restored.true_monolithic_policy.b2_option_leaf[
+                    OPTION_TO_INDEX["REST"],
+                    ACTION_TO_INDEX["STAY"],
+                ],
+                7.25,
+            )
 
     def test_true_monolithic_estimate_value_returns_finite_float(self) -> None:
         brain = SpiderBrain(seed=7, config=self._true_monolithic_config())

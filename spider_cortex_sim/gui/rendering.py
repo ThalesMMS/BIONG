@@ -4,11 +4,13 @@ from typing import Tuple
 
 import numpy as np
 
+from ..b_series_legacy import LEGACY_B0_ACTIONS
 from ..maps import BLOCKED, CLUTTER, NARROW
 from ..predator import PREDATOR_STATES
 from ..world import ACTIONS
 from .constants import (
     BOTTOM_BAR_HEIGHT,
+    LEFT_SIDEBAR_WIDTH,
     PANEL_WIDTH,
     TICK_SPEEDS,
     TOP_BAR_HEIGHT,
@@ -79,7 +81,9 @@ _CONTROLLER_DELEGATED_NAMES = {
     "episode_reward",
     "grid_offset_x",
     "grid_offset_y",
+    "left_sidebar_width",
     "last_decision",
+    "last_evolution_snapshot_path",
     "last_info",
     "last_reward",
     "observation",
@@ -116,10 +120,12 @@ class Renderer:
         fonts: dict[str, pygame.font.Font],
         controller,
         buttons,
+        sidebar_buttons=None,
     ) -> None:
         self.screen = surface
         self.controller = controller
         self.buttons = buttons
+        self.sidebar_buttons = sidebar_buttons or {}
         self.set_fonts(fonts)
         self._night_overlay = None
         self._night_overlay_size = None
@@ -168,9 +174,86 @@ class Renderer:
         """
         self.screen.fill(COLOR_PANEL_BG)
         self._draw_top_bar()
+        self._draw_left_sidebar()
         self._draw_grid()
         self._draw_panel()
         self._draw_bottom_bar()
+
+    def _draw_left_sidebar(self) -> None:
+        grid_h = self.world.height * self.controller.cell_size
+        rect = pygame.Rect(0, TOP_BAR_HEIGHT, self.left_sidebar_width, grid_h)
+        pygame.draw.rect(self.screen, COLOR_PANEL_BG, rect)
+        pygame.draw.line(
+            self.screen,
+            COLOR_PANEL_BORDER,
+            (self.left_sidebar_width - 1, TOP_BAR_HEIGHT),
+            (self.left_sidebar_width - 1, TOP_BAR_HEIGHT + grid_h),
+        )
+        x0 = 12
+        y = TOP_BAR_HEIGHT + 10
+        y = self._draw_sidebar_title("MODEL", x0, y)
+        active_id = self.controller.active_model.id
+        for spec in self.controller.available_model_specs:
+            button = self.sidebar_buttons.get(f"model:{spec.id}")
+            if button is None:
+                continue
+            selected = spec.id == active_id
+            fill = (58, 76, 66) if selected else (
+                COLOR_BUTTON_HOVER if button.hovered else COLOR_BUTTON
+            )
+            pygame.draw.rect(self.screen, fill, button.rect, border_radius=6)
+            border = COLOR_ACTION_ACTIVE if selected else COLOR_PANEL_BORDER
+            pygame.draw.rect(self.screen, border, button.rect, width=1, border_radius=6)
+            label = self.font_sm.render(spec.label, True, COLOR_BUTTON_TEXT)
+            self.screen.blit(
+                label,
+                (
+                    button.rect.x + 8,
+                    button.rect.y + (button.rect.height - label.get_height()) // 2,
+                ),
+            )
+            y = max(y, button.rect.bottom + 6)
+
+        audit = self.controller.model_audit_fields()
+        y += 6
+        y = self._draw_sidebar_title("ARCHITECTURE", x0, y)
+        y = self._draw_sidebar_text(f"Variant: {audit.get('variant')}", x0, y, COLOR_TEXT)
+        y = self._draw_sidebar_text(f"Arch: {audit.get('architecture')}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_sidebar_text(f"Runtime: {audit.get('runtime')}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_sidebar_text(f"Actions: {audit.get('action_space')}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_sidebar_text(f"Seed: {audit.get('seed')}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_sidebar_text(f"Map: {audit.get('map')}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_sidebar_text(f"Reward: {audit.get('reward_profile')}", x0, y, COLOR_TEXT_DIM)
+        if audit.get("b_level") is not None:
+            y = self._draw_sidebar_text(f"B level: {audit.get('b_level')}", x0, y, COLOR_TEXT_DIM)
+            if audit.get("b_effective_level") is not None:
+                y = self._draw_sidebar_text(f"Effective: {audit.get('b_effective_level')}", x0, y, COLOR_TEXT_DIM)
+            y = self._draw_sidebar_text(f"B mode: {audit.get('b_mode')}", x0, y, COLOR_TEXT_DIM)
+        if audit.get("semantic_action") is not None or audit.get("b_level") is not None:
+            y += 6
+            y = self._draw_sidebar_title("B DIAGNOSTIC", x0, y)
+            if audit.get("learned_semantic_action") is not None:
+                y = self._draw_sidebar_text(f"Learned: {audit.get('learned_semantic_action')}", x0, y, COLOR_TEXT_DIM)
+            y = self._draw_sidebar_text(f"Semantic: {audit.get('semantic_action')}", x0, y, COLOR_TEXT)
+            if audit.get("semantic_action_source") is not None:
+                y = self._draw_sidebar_text(f"Source: {audit.get('semantic_action_source')}", x0, y, COLOR_TEXT_DIM)
+            y = self._draw_sidebar_text(f"Primitive: {audit.get('bridge_primitive_action')}", x0, y, COLOR_TEXT_DIM)
+            y = self._draw_sidebar_text(f"Reason: {audit.get('bridge_reason')}", x0, y, COLOR_TEXT_DIM)
+            y = self._draw_sidebar_text(f"Semantic overrides: {audit.get('semantic_override_count')}", x0, y, COLOR_TEXT_DIM)
+            y = self._draw_sidebar_text(f"Overrides: {audit.get('external_override_count')}", x0, y, COLOR_TEXT_DIM)
+
+        y += 8
+        y = self._draw_sidebar_title("EVOLUTION", x0, y)
+        compatible = "yes" if audit.get("evolution_transfer_compatible") else "no"
+        y = self._draw_sidebar_text(f"Transfer source: {compatible}", x0, y, COLOR_TEXT_DIM)
+        button = self.sidebar_buttons.get("evolution:save")
+        if button is not None:
+            button.rect.y = y + 6
+            button.draw(self.screen, self.font_sm)
+            y = button.rect.bottom + 6
+        if self.last_evolution_snapshot_path:
+            path = self._compact_path(self.last_evolution_snapshot_path)
+            self._draw_sidebar_text(f"Last: {path}", x0, y, COLOR_TEXT_DIM)
 
     def _night_t(self) -> float:
         return 1.0 if self.world.is_night() else 0.0
@@ -212,6 +295,9 @@ class Renderer:
 
         Renders each world cell (terrain, clutter, narrow passages, shelter variants) with day/night color interpolation; draws shelter roofs and doors, grid lines, smell and visibility overlays when enabled, food items, the predator (lizard) and the spider, and a soft nighttime tint over the entire grid proportional to night intensity.
         """
+        if self.controller.active_model.runtime_kind == "legacy_b0":
+            self._draw_legacy_grid()
+            return
         nt = self._night_t()
         bg = _lerp_color(COLOR_BG_DAY, COLOR_BG_NIGHT, nt)
         ground = _lerp_color(COLOR_GROUND, COLOR_GROUND_NIGHT, nt)
@@ -372,6 +458,42 @@ class Renderer:
             self._night_overlay.fill((0, 0, 30, int(60 * nt)))
             self.screen.blit(self._night_overlay, (ox, oy))
 
+    def _draw_legacy_grid(self) -> None:
+        nt = self._night_t()
+        bg = _lerp_color(COLOR_BG_DAY, COLOR_BG_NIGHT, nt)
+        ground = _lerp_color(COLOR_GROUND, COLOR_GROUND_NIGHT, nt)
+        grid_c = _lerp_color(COLOR_GRID, COLOR_GRID_NIGHT, nt)
+        cell = self.controller.cell_size
+        grid_w = self.world.width * cell
+        grid_h = self.world.height * cell
+        ox, oy = self.grid_offset_x, self.grid_offset_y
+        pygame.draw.rect(self.screen, bg, pygame.Rect(ox, oy, grid_w, grid_h))
+        for cy in range(self.world.height):
+            for cx in range(self.world.width):
+                rx = ox + cx * cell
+                ry = oy + cy * cell
+                rect = pygame.Rect(rx, ry, cell, cell)
+                pos = (cx, cy)
+                if pos in self.world.shelter_cells:
+                    pygame.draw.rect(
+                        self.screen,
+                        _lerp_color(COLOR_SHELTER_INTERIOR, COLOR_SHELTER_NIGHT, nt),
+                        rect,
+                    )
+                else:
+                    pygame.draw.rect(self.screen, ground, rect)
+                pygame.draw.rect(self.screen, grid_c, rect, width=1)
+
+        for fx, fy in self.world.food_positions:
+            cx = ox + fx * cell + cell // 2
+            cy = oy + fy * cell + cell // 2
+            pygame.draw.circle(self.screen, COLOR_FOOD, (cx, cy), max(3, cell // 7))
+
+        self._draw_spider(
+            ox + self.world.state.x * cell + cell // 2,
+            oy + self.world.state.y * cell + cell // 2,
+        )
+
     def _draw_lizard(self, cx: int, cy: int) -> None:
         """Draw a simplified lizard icon centered at (cx, cy) in pixels."""
         cell = self.controller.cell_size
@@ -451,6 +573,9 @@ class Renderer:
 
         No value is returned.
         """
+        if self.controller.active_model.runtime_kind == "legacy_b0":
+            self._draw_legacy_panel()
+            return
         grid_h = self.world.height * self.controller.cell_size
         # Create an off-screen surface tall enough for all content
         panel_surf_h = max(grid_h, MIN_PANEL_SURF_H)
@@ -636,6 +761,95 @@ class Renderer:
             sb_y = self.panel_y + int(sb_travel * self.panel_scroll / max_scroll) if max_scroll > 0 else self.panel_y
             pygame.draw.rect(self.screen, (80, 80, 100), pygame.Rect(sb_x, sb_y, 4, sb_h), border_radius=2)
 
+    def _draw_legacy_panel(self) -> None:
+        grid_h = self.world.height * self.controller.cell_size
+        panel_surf_h = max(grid_h, MIN_PANEL_SURF_H)
+        panel_surf = pygame.Surface((self.panel_width, panel_surf_h))
+        panel_surf.fill(COLOR_PANEL_BG)
+        x0 = 14
+        y = 10
+        pw = self.panel_width - 28
+        st = self.world.state
+
+        y = self._draw_section_title(panel_surf, "B0 LEGACY STATE", x0, y)
+        phase = "NIGHT" if self.world.is_night() else "DAY"
+        y = self._draw_text(panel_surf, f"Tick: {self.world.tick}   Phase: {phase}", x0, y, COLOR_TEXT)
+        y = self._draw_text(panel_surf, f"Position: ({st.x}, {st.y})", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(panel_surf, "Runtime: isolated legacy harness", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(panel_surf, "World: simple 3x3 shelter", x0, y, COLOR_TEXT_DIM)
+
+        y += 4
+        y = self._draw_bar(panel_surf, "Hunger", st.hunger, x0, y, pw, COLOR_BAR_HUNGER)
+        y = self._draw_bar(panel_surf, "Fatigue", st.fatigue, x0, y, pw, COLOR_BAR_FATIGUE)
+        y = self._draw_bar(panel_surf, "Health", st.health, x0, y, pw, COLOR_BAR_HEALTH)
+
+        y += 4
+        y = self._draw_text(panel_surf, f"Food: {st.food_eaten}   Sleep: {st.sleep_events}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(panel_surf, f"Shelter entries: {st.shelter_entries}   Alerts: {st.alert_events}", x0, y, COLOR_TEXT_DIM)
+        y = self._draw_text(panel_surf, f"Last action: {st.last_action}", x0, y, COLOR_TEXT_DIM)
+
+        y += 6
+        y = self._draw_section_title(panel_surf, "REWARD", x0, y)
+        rc = COLOR_REWARD_POS if self.last_reward >= 0 else COLOR_REWARD_NEG
+        y = self._draw_text(panel_surf, f"Last: {self.last_reward:+.3f}   Total: {self.episode_reward:.2f}", x0, y, rc)
+        y = self._draw_reward_chart(panel_surf, x0, y + 2, pw, 40)
+
+        y += 6
+        y = self._draw_section_title(panel_surf, "SEMANTIC ACTION", x0, y)
+        if self.last_decision is not None:
+            action_name = LEGACY_B0_ACTIONS[int(self.last_decision.action_idx)]
+            for idx, action in enumerate(LEGACY_B0_ACTIONS):
+                prob = float(self.last_decision.policy[idx])
+                color = COLOR_ACTION_ACTIVE if action == action_name else COLOR_ACTION_INACTIVE
+                marker = ">" if action == action_name else " "
+                y = self._draw_text(panel_surf, f" {marker} {action:<18} {prob:.3f}", x0, y, color)
+        else:
+            y = self._draw_text(panel_surf, "  (waiting...)", x0, y, COLOR_TEXT_DIM)
+
+        y += 6
+        y = self._draw_section_title(panel_surf, "LEGACY MODULES", x0, y)
+        if self.last_decision is not None:
+            for i, result in enumerate(self.last_decision.module_results):
+                color = COLOR_MODULE_COLORS[i % len(COLOR_MODULE_COLORS)]
+                best_action = LEGACY_B0_ACTIONS[int(np.argmax(result.probs))]
+                confidence = float(np.max(result.probs))
+                short_name = result.name.replace("_", " ").title()
+                y = self._draw_text(panel_surf, f"  {short_name}", x0, y, color)
+                y = self._draw_text(
+                    panel_surf,
+                    f"    top={best_action} ({confidence:.2f})",
+                    x0,
+                    y,
+                    COLOR_TEXT_DIM,
+                )
+
+        if self.training_rewards:
+            y += 4
+            y = self._draw_section_title(panel_surf, "PROGRESS", x0, y)
+            window = self.training_rewards[-min(20, len(self.training_rewards)):]
+            avg = sum(window) / len(window)
+            y = self._draw_text(panel_surf, f"Mean over last {len(window)} eps: {avg:.2f}", x0, y, COLOR_TEXT_DIM)
+
+        self.panel_content_height = y + 10
+        max_scroll = max(0, self.panel_content_height - grid_h)
+        self.panel_scroll = max(0, min(self.panel_scroll, max_scroll))
+        panel_rect = pygame.Rect(self.panel_x, self.panel_y, self.panel_width, grid_h)
+        pygame.draw.rect(self.screen, COLOR_PANEL_BG, panel_rect)
+        pygame.draw.line(
+            self.screen,
+            COLOR_PANEL_BORDER,
+            (self.panel_x, self.panel_y),
+            (self.panel_x, self.panel_y + grid_h),
+        )
+        source_rect = pygame.Rect(0, self.panel_scroll, self.panel_width, grid_h)
+        self.screen.blit(panel_surf, (self.panel_x, self.panel_y), source_rect)
+        if self.panel_content_height > grid_h:
+            sb_x = self.panel_x + self.panel_width - 6
+            sb_h = max(20, int(grid_h * grid_h / self.panel_content_height))
+            sb_travel = grid_h - sb_h
+            sb_y = self.panel_y + int(sb_travel * self.panel_scroll / max_scroll) if max_scroll > 0 else self.panel_y
+            pygame.draw.rect(self.screen, (80, 80, 100), pygame.Rect(sb_x, sb_y, 4, sb_h), border_radius=2)
+
     def _draw_section_title(
         self,
         surface: pygame.Surface,
@@ -648,6 +862,43 @@ class Renderer:
         y += label.get_height() + 2
         pygame.draw.line(surface, COLOR_PANEL_BORDER, (x, y), (x + self.panel_width - 28, y))
         return y + 4
+
+    def _draw_sidebar_title(self, text: str, x: int, y: int) -> int:
+        label = self.font_md.render(text, True, COLOR_TEXT_TITLE)
+        self.screen.blit(label, (x, y))
+        y += label.get_height() + 2
+        pygame.draw.line(
+            self.screen,
+            COLOR_PANEL_BORDER,
+            (x, y),
+            (self.left_sidebar_width - 12, y),
+        )
+        return y + 4
+
+    def _draw_sidebar_text(
+        self,
+        text: str,
+        x: int,
+        y: int,
+        color: Tuple[int, ...],
+    ) -> int:
+        label = self.font_sm.render(str(text), True, color)
+        max_width = max(1, self.left_sidebar_width - x - 10)
+        if label.get_width() > max_width:
+            clipped = str(text)
+            while clipped and label.get_width() > max_width:
+                clipped = clipped[:-1]
+                label = self.font_sm.render(clipped + "...", True, color)
+            text = clipped + "..."
+            label = self.font_sm.render(text, True, color)
+        self.screen.blit(label, (x, y))
+        return y + label.get_height() + 1
+
+    def _compact_path(self, value: str) -> str:
+        parts = value.split("/")
+        if len(parts) <= 3:
+            return value
+        return ".../" + "/".join(parts[-3:])
 
     def _draw_text(
         self,

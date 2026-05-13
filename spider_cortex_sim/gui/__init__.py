@@ -11,6 +11,7 @@ from ..simulation import SpiderSimulation
 from .constants import BOTTOM_BAR_HEIGHT, CELL_SIZE, TOP_BAR_HEIGHT
 from .controller import GUIController
 from .events import EventHandler
+from .models import GUIRunConfig
 from .pygame_compat import pygame, require_pygame
 from .rendering import Renderer
 from .widgets import Button
@@ -19,15 +20,25 @@ from .widgets import Button
 class SpiderGUI:
     """Main simulation viewer window."""
 
-    def __init__(self, sim: SpiderSimulation) -> None:
+    def __init__(
+        self,
+        sim: SpiderSimulation | None = None,
+        *,
+        run_config: GUIRunConfig | None = None,
+        model_id: str = "modular_full",
+    ) -> None:
         self.pygame = require_pygame()
         self.pygame.init()
-        self.controller = GUIController(sim)
+        self.controller = GUIController(
+            sim,
+            run_config=run_config,
+            model_id=model_id,
+        )
         self.controller.apply_window_size(
             self.controller.win_w,
-            TOP_BAR_HEIGHT + (sim.world.height * CELL_SIZE) + BOTTOM_BAR_HEIGHT,
+            TOP_BAR_HEIGHT + (self.controller.world.height * CELL_SIZE) + BOTTOM_BAR_HEIGHT,
         )
-        grid_h = sim.world.height * self.controller.cell_size
+        grid_h = self.controller.world.height * self.controller.cell_size
 
         self.fonts = self._create_fonts()
         self.win_w = self.controller.win_w
@@ -40,17 +51,19 @@ class SpiderGUI:
         self.pygame.display.set_caption("Neuro-Modular Spider Simulation")
         self.clock = self.pygame.time.Clock()
 
-
         self.buttons = self._build_buttons(grid_h)
+        self.sidebar_buttons = self._build_sidebar_buttons()
         self.events = EventHandler(
             controller=self.controller,
             buttons=self.buttons,
+            sidebar_buttons=self.sidebar_buttons,
         )
         self.renderer = Renderer(
             surface=self.screen,
             fonts=self.fonts,
             controller=self.controller,
             buttons=self.buttons,
+            sidebar_buttons=self.sidebar_buttons,
         )
 
     def _build_buttons(self, grid_h: int) -> dict[str, Button]:
@@ -104,6 +117,26 @@ class SpiderGUI:
             for name, _, _ in button_specs
         }
 
+    def _build_sidebar_buttons(self) -> dict[str, Button]:
+        if not hasattr(self.controller, "available_model_specs"):
+            return {}
+        x = 12
+        y = TOP_BAR_HEIGHT + 42
+        width = self.controller.left_sidebar_width - 24
+        height = 26
+        buttons: dict[str, Button] = {}
+        for spec in self.controller.available_model_specs:
+            buttons[f"model:{spec.id}"] = Button(spec.label, x, y, width, height)
+            y += height + 6
+        buttons["evolution:save"] = Button(
+            "Save Evolution Source",
+            x,
+            y + 128,
+            width,
+            height,
+        )
+        return buttons
+
     def launch(self, train_episodes: int, eval_episodes: int) -> None:
         self.controller.configure_run(train_episodes, eval_episodes)
         self._main_loop()
@@ -145,11 +178,14 @@ class SpiderGUI:
     def _rebuild_buttons(self) -> None:
         grid_h = self.controller.world.height * self.controller.cell_size
         self.buttons = self._build_buttons(grid_h)
+        self.sidebar_buttons = self._build_sidebar_buttons()
         self.events = EventHandler(
             controller=self.controller,
             buttons=self.buttons,
+            sidebar_buttons=self.sidebar_buttons,
         )
         self.renderer.buttons = self.buttons
+        self.renderer.sidebar_buttons = self.sidebar_buttons
         self.renderer.btn_pause = self.buttons["pause"]
 
 
@@ -176,7 +212,7 @@ def run_gui(
     load_brain: str | Path | None = None,
     load_modules: Sequence[str] | None = None,
 ) -> None:
-    sim = SpiderSimulation(
+    run_config = GUIRunConfig(
         width=width,
         height=height,
         food_count=food_count,
@@ -194,7 +230,7 @@ def run_gui(
         operational_profile=operational_profile,
         noise_profile=noise_profile,
     )
-    gui = SpiderGUI(sim)
+    gui = SpiderGUI(run_config=run_config)
     if load_brain is not None:
         gui.controller.load_brain(load_brain, modules=load_modules)
     gui.launch(train_episodes=episodes, eval_episodes=eval_episodes)

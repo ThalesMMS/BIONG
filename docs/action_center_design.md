@@ -116,6 +116,30 @@ The benchmark path is intended to measure the learned arbitration policy rather 
 
 The previous hand-authored scaffolding is still available as an explicit ablation. When `enable_deterministic_guards=True`, clear predator pressure can force `threat`, and safe high hunger can force `hunger`. When `enable_food_direction_bias=True`, deterministic evaluation can add a bounded `+3.0` logit bonus to the action facing the best available food cue, selected in visible, trace, memory, then smell order, when the cue direction magnitude exceeds `0.05`. These switches are diagnostic tools and regression baselines, not the default benchmark behavior.
 
+## Owned Option Controller
+
+The diagnostic `true_monolithic_owned_option_controller_policy` is separate from the older auxiliary option-head family. It keeps the public action space unchanged: `MOVE_UP`, `MOVE_DOWN`, `MOVE_LEFT`, `MOVE_RIGHT`, `STAY`, and `ORIENT_*`. It does not add `MOVE_TO_FOOD` or `MOVE_TO_SHELTER` to `world.step()`.
+
+The older option-head variants predict option logits alongside the direct action policy. Those logits are useful supervision and trace signals, but the final action can still be dominated by the shared direct-policy head or by explicit final biases. In the owned-option controller, the executive selects and maintains one option, and only that option's motor leaf produces the normal final primitive action logits. Inactive option leaves do not contribute to the final logits.
+
+Safety remains a mask, not a routine behavior selector. The owned-option safety layer can suppress locally blocked primitive movement actions from `local_affordances`, but food seeking, shelter return, resting, and post-rest exit selection remain owned by the active option leaf. For this variant, final `sleep_rest_bias`, `food_direction_bias`, and `threat_escape_bias` steering is disabled unless a future scaffolded ablation explicitly turns it back on.
+
+Owned-option traces add the audit fields `selected_option`, `option_termination_reason`, `option_age`, `option_leaf_logits`, `option_owned_action`, `safety_mask_applied`, `safety_masked_actions`, and `external_override_count`. A successful run should move both the option label and the executed primitive action family; a label-only improvement is an ownership failure, not evidence that more auxiliary heads are needed.
+
+## B-Series Semantic Bridge
+
+The B-series controller is distinct from both the auxiliary option head and the owned option controller. It is a parallel diagnostic architecture selected with `architecture="b_series"`.
+
+`b0_legacy_semantic_policy` is not an action-center path at all. It runs in an isolated legacy harness with the six old semantic actions so the old benchmark can be reproduced without changing `SpiderWorld`.
+
+`b0_current_bridge_policy` uses the current world and keeps `world.step()` primitive-only. The public name remains B0 current, but the runtime now acts as a simple legacy-direct bridge: the B policy emits logits over `MOVE_TO_FOOD`, `MOVE_TO_SHELTER`, `EXPLORE`, `STAY`, `EAT`, and `SLEEP` for audit, then a trace-visible semantic controller selects the active semantic action for this rung. The bridge submits exactly one primitive action from the current nine-action space. `MOVE_TO_FOOD` and `MOVE_TO_SHELTER` choose primitive progress moves from current local transition metadata and food/shelter vectors, `EXPLORE` chooses an unblocked primitive move, and `STAY`, `EAT`, and `SLEEP` map to `STAY`.
+
+The bridge is intentionally auditable rather than hidden inside the environment. It records `learned_semantic_action`, `semantic_action`, `semantic_action_source`, `semantic_action_reason`, `semantic_override_count`, `semantic_logits`, `bridge_primitive_action`, `bridge_reason`, `blocked_mask`, `food_delta_used`, `shelter_delta_used`, and `external_override_count`. Blocked movement masking is allowed, but routine food or shelter steering must come from the selected semantic action and bridge, not from final A-line biases.
+
+B1 and later B-series controllers use transfer learning from the previous B level. Partial shape-compatible loading is recorded with coverage, loaded keys, partial keys, skipped keys, initialized keys, checkpoint fingerprint, and any low-coverage override.
+
+For the full B-series strategy and the distinction between `B0 legacy` performance and `B0 current bridge` performance, see [b_series_strategy.md](./b_series_strategy.md).
+
 ## Scaffold Classification for Claim Tests
 
 Claim-test reports attach a scaffold classification derived from the ablation config summary and the observed evaluation reflex scale. This taxonomy is reporting-only: it does not change training, simulation rollout behavior, arbitration behavior, or checkpoint selection. It only changes how claim-test outputs are labeled, qualified, or failed in reporting.

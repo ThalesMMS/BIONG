@@ -191,6 +191,8 @@ For systematic validation of modularity, see [docs/architectural_ladder.md](docs
 
 The ladder complements the ablation workflow: use [docs/architectural_ladder.md](docs/architectural_ladder.md) as the diagnostic framework for deciding where a regression likely comes from, and use [docs/ablation_workflow.md](docs/ablation_workflow.md) for the detailed variant definitions, competence-gap and shaping-gap reads, and benchmark-of-record comparison procedures.
 
+The parallel B-series diagnostic strategy is documented in [docs/b_series_strategy.md](docs/b_series_strategy.md). It separates `B0 legacy` reproduction of the old semantic-action benchmark from `B0 current bridge`, which keeps the current primitive action space while restoring an internal semantic decision layer. `B0 current bridge` now uses a deliberately simple legacy-direct controller: the neural head still emits semantic logits for audit, but a trace-visible semantic controller selects the legacy intention before primitive execution. B1 and later B levels use transfer learning from the previous B checkpoint by default.
+
 That policy is intentionally blocking at `A5`: no finer biological module is an automatic improvement, and no new center should be added until `A2` learns, `A3` preserves it, `A4` does not collapse relative to the coarse control, local interface tasks pass, credit remains interpretable, and the candidate comes with an explicit hypothesis plus a selective ablation test.
 
 #### A5 Admission Policy
@@ -652,12 +654,16 @@ $PYTHON_BIN -m spider_cortex_sim \
   --map-template central_burrow
 ```
 
-The GUI window is resizable. When you resize it, the grid automatically zooms to fit the available space (the right-side panel stays docked and its width is recomputed within reasonable bounds).
+The GUI window is resizable. When you resize it, the grid automatically zooms to fit the available space. The model/architecture controls stay docked in the left sidebar, and the ecological diagnostics stay docked in the right-side panel.
 
 To adjust scaling behavior, see the GUI controller logic (`spider_cortex_sim/gui/controller.py`), including the min/max cell size clamps and the `ui_scale` used for font sizing.
 
 The GUI displays:
 
+- a left model selector for `modular_full`, A0, B0 current bridge, and B0 legacy
+- visible architecture metadata including runtime, action space, B level, B mode, seed, map, and reward profile
+- B-series diagnostics such as learned semantic action, selected semantic action, B0-current source/reason, bridge primitive action, bridge reason, and external override count
+- an **Evolution** save action that writes audit snapshots under `artifacts/gui_evolution_snapshots/`
 - the predator lizard on the grid
 - shelter roles and terrain types
 - contact, sighting, and escape counters
@@ -665,6 +671,8 @@ The GUI displays:
 - explicit spider memory and sleep debt
 - recent reward components
 - nighttime shelter-role distribution and predator-state occupancy
+
+`B0 legacy semantic` is shown as an isolated benchmark mode. It does not use the current `SpiderWorld`, does not add semantic actions to the current public action space, and uses a simplified legacy panel/grid so it is not confused with current-world ecological success. `B0 current bridge` runs in the current world as a simple semantic bridge and still submits only primitive actions to `world.step()`.
 
 Useful shortcuts:
 

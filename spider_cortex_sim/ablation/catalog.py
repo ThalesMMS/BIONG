@@ -286,6 +286,46 @@ def diagnostic_ablation_configs(
     """Build opt-in diagnostic variants that should not become canonical defaults."""
     profile_fields = {"capacity_profile": capacity_profile}
     return {
+        "b0_legacy_semantic_policy": BrainAblationConfig(
+            name="b0_legacy_semantic_policy",
+            architecture="b_series",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            **_arbitration_fields(
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=False,
+            ),
+            credit_strategy="broadcast",
+            disabled_modules=(),
+            reflex_scale=0.0,
+            module_reflex_scales={},
+            b_level=0,
+            b_mode="legacy_semantic",
+            b_hidden_dim=32,
+            **profile_fields,
+        ),
+        "b0_current_bridge_policy": BrainAblationConfig(
+            name="b0_current_bridge_policy",
+            architecture="b_series",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            **_arbitration_fields(
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=False,
+            ),
+            credit_strategy="broadcast",
+            disabled_modules=(),
+            reflex_scale=0.0,
+            module_reflex_scales={},
+            b_level=0,
+            b_mode="current_bridge",
+            b_hidden_dim=32,
+            **profile_fields,
+        ),
         "direct_mlp_policy": BrainAblationConfig(
             name="direct_mlp_policy",
             architecture="true_monolithic",
@@ -359,6 +399,32 @@ def diagnostic_ablation_configs(
             direct_policy_hidden_dims=(32,),
             direct_policy_recurrent=True,
             direct_policy_phase_head=True,
+            **profile_fields,
+        ),
+        "true_monolithic_owned_option_controller_policy": BrainAblationConfig(
+            name="true_monolithic_owned_option_controller_policy",
+            architecture="true_monolithic",
+            module_dropout=0.0,
+            enable_reflexes=False,
+            enable_auxiliary_targets=False,
+            **_arbitration_fields(
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                enable_food_direction_bias=False,
+            ),
+            credit_strategy="broadcast",
+            disabled_modules=(),
+            reflex_scale=0.0,
+            module_reflex_scales={},
+            direct_policy_hidden_dims=(32,),
+            direct_policy_recurrent=True,
+            direct_policy_event_attention=True,
+            direct_policy_event_buffer_size=8,
+            direct_policy_option_head=True,
+            direct_policy_owned_option_controller=True,
+            direct_policy_option_ttl=4,
+            direct_policy_handoff_teacher=True,
+            direct_policy_handoff_option_teacher=True,
             **profile_fields,
         ),
         "true_monolithic_event_attention_policy": BrainAblationConfig(
@@ -3697,17 +3763,18 @@ def resolve_ablation_configs(
     Raises:
         KeyError: If any requested names are unknown; the exception message lists the unknown names and the available canonical variant names.
     """
-    registry = canonical_ablation_configs(
+    canonical_registry = canonical_ablation_configs(
         module_dropout=module_dropout,
         capacity_profile=capacity_profile,
     )
+    registry = dict(canonical_registry)
     registry.update(
         diagnostic_ablation_configs(
             module_dropout=module_dropout,
             capacity_profile=capacity_profile,
         )
     )
-    requested = list(names) if names is not None else list(registry)
+    requested = list(names) if names is not None else list(canonical_registry)
     unknown = sorted({name for name in requested if name not in registry})
     if unknown:
         available = ", ".join(registry.keys())

@@ -4,9 +4,10 @@ from .pygame_compat import pygame
 
 
 class EventHandler:
-    def __init__(self, *, controller, buttons) -> None:
+    def __init__(self, *, controller, buttons, sidebar_buttons=None) -> None:
         self.controller = controller
         self.buttons = buttons
+        self.sidebar_buttons = sidebar_buttons or {}
         self.btn_pause = buttons["pause"]
         self.btn_step = buttons["step"]
         self.btn_slower = buttons["slower"]
@@ -18,6 +19,8 @@ class EventHandler:
     def handle_events(self) -> None:
         mouse_pos = pygame.mouse.get_pos()
         for btn in self.buttons.values():
+            btn.update_hover(mouse_pos)
+        for btn in self.sidebar_buttons.values():
             btn.update_hover(mouse_pos)
 
         for event in pygame.event.get():
@@ -62,6 +65,18 @@ class EventHandler:
                 if mx >= self.controller.panel_x:
                     self._scroll_panel(-event.y * 30)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                clicked_sidebar = False
+                for button_id, button in self.sidebar_buttons.items():
+                    if not button.is_clicked(event.pos):
+                        continue
+                    clicked_sidebar = True
+                    if button_id.startswith("model:"):
+                        self.controller.apply_model(button_id.split(":", 1)[1])
+                    elif button_id == "evolution:save":
+                        self.controller.save_evolution_snapshot()
+                    break
+                if clicked_sidebar:
+                    continue
                 if self.btn_pause.is_clicked(event.pos):
                     self.controller.toggle_pause()
                 elif self.btn_step.is_clicked(event.pos):

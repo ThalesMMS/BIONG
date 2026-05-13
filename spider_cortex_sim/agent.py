@@ -32,6 +32,7 @@ from .arbitration import (
     fixed_formula_valence_scores_from_evidence,
     warm_start_arbitration_network,
 )
+from .b_series import B_SERIES_POLICY_NAME, B_SEMANTIC_ACTIONS
 from .capacity_profiles import CapacityProfile, resolve_capacity_profile
 from .bus import MessageBus
 from .direct_policy_affordances import (
@@ -56,6 +57,7 @@ from .nn import (
     DeepTrueMonolithicNetwork,
     ArbitrationNetwork,
     MotorNetwork,
+    OwnedOptionControllerTrueMonolithicNetwork,
     ProposalNetwork,
     RecurrentEventAttentionTrueMonolithicNetwork,
     RecurrentOptionAffordanceFeedbackTrueMonolithicNetwork,
@@ -114,6 +116,7 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
             "threat_center": "threat",
             MONOLITHIC_POLICY_NAME: "integrated_policy",
             TRUE_MONOLITHIC_POLICY_NAME: "integrated_policy",
+            B_SERIES_POLICY_NAME: "semantic_bridge",
         }
     )
     PRIORITY_GATING_WEIGHTS = DEFAULT_PRIORITY_GATING_WEIGHTS
@@ -234,8 +237,10 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         self.module_bank: CorticalModuleBank | None = None
         self.monolithic_policy: ProposalNetwork | None = None
         self.true_monolithic_policy: (
-            TrueMonolithicNetwork | RecurrentTrueMonolithicNetwork | RecurrentEventAttentionTrueMonolithicNetwork | RecurrentOptionTrueMonolithicNetwork | RecurrentOptionAffordanceTrueMonolithicNetwork | RecurrentOptionAffordanceFeedbackTrueMonolithicNetwork | RecurrentOptionAffordanceGeometryFeedbackTrueMonolithicNetwork | RecurrentOptionAffordanceTopologyFeedbackTrueMonolithicNetwork | RecurrentOptionAffordancePositionFeedbackTrueMonolithicNetwork | DeepTrueMonolithicNetwork | None
+            TrueMonolithicNetwork | RecurrentTrueMonolithicNetwork | RecurrentEventAttentionTrueMonolithicNetwork | RecurrentOptionTrueMonolithicNetwork | OwnedOptionControllerTrueMonolithicNetwork | RecurrentOptionAffordanceTrueMonolithicNetwork | RecurrentOptionAffordanceFeedbackTrueMonolithicNetwork | RecurrentOptionAffordanceGeometryFeedbackTrueMonolithicNetwork | RecurrentOptionAffordanceTopologyFeedbackTrueMonolithicNetwork | RecurrentOptionAffordancePositionFeedbackTrueMonolithicNetwork | DeepTrueMonolithicNetwork | None
         ) = None
+        self.b_series_policy: TrueMonolithicNetwork | None = None
+        self.b_series_transfer_report: dict[str, object] | None = None
         self.action_center: MotorNetwork | None = None
         self.motor_cortex: ProposalNetwork | None = None
         self.arbitration_network: ArbitrationNetwork | None = None
@@ -296,6 +301,20 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
                 rng=self.rng,
                 name="motor_cortex",
             )
+        elif self.config.is_b_series:
+            if self.config.b_mode == "legacy_semantic":
+                raise ValueError(
+                    "b0_legacy_semantic_policy uses the isolated LegacyB0Simulation "
+                    "harness and must not run through the current SpiderWorld."
+                )
+            monolithic_input_dim = sum(spec.input_dim for spec in MODULE_INTERFACES)
+            self.b_series_policy = TrueMonolithicNetwork(
+                input_dim=monolithic_input_dim,
+                hidden_dim=int(self.config.b_hidden_dim or action_center_hidden_dim),
+                output_dim=len(B_SEMANTIC_ACTIONS),
+                rng=self.rng,
+                name=B_SERIES_POLICY_NAME,
+            )
         else:
             monolithic_input_dim = sum(spec.input_dim for spec in MODULE_INTERFACES)
             if self.config.direct_policy_local_affordance_inputs:
@@ -315,7 +334,17 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
                     else monolithic_hidden_dim
                 )
                 if self.config.direct_policy_event_attention:
-                    if self.config.direct_policy_option_head:
+                    if self.config.direct_policy_owned_option_controller:
+                        self.true_monolithic_policy = OwnedOptionControllerTrueMonolithicNetwork(
+                            input_dim=monolithic_input_dim,
+                            hidden_dim=direct_hidden_dim,
+                            output_dim=self.action_dim,
+                            event_buffer_size=self.config.direct_policy_event_buffer_size,
+                            option_ttl=self.config.direct_policy_option_ttl,
+                            rng=self.rng,
+                            name=self.TRUE_MONOLITHIC_POLICY_NAME,
+                        )
+                    elif self.config.direct_policy_option_head:
                         if self.config.direct_policy_affordance_head:
                             if self.config.direct_policy_affordance_feedback:
                                 if self.config.direct_policy_shelter_position_head:
@@ -543,7 +572,9 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
                     rng=self.rng,
                     name=self.TRUE_MONOLITHIC_POLICY_NAME,
                 )
-        if not self.config.is_true_monolithic:
+        if self.config.is_b_series:
+            pass
+        elif not self.config.is_true_monolithic:
             arbitration_input_dim = arbitration_evidence_input_dim(
                 arbitration_evidence_fields=self.ARBITRATION_EVIDENCE_FIELDS,
             )
@@ -559,7 +590,11 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         if self.config.name == "learned_arbitration_no_regularization":
             arbitration_regularization_weight = 0.0
             arbitration_valence_regularization_weight = 0.0
-        if not self.config.use_learned_arbitration or self.config.is_true_monolithic:
+        if (
+            not self.config.use_learned_arbitration
+            or self.config.is_true_monolithic
+            or self.config.is_b_series
+        ):
             arbitration_regularization_weight = 0.0
             arbitration_valence_regularization_weight = 0.0
         self.gamma = gamma
@@ -569,6 +604,12 @@ class SpiderBrain(BrainInputMixin, BrainRuntimeMixin, BrainLearningMixin, BrainP
         self.arbitration_valence_regularization_weight = float(arbitration_valence_regularization_weight)
         self.motor_lr = motor_lr
         self.module_dropout = self.config.module_dropout
+        if self.config.is_b_series and self.config.b_transfer_source_checkpoint:
+            self.b_series_transfer_report = self.load_b_series_transfer(
+                self.config.b_transfer_source_checkpoint,
+                min_coverage=self.config.b_transfer_min_coverage,
+                allow_low_coverage=self.config.b_transfer_allow_low_coverage,
+            )
 
     def freeze_proposers(
         self,

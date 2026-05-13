@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..agent import BrainStep
 from ..metrics import EpisodeMetricAccumulator
@@ -14,30 +14,58 @@ from .constants import (
     BOTTOM_BAR_HEIGHT,
     CELL_SIZE,
     DEFAULT_BRAIN_DIR,
+    DEFAULT_EVOLUTION_SNAPSHOT_DIR,
     DEFAULT_SPEED_IDX,
+    LEFT_SIDEBAR_WIDTH,
     PANEL_WIDTH,
     TICK_SPEEDS,
     TOP_BAR_HEIGHT,
 )
+from .models import (
+    GUI_MODEL_SPECS,
+    GUIRunConfig,
+    GUIRuntimeAdapter,
+    adapter_for_existing_simulation,
+    build_runtime_adapter,
+)
 
 
 class GUIController:
-    def __init__(self, sim: SpiderSimulation) -> None:
-        self.sim = sim
-        self.world = sim.world
-        self.brain = sim.brain
-        self.bus = sim.bus
+    def __init__(
+        self,
+        sim: SpiderSimulation | None = None,
+        *,
+        run_config: GUIRunConfig | None = None,
+        model_id: str = "modular_full",
+    ) -> None:
+        if sim is None and run_config is None:
+            run_config = GUIRunConfig()
+        self.run_config = (
+            run_config if run_config is not None else GUIRunConfig.from_simulation(sim)
+        )
+        self.runtime: GUIRuntimeAdapter = (
+            adapter_for_existing_simulation(sim, model_id=model_id)
+            if sim is not None
+            else build_runtime_adapter(self.run_config, model_id)
+        )
+        self.available_model_specs = GUI_MODEL_SPECS
+        self.active_model = self.runtime.spec
+        self.sim = self.runtime.sim
+        self.world = self.runtime.world
+        self.brain = self.runtime.brain
+        self.bus = self.runtime.bus
 
         self.cell_size = CELL_SIZE
+        self.left_sidebar_width = LEFT_SIDEBAR_WIDTH
         self.panel_width = PANEL_WIDTH
 
         grid_w = self.world.width * self.cell_size
-        self.win_w = grid_w + self.panel_width
+        self.win_w = self.left_sidebar_width + grid_w + self.panel_width
         self.win_h = TOP_BAR_HEIGHT + (self.world.height * self.cell_size) + BOTTOM_BAR_HEIGHT
 
-        self.grid_offset_x = 0
+        self.grid_offset_x = self.left_sidebar_width
         self.grid_offset_y = TOP_BAR_HEIGHT
-        self.panel_x = grid_w
+        self.panel_x = self.left_sidebar_width + grid_w
         self.panel_y = TOP_BAR_HEIGHT
 
         self.running = True
@@ -50,13 +78,13 @@ class GUIController:
         self.current_episode = 0
         self.total_train_episodes = 0
         self.total_eval_episodes = 0
-        self.max_steps = sim.max_steps
+        self.max_steps = self.runtime.max_steps
 
         self.current_step = 0
         self.episode_reward = 0.0
         self.episode_done = False
         self.observation: Optional[Dict] = None
-        self.last_decision: Optional[BrainStep] = None
+        self.last_decision: Optional[BrainStep | Any] = None
         self.last_info: Optional[Dict] = None
         self.last_reward = 0.0
         self.reward_history: List[float] = []
@@ -67,6 +95,7 @@ class GUIController:
         self.panel_scroll = 0
         self.panel_content_height = 0
         self.ui_scale = 1.0
+        self.last_evolution_snapshot_path: str | None = None
 
         # Status toast
         self.toast_text: str = ""
@@ -90,7 +119,7 @@ class GUIController:
         min_cell: int = 8,
         max_cell: int = CELL_SIZE,
     ) -> int:
-        available_w = max(1, win_w - panel_width)
+        available_w = max(1, win_w - panel_width - self.left_sidebar_width)
         available_h = max(1, win_h - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT)
 
         fit_w = available_w // max(1, self.world.width)
@@ -115,9 +144,9 @@ class GUIController:
         self.ui_scale = max(0.85, min(1.4, self.cell_size / CELL_SIZE))
 
         grid_w = self.world.width * self.cell_size
-        self.grid_offset_x = 0
+        self.grid_offset_x = self.left_sidebar_width
         self.grid_offset_y = TOP_BAR_HEIGHT
-        self.panel_x = grid_w
+        self.panel_x = self.left_sidebar_width + grid_w
         self.panel_y = TOP_BAR_HEIGHT
 
     def consume_resize_request(self) -> tuple[int, int] | None:
@@ -125,6 +154,40 @@ class GUIController:
             return None
         self.resize_requested = False
         return self.requested_win_size
+
+    def _bind_runtime(self, runtime: GUIRuntimeAdapter) -> None:
+        self.runtime = runtime
+        self.active_model = runtime.spec
+        self.sim = runtime.sim
+        self.world = runtime.world
+        self.brain = runtime.brain
+        self.bus = runtime.bus
+        self.max_steps = runtime.max_steps
+        self.panel_scroll = 0
+        self.panel_content_height = 0
+
+    def apply_model(self, model_id: str) -> None:
+        runtime = build_runtime_adapter(self.run_config, model_id)
+        self._bind_runtime(runtime)
+        self.phase = "training"
+        self.current_episode = 0
+        self.training_rewards.clear()
+        self.reward_history.clear()
+        self.last_decision = None
+        self.last_info = None
+        self.last_reward = 0.0
+        self.episode_reward = 0.0
+        self.episode_done = False
+        self.tick_timer = 0.0
+        self.step_requested = False
+        self._start_episode()
+        self._show_toast(
+            f"Model reset: {self.active_model.label}",
+            is_error=False,
+        )
+
+    def model_audit_fields(self) -> dict[str, object]:
+        return self.runtime.audit_fields(self.last_decision)
 
     def configure_run(self, train_episodes: int, eval_episodes: int) -> None:
         self.total_train_episodes = train_episodes
@@ -136,11 +199,13 @@ class GUIController:
     def _start_episode(self) -> None:
         is_training = self.phase == "training"
         if is_training:
-            episode_seed = self.sim.seed + 997 * (self.current_episode + 1)
+            episode_seed = self.runtime.seed + 997 * (self.current_episode + 1)
         else:
-            episode_seed = self.sim.seed + 997 * (self.total_train_episodes + self.current_episode + 1)
+            episode_seed = self.runtime.seed + 997 * (
+                self.total_train_episodes + self.current_episode + 1
+            )
 
-        self.observation = self.world.reset(seed=episode_seed)
+        self.observation = dict(self.runtime.reset(seed=episode_seed))
         self.current_step = 0
         self.episode_reward = 0.0
         self.episode_done = False
@@ -165,13 +230,15 @@ class GUIController:
             },
         )
 
-        decision = self.brain.act(self.observation, self.bus, sample=is_training)
-        predator_state_before = self.world.lizard.mode
-        next_obs, reward, done, info = self.world.step(decision.action_idx)
+        decision = self.runtime.act(self.observation, sample=is_training)
+        predator_state_before = (
+            self.world.lizard.mode if self.runtime.supports_current_metrics else None
+        )
+        next_obs, reward, done, info = self.runtime.step(decision.action_idx)
 
         if is_training:
             terminal = done or (self.current_step + 1) >= self.max_steps
-            learn_stats = self.brain.learn(decision, reward, next_obs, terminal)
+            learn_stats = self.runtime.learn(decision, reward, next_obs, terminal)
             self.bus.publish(sender="learning", topic="td_update", payload=learn_stats)
 
         self.last_decision = decision
@@ -179,16 +246,17 @@ class GUIController:
         self.last_reward = reward
         self.episode_reward += reward
         self.reward_history.append(reward)
-        self.episode_metrics.record_transition(
-            step=self.current_step,
-            observation_meta=self.observation["meta"],
-            next_meta=next_obs["meta"],
-            info=info,
-            state=self.world.state,
-            predator_state_before=predator_state_before,
-            predator_state=self.world.lizard.mode,
-        )
-        self.observation = next_obs
+        if self.runtime.supports_current_metrics:
+            self.episode_metrics.record_transition(
+                step=self.current_step,
+                observation_meta=self.observation["meta"],
+                next_meta=next_obs["meta"],
+                info=info,
+                state=self.world.state,
+                predator_state_before=predator_state_before,
+                predator_state=self.world.lizard.mode,
+            )
+        self.observation = dict(next_obs)
         self.current_step += 1
 
         if done:
@@ -249,6 +317,12 @@ class GUIController:
         """
         path = Path(directory) if directory else Path(DEFAULT_BRAIN_DIR)
         try:
+            if not self.runtime.supports_current_metrics:
+                self._show_toast(
+                    "Use Save Evolution Source for B0 legacy.",
+                    is_error=True,
+                )
+                return
             self.brain.save(path)
             self._show_toast(f"Brain saved to {path}/", is_error=False)
         except (OSError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
@@ -256,6 +330,42 @@ class GUIController:
 
     def save_brain(self, directory: str | Path | None = None) -> None:
         self._save_brain(directory)
+
+    def _controller_snapshot_state(self) -> dict[str, object]:
+        return {
+            "phase": self.phase,
+            "current_episode": int(self.current_episode),
+            "total_train_episodes": int(self.total_train_episodes),
+            "total_eval_episodes": int(self.total_eval_episodes),
+            "current_step": int(self.current_step),
+            "episode_reward": float(self.episode_reward),
+            "last_reward": float(self.last_reward),
+            "last_action_idx": (
+                None
+                if self.last_decision is None
+                else int(self.last_decision.action_idx)
+            ),
+            "audit": self.model_audit_fields(),
+        }
+
+    def save_evolution_snapshot(
+        self,
+        directory: str | Path | None = None,
+    ) -> Path | None:
+        base_dir = Path(directory) if directory is not None else Path(
+            DEFAULT_EVOLUTION_SNAPSHOT_DIR
+        )
+        try:
+            path = self.runtime.save_evolution_snapshot(
+                base_dir,
+                controller_state=self._controller_snapshot_state(),
+            )
+        except (OSError, json.JSONDecodeError, zipfile.BadZipFile, ValueError) as exc:
+            self._show_toast(f"Evolution save error: {exc}", is_error=True)
+            return None
+        self.last_evolution_snapshot_path = str(path)
+        self._show_toast(f"Evolution source saved: {path}", is_error=False)
+        return path
 
     def _load_brain(self, directory: str | Path | None = None, modules: Sequence[str] | None = None) -> None:
         """
@@ -270,6 +380,9 @@ class GUIController:
         """
         path = Path(directory) if directory else Path(DEFAULT_BRAIN_DIR)
         try:
+            if not self.runtime.supports_current_metrics:
+                self._show_toast("Load is not supported for B0 legacy.", is_error=True)
+                return
             loaded = self.brain.load(path, modules=modules)
             self._show_toast(f"Loaded: {', '.join(loaded)}", is_error=False)
         except (
@@ -367,20 +480,13 @@ class GUIController:
 
         Resets phase to "training", sets the current episode index to 0, clears accumulated training rewards, and starts a new episode with the freshly constructed brain.
         """
-        self.sim.brain = type(self.sim.brain)(
-            seed=self.sim.seed,
-            gamma=self.brain.gamma,
-            module_lr=self.brain.module_lr,
-            motor_lr=self.brain.motor_lr,
-            module_dropout=self.brain.module_dropout,
-            config=self.brain.config,
-            operational_profile=self.sim.operational_profile,
-        )
-        self.brain = self.sim.brain
+        runtime = build_runtime_adapter(self.run_config, self.active_model.id)
+        self._bind_runtime(runtime)
         self.phase = "training"
         self.current_episode = 0
         self.training_rewards.clear()
         self._start_episode()
+        self._show_toast(f"Restarted: {self.active_model.label}", is_error=False)
 
     def restart(self) -> None:
         self._restart()

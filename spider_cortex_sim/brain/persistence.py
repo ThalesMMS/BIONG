@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import hashlib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -29,6 +30,7 @@ from ..arbitration import (
     warm_start_arbitration_network,
 )
 from ..bus import MessageBus
+from ..b_series import B_SERIES_POLICY_NAME, B_SEMANTIC_ACTIONS
 from ..direct_policy_affordances import (
     DIRECT_POLICY_TRANSITION_PREDICTION_FEATURE_DIM,
     DIRECT_POLICY_TRANSITION_ROLLOUT_PREDICTION_FEATURE_DIM,
@@ -101,6 +103,8 @@ class BrainPersistenceMixin:
             "total_parameters": total_trainable_parameters,
             "modules": {},
         }
+        if getattr(self, "b_series_transfer_report", None) is not None:
+            metadata["b_series_transfer"] = dict(self.b_series_transfer_report)
 
         if self.module_bank is not None:
             bank_state = self.module_bank.state_dict()
@@ -141,6 +145,12 @@ class BrainPersistenceMixin:
                 "event_attention": bool(mono_sd.get("event_attention", False)),
                 "event_buffer_size": int(mono_sd.get("event_buffer_size", 0)),
                 "option_head": bool(mono_sd.get("option_head", False)),
+                "owned_option_controller": bool(
+                    mono_sd.get("owned_option_controller", False)
+                ),
+                "leaf_context_bias_scale": float(
+                    mono_sd.get("leaf_context_bias_scale", 0.0)
+                ),
                 "option_ttl": int(mono_sd.get("option_ttl", 0)),
                 "affordance_head": bool(mono_sd.get("affordance_head", False)),
                 "affordance_feedback": bool(mono_sd.get("affordance_feedback", False)),
@@ -602,6 +612,22 @@ class BrainPersistenceMixin:
                     mono_sd["transition_rollout_prediction_feature_dim"]
                 )
             metadata["modules"][self.TRUE_MONOLITHIC_POLICY_NAME] = module_metadata
+        elif getattr(self, "b_series_policy", None) is not None:
+            b_sd = self.b_series_policy.state_dict()
+            b_arrays = {k: v for k, v in b_sd.items() if isinstance(v, np.ndarray)}
+            np.savez(directory / f"{B_SERIES_POLICY_NAME}.npz", **b_arrays)
+            metadata["modules"][B_SERIES_POLICY_NAME] = {
+                "type": "b_series_policy",
+                "input_dim": b_sd["input_dim"],
+                "hidden_dim": b_sd["hidden_dim"],
+                "output_dim": b_sd["output_dim"],
+                "semantic_actions": list(B_SEMANTIC_ACTIONS),
+                "b_level": int(getattr(self.config, "b_level", 0)),
+                "b_mode": str(getattr(self.config, "b_mode", "current_bridge")),
+                "parameter_count": int(
+                    parameter_counts_by_network.get(B_SERIES_POLICY_NAME, 0)
+                ),
+            }
 
         if self.arbitration_network is not None:
             arbitration_sd = self.arbitration_network.state_dict()
@@ -790,6 +816,16 @@ class BrainPersistenceMixin:
                 arrays["hidden_dim"] = mod_meta["hidden_dim"]
                 arrays["output_dim"] = mod_meta["output_dim"]
                 self.motor_cortex.load_state_dict(arrays)
+            elif mod_meta["type"] == "b_series_policy":
+                if getattr(self, "b_series_policy", None) is None:
+                    raise ValueError(
+                        "Checkpoint contains B-series weights for a topology without b_series_policy."
+                    )
+                arrays["name"] = name
+                arrays["input_dim"] = mod_meta["input_dim"]
+                arrays["hidden_dim"] = mod_meta["hidden_dim"]
+                arrays["output_dim"] = mod_meta["output_dim"]
+                self.b_series_policy.load_state_dict(arrays)
             else:
                 arrays["name"] = name
                 arrays["input_dim"] = mod_meta["input_dim"]
@@ -803,6 +839,12 @@ class BrainPersistenceMixin:
                     arrays["event_attention"] = bool(mod_meta.get("event_attention", False))
                     arrays["event_buffer_size"] = int(mod_meta.get("event_buffer_size", 0))
                     arrays["option_head"] = bool(mod_meta.get("option_head", False))
+                    arrays["owned_option_controller"] = bool(
+                        mod_meta.get("owned_option_controller", False)
+                    )
+                    arrays["leaf_context_bias_scale"] = float(
+                        mod_meta.get("leaf_context_bias_scale", 0.0)
+                    )
                     arrays["option_ttl"] = int(mod_meta.get("option_ttl", 0))
                     arrays["phase_option_feedback"] = bool(
                         mod_meta.get("phase_option_feedback", False)
@@ -980,6 +1022,10 @@ class BrainPersistenceMixin:
                 direct_state.pop("event_feature_dim", None)
             if not hasattr(self.true_monolithic_policy, "option_ttl"):
                 direct_state.pop("option_head", None)
+                direct_state.pop("owned_option_controller", None)
+                direct_state.pop("leaf_context_bias_scale", None)
+                direct_state.pop("W2_option_leaf", None)
+                direct_state.pop("b2_option_leaf", None)
                 direct_state.pop("option_ttl", None)
                 direct_state.pop("option_dim", None)
                 direct_state.pop("phase_option_feedback", None)
@@ -997,6 +1043,15 @@ class BrainPersistenceMixin:
                 direct_state.pop("option_action_separate_recurrent_head", None)
                 direct_state.pop("option_action_separate_policy_path", None)
                 direct_state.pop("option_action_separate_backbone", None)
+            if not getattr(
+                self.true_monolithic_policy,
+                "owned_option_controller",
+                False,
+            ):
+                direct_state.pop("owned_option_controller", None)
+                direct_state.pop("leaf_context_bias_scale", None)
+                direct_state.pop("W2_option_leaf", None)
+                direct_state.pop("b2_option_leaf", None)
             if not hasattr(self.true_monolithic_policy, "affordance_role_dim"):
                 direct_state.pop("affordance_head", None)
                 direct_state.pop("affordance_role_dim", None)
@@ -1164,3 +1219,114 @@ class BrainPersistenceMixin:
             self.true_monolithic_policy.load_state_dict(direct_state)
 
         return loaded
+
+    def load_b_series_transfer(
+        self,
+        directory: str | Path,
+        *,
+        min_coverage: float = 0.50,
+        allow_low_coverage: bool = False,
+    ) -> dict[str, object]:
+        if getattr(self, "b_series_policy", None) is None:
+            raise ValueError(
+                "B-series transfer requested for a brain without b_series_policy."
+            )
+        directory = Path(directory)
+        meta_path = directory / self._METADATA_FILE
+        if not meta_path.exists():
+            raise FileNotFoundError(f"Metadata file not found: {meta_path}")
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        modules = metadata.get("modules", {})
+        if not isinstance(modules, dict) or B_SERIES_POLICY_NAME not in modules:
+            raise KeyError(
+                f"B-series transfer source is missing {B_SERIES_POLICY_NAME!r}."
+            )
+        source_path = directory / f"{B_SERIES_POLICY_NAME}.npz"
+        if not source_path.exists():
+            raise FileNotFoundError(f"B-series transfer weights not found: {source_path}")
+
+        with np.load(source_path) as npz:
+            source_arrays = {key: np.asarray(value) for key, value in npz.items()}
+        target_state = self.b_series_policy.state_dict()
+        transferred_state = dict(target_state)
+        total_target_params = 0
+        loaded_params = 0
+        loaded_keys: list[str] = []
+        partially_loaded_keys: list[str] = []
+        skipped_keys: list[str] = []
+        initialized_keys: list[str] = []
+
+        for key, target_value in target_state.items():
+            if not isinstance(target_value, np.ndarray):
+                continue
+            target_array = np.asarray(target_value, dtype=float)
+            total_target_params += int(target_array.size)
+            source_array = source_arrays.get(key)
+            if source_array is None:
+                initialized_keys.append(key)
+                continue
+            source_array = np.asarray(source_array, dtype=float)
+            if source_array.shape == target_array.shape:
+                transferred_state[key] = source_array.copy()
+                loaded_params += int(target_array.size)
+                loaded_keys.append(key)
+                continue
+            if source_array.ndim == target_array.ndim:
+                merged = target_array.copy()
+                overlap_shape = tuple(
+                    min(int(source_dim), int(target_dim))
+                    for source_dim, target_dim in zip(
+                        source_array.shape,
+                        target_array.shape,
+                    )
+                )
+                if all(dim > 0 for dim in overlap_shape):
+                    slices = tuple(slice(0, dim) for dim in overlap_shape)
+                    merged[slices] = source_array[slices]
+                    transferred_state[key] = merged
+                    copied = 1
+                    for dim in overlap_shape:
+                        copied *= int(dim)
+                    loaded_params += int(copied)
+                    partially_loaded_keys.append(key)
+                    continue
+            skipped_keys.append(key)
+
+        coverage = (
+            float(loaded_params) / float(total_target_params)
+            if total_target_params > 0
+            else 0.0
+        )
+        min_coverage = float(min_coverage)
+        report = {
+            "source_checkpoint": str(directory),
+            "source_metadata_sha256": hashlib.sha256(
+                meta_path.read_bytes()
+            ).hexdigest(),
+            "source_architecture_fingerprint": metadata.get(
+                "architecture_fingerprint"
+            ),
+            "target_b_level": int(getattr(self.config, "b_level", 0)),
+            "parent_level": getattr(self.config, "b_parent_level", None),
+            "coverage": round(float(coverage), 6),
+            "loaded_parameter_count": int(loaded_params),
+            "target_parameter_count": int(total_target_params),
+            "loaded_keys": loaded_keys,
+            "partially_loaded_keys": partially_loaded_keys,
+            "skipped_keys": skipped_keys,
+            "initialized_keys": initialized_keys,
+            "min_coverage": round(float(min_coverage), 6),
+            "allow_low_coverage": bool(allow_low_coverage),
+        }
+        if coverage < min_coverage and not allow_low_coverage:
+            raise ValueError(
+                "B-series transfer coverage below threshold "
+                f"(coverage={coverage:.6f}, min={min_coverage:.6f})."
+            )
+        transferred_state["name"] = B_SERIES_POLICY_NAME
+        transferred_state["input_dim"] = self.b_series_policy.input_dim
+        transferred_state["hidden_dim"] = self.b_series_policy.hidden_dim
+        transferred_state["output_dim"] = self.b_series_policy.output_dim
+        self.b_series_policy.load_state_dict(transferred_state)
+        self.b_series_transfer_report = report
+        return report

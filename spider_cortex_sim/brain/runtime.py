@@ -30,6 +30,14 @@ from ..arbitration import (
     warm_start_arbitration_network,
 )
 from ..bus import MessageBus
+from ..b_series import (
+    B_CURRENT_BRIDGE_EFFECTIVE_LEVEL,
+    B_CURRENT_BRIDGE_SELECTION_SOURCE,
+    B_SERIES_POLICY_NAME,
+    B_SEMANTIC_ACTIONS,
+    B_SEMANTIC_ACTION_TO_INDEX,
+    bridge_b_semantic_action,
+)
 from ..interfaces import (
     ACTION_CONTEXT_INTERFACE,
     ACTION_DELTAS,
@@ -76,6 +84,140 @@ TRUE_MONOLITHIC_SLEEP_REST_BIAS_LOGIT = 6.0
 
 
 class BrainRuntimeMixin:
+    @staticmethod
+    def _b_series_float(mapping: MappingProxyType | Dict[str, float], key: str) -> float:
+        try:
+            value = float(mapping.get(key, 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        if not np.isfinite(value):
+            return 0.0
+        return float(np.clip(value, 0.0, 1.0))
+
+    def _b0_current_simple_semantic_action(
+        self,
+        observation: Dict[str, np.ndarray],
+        *,
+        learned_semantic_action: str,
+    ) -> tuple[str, str, str, int]:
+        hunger_obs = self._bound_observation("hunger_center", observation)
+        sleep_obs = self._bound_observation("sleep_center", observation)
+        threat_obs = self._bound_observation("threat_center", observation)
+        meta = observation.get("meta")
+        meta = meta if isinstance(meta, dict) else {}
+
+        hunger = self._b_series_float(hunger_obs, "hunger")
+        fatigue = self._b_series_float(sleep_obs, "fatigue")
+        sleep_debt = self._b_series_float(sleep_obs, "sleep_debt")
+        health = self._b_series_float(sleep_obs, "health")
+        on_food = self._b_series_float(hunger_obs, "on_food") > 0.5 or bool(
+            meta.get("on_food", False)
+        )
+        on_shelter = self._b_series_float(sleep_obs, "on_shelter") > 0.5 or bool(
+            meta.get("on_shelter", False)
+        )
+        night = self._b_series_float(sleep_obs, "night") > 0.5 or bool(
+            meta.get("night", False)
+        )
+        shelter_role = str(meta.get("shelter_role", "outside"))
+        shelter_role_level = max(
+            self._b_series_float(sleep_obs, "shelter_role_level"),
+            self._b_series_float(meta, "shelter_role_level"),
+        )
+        food_memory_signal = (
+            1.0 - self._b_series_float(hunger_obs, "food_memory_age")
+            if (
+                abs(float(hunger_obs.get("food_memory_dx", 0.0)))
+                + abs(float(hunger_obs.get("food_memory_dy", 0.0)))
+            )
+            > 0.05
+            else 0.0
+        )
+        food_signal = max(
+            self._b_series_float(hunger_obs, "food_visible"),
+            self._b_series_float(hunger_obs, "food_certainty"),
+            self._b_series_float(hunger_obs, "food_smell_strength"),
+            self._b_series_float(hunger_obs, "food_trace_strength"),
+            food_memory_signal,
+        )
+        acute_threat = max(
+            self._b_series_float(threat_obs, "predator_visible"),
+            self._b_series_float(threat_obs, "predator_certainty"),
+            self._b_series_float(threat_obs, "predator_motion_salience"),
+            self._b_series_float(threat_obs, "visual_predator_threat"),
+            self._b_series_float(threat_obs, "olfactory_predator_threat"),
+            self._b_series_float(threat_obs, "recent_pain"),
+            self._b_series_float(threat_obs, "recent_contact"),
+        )
+        threat_pressure = max(
+            acute_threat,
+            self._b_series_float(threat_obs, "predator_smell_strength"),
+        )
+
+        if on_food and hunger >= 0.10:
+            semantic_action = "EAT"
+            reason = "b0_current_eat_on_food"
+        elif on_shelter:
+            rest_pressure = bool(night or fatigue >= 0.25 or sleep_debt >= 0.25)
+            if health <= 0.65 and hunger < 0.55:
+                if shelter_role_level < 0.75:
+                    semantic_action = "MOVE_TO_SHELTER"
+                    reason = "b0_current_low_health_deepen"
+                elif rest_pressure:
+                    semantic_action = "SLEEP"
+                    reason = "b0_current_low_health_rest"
+                else:
+                    semantic_action = "STAY"
+                    reason = "b0_current_low_health_hold"
+            elif threat_pressure >= 0.55 and hunger < 0.48:
+                if shelter_role_level < 0.75:
+                    semantic_action = "MOVE_TO_SHELTER"
+                    reason = "b0_current_threat_hold_deepen"
+                elif rest_pressure:
+                    semantic_action = "SLEEP"
+                    reason = "b0_current_threat_hold_rest"
+                else:
+                    semantic_action = "STAY"
+                    reason = "b0_current_threat_hold_shelter"
+            elif rest_pressure and hunger < 0.55:
+                if shelter_role_level < 0.75:
+                    semantic_action = "MOVE_TO_SHELTER"
+                    reason = "b0_current_deepen_before_rest"
+                else:
+                    semantic_action = "SLEEP"
+                    reason = "b0_current_rest_in_shelter"
+            elif hunger >= 0.50 or (food_signal >= 0.35 and not rest_pressure):
+                semantic_action = "MOVE_TO_FOOD"
+                reason = "b0_current_forage_from_shelter"
+            else:
+                semantic_action = "STAY"
+                reason = "b0_current_shelter_hold"
+        elif (
+            (hunger < 0.40 and (night or fatigue >= 0.25 or sleep_debt >= 0.25))
+            or acute_threat >= 0.85
+            or (threat_pressure >= 0.55 and hunger < 0.55)
+            or (health <= 0.65 and hunger < 0.55)
+            or health <= 0.35
+        ):
+            semantic_action = "MOVE_TO_SHELTER"
+            reason = "b0_current_recover_return"
+        elif hunger >= 0.45 or food_signal >= 0.15:
+            semantic_action = "MOVE_TO_FOOD"
+            reason = "b0_current_forage"
+        elif night or fatigue >= 0.52 or sleep_debt >= 0.52:
+            semantic_action = "MOVE_TO_SHELTER"
+            reason = "b0_current_rest_return"
+        else:
+            semantic_action = "EXPLORE"
+            reason = "b0_current_explore"
+
+        return (
+            semantic_action,
+            B_CURRENT_BRIDGE_SELECTION_SOURCE,
+            reason,
+            int(semantic_action != learned_semantic_action),
+        )
+
     @staticmethod
     def _network_forward_macs(network: object) -> int:
         if isinstance(network, RecurrentProposalNetwork):
@@ -173,6 +315,10 @@ class BrainRuntimeMixin:
         if self.true_monolithic_policy is not None:
             per_network[self.TRUE_MONOLITHIC_POLICY_NAME] = self._network_forward_macs(
                 self.true_monolithic_policy
+            )
+        if getattr(self, "b_series_policy", None) is not None:
+            per_network[B_SERIES_POLICY_NAME] = self._network_forward_macs(
+                self.b_series_policy
             )
         if self.arbitration_network is not None:
             per_network[self.ARBITRATION_NETWORK_NAME] = self._network_forward_macs(
@@ -527,6 +673,11 @@ class BrainRuntimeMixin:
         option_age = -1
         option_termination_reason = "none"
         option_logits = np.zeros(0, dtype=float)
+        option_leaf_logits = np.zeros(0, dtype=float)
+        option_owned_action: str | None = None
+        safety_mask_applied = False
+        safety_masked_actions: list[str] = []
+        external_override_count = 0
         affordance_blocked_logits = np.zeros(0, dtype=float)
         affordance_role_logits = np.zeros(0, dtype=float)
         geometry_logits = np.zeros(0, dtype=float)
@@ -534,7 +685,121 @@ class BrainRuntimeMixin:
         shelter_position_logits = np.zeros(0, dtype=float)
         transition_prediction_logits = np.zeros(0, dtype=float)
         transition_rollout_prediction_logits = np.zeros(0, dtype=float)
-        if self.config.is_true_monolithic:
+        if self.config.is_b_series:
+            if self.b_series_policy is None:
+                raise RuntimeError(
+                    "B-series policy unavailable for the configured architecture."
+                )
+            monolithic_observation = self._build_monolithic_observation(observation)
+            semantic_logits, value = self.b_series_policy.forward(
+                monolithic_observation,
+                store_cache=store_cache,
+            )
+            semantic_policy = softmax(semantic_logits)
+            if sample:
+                learned_semantic_action_idx = int(
+                    self.rng.choice(len(B_SEMANTIC_ACTIONS), p=semantic_policy)
+                )
+            else:
+                learned_semantic_action_idx = int(np.argmax(semantic_policy))
+            learned_semantic_action = B_SEMANTIC_ACTIONS[learned_semantic_action_idx]
+            semantic_action = learned_semantic_action
+            semantic_action_source = "network_policy"
+            semantic_action_reason = "network_argmax_or_sample"
+            semantic_override_count = 0
+            b_effective_level = "B0"
+            if (
+                int(getattr(self.config, "b_level", 0)) == 0
+                and str(getattr(self.config, "b_mode", "")) == "current_bridge"
+            ):
+                (
+                    semantic_action,
+                    semantic_action_source,
+                    semantic_action_reason,
+                    semantic_override_count,
+                ) = self._b0_current_simple_semantic_action(
+                    observation,
+                    learned_semantic_action=learned_semantic_action,
+                )
+                b_effective_level = B_CURRENT_BRIDGE_EFFECTIVE_LEVEL
+            semantic_action_idx = int(B_SEMANTIC_ACTION_TO_INDEX[semantic_action])
+            bridge_decision = bridge_b_semantic_action(
+                semantic_action,
+                observation,
+                rng=self.rng,
+                sample=bool(sample),
+            )
+            action_idx = int(bridge_decision.primitive_action_idx)
+            motor_action_idx = action_idx
+            action_intent_idx = action_idx
+            action_intent_without_reflex_idx = action_idx
+            action_without_reflex_idx = action_idx
+            primitive_logits = np.zeros(self.action_dim, dtype=float)
+            primitive_logits[action_idx] = 6.0
+            total_logits_without_reflex = primitive_logits.copy()
+            total_logits = primitive_logits.copy()
+            action_center_logits = primitive_logits.copy()
+            action_center_policy = softmax(action_center_logits)
+            policy = softmax(total_logits)
+            proposal_sum = total_logits.copy()
+            module_results = [
+                ModuleResult(
+                    interface=None,
+                    name=B_SERIES_POLICY_NAME,
+                    observation_key=B_SERIES_POLICY_NAME,
+                    observation=monolithic_observation.copy(),
+                    logits=primitive_logits.copy(),
+                    probs=policy.copy(),
+                    active=True,
+                    reflex=None,
+                    neural_logits=primitive_logits.copy(),
+                    reflex_delta_logits=np.zeros_like(primitive_logits),
+                    post_reflex_logits=primitive_logits.copy(),
+                )
+            ]
+            module_results[0].valence_role = "semantic_bridge"
+            module_results[0].gate_weight = 1.0
+            module_results[0].gated_logits = primitive_logits.copy()
+            module_results[0].contribution_share = 1.0
+            module_results[0].intent_before_gating = bridge_decision.semantic_action
+            module_results[0].intent_after_gating = bridge_decision.primitive_action
+            arbitration = self._true_monolithic_arbitration_decision(
+                module_name=B_SERIES_POLICY_NAME,
+                action_idx=action_idx,
+            )
+            direct_policy_trace_payload = {
+                "b_level": int(self.config.b_level),
+                "b_effective_level": b_effective_level,
+                "b_mode": str(self.config.b_mode),
+                "semantic_action": semantic_action,
+                "semantic_action_idx": int(semantic_action_idx),
+                "learned_semantic_action": learned_semantic_action,
+                "learned_semantic_action_idx": int(learned_semantic_action_idx),
+                "semantic_action_source": semantic_action_source,
+                "semantic_action_reason": semantic_action_reason,
+                "semantic_override_count": int(semantic_override_count),
+                "semantic_logits": np.asarray(semantic_logits, dtype=float)
+                .round(6)
+                .tolist(),
+                "semantic_policy": np.asarray(semantic_policy, dtype=float)
+                .round(6)
+                .tolist(),
+                "bridge_primitive_action": bridge_decision.primitive_action,
+                "bridge_reason": bridge_decision.reason,
+                "blocked_mask": dict(bridge_decision.blocked_mask),
+                "food_delta_used": round(float(bridge_decision.food_delta_used), 6),
+                "shelter_delta_used": round(
+                    float(bridge_decision.shelter_delta_used),
+                    6,
+                ),
+                "external_override_count": int(
+                    bridge_decision.external_override_count
+                ),
+            }
+            external_override_count = int(bridge_decision.external_override_count)
+            motor_override = False
+            final_reflex_override = False
+        elif self.config.is_true_monolithic:
             if self.true_monolithic_policy is None:
                 raise RuntimeError(
                     "True monolithic network unavailable for the configured architecture."
@@ -594,6 +859,9 @@ class BrainRuntimeMixin:
                         ),
                         "direct_policy_option_head": bool(
                             self.config.direct_policy_option_head
+                        ),
+                        "direct_policy_owned_option_controller": bool(
+                            self.config.direct_policy_owned_option_controller
                         ),
                         "direct_policy_option_ttl": int(
                             self.config.direct_policy_option_ttl
@@ -1106,6 +1374,46 @@ class BrainRuntimeMixin:
                             "option_logits": option_logits.round(6).tolist(),
                         }
                     )
+                    option_leaf_logits = np.asarray(
+                        option_summary.get("option_leaf_logits", []),
+                        dtype=float,
+                    ).copy()
+                    option_owned_action_raw = option_summary.get("option_owned_action")
+                    option_owned_action = (
+                        None
+                        if option_owned_action_raw is None
+                        else str(option_owned_action_raw)
+                    )
+                    safety_mask_applied = bool(
+                        option_summary.get("safety_mask_applied", False)
+                    )
+                    safety_masked_actions = [
+                        str(action)
+                        for action in option_summary.get(
+                            "safety_masked_actions",
+                            [],
+                        )
+                    ]
+                    external_override_count = int(
+                        option_summary.get("external_override_count", 0)
+                    )
+                    if option_leaf_logits.size > 0:
+                        direct_policy_trace_payload["option_leaf_logits"] = (
+                            option_leaf_logits.round(6).tolist()
+                        )
+                    if option_owned_action is not None:
+                        direct_policy_trace_payload["option_owned_action"] = (
+                            option_owned_action
+                        )
+                    direct_policy_trace_payload["safety_mask_applied"] = bool(
+                        safety_mask_applied
+                    )
+                    direct_policy_trace_payload["safety_masked_actions"] = list(
+                        safety_masked_actions
+                    )
+                    direct_policy_trace_payload["external_override_count"] = int(
+                        external_override_count
+                    )
             affordance_summary = getattr(
                 self.true_monolithic_policy,
                 "last_affordance_summary",
@@ -1207,6 +1515,7 @@ class BrainRuntimeMixin:
             )
             if (
                 self.config.enable_food_direction_bias
+                and not self.config.direct_policy_owned_option_controller
                 and not training_mode
                 and not sample
             ):
@@ -1244,6 +1553,18 @@ class BrainRuntimeMixin:
                         intent_before_gating_idx=int(np.argmax(total_logits_without_reflex)),
                         intent_after_gating_idx=action_intent_idx,
                     )
+                    if hasattr(self.true_monolithic_policy, "record_external_override"):
+                        self.true_monolithic_policy.record_external_override("final_bias")
+                        external_override_count = int(
+                            getattr(
+                                self.true_monolithic_policy,
+                                "external_override_count",
+                                external_override_count,
+                            )
+                        )
+                        direct_policy_trace_payload["external_override_count"] = int(
+                            external_override_count
+                        )
             if sample:
                 action_idx = int(self.rng.choice(self.action_dim, p=policy))
             else:
@@ -1356,13 +1677,14 @@ class BrainRuntimeMixin:
                         "intent_after_gating": result.intent_after_gating,
                         **(
                             direct_policy_trace_payload
-                            if result.name == self.TRUE_MONOLITHIC_POLICY_NAME
+                            if result.name
+                            in {self.TRUE_MONOLITHIC_POLICY_NAME, B_SERIES_POLICY_NAME}
                             else {}
                         ),
                     },
                 )
 
-        if not self.config.is_true_monolithic:
+        if not (self.config.is_true_monolithic or self.config.is_b_series):
             proposal_sum = np.sum(
                 np.stack(
                     [
@@ -1455,7 +1777,21 @@ class BrainRuntimeMixin:
         execution_difficulty = float(execution_diagnostics["execution_difficulty"])
 
         if bus is not None:
-            if self.config.is_true_monolithic:
+            if self.config.is_b_series:
+                bus.publish(
+                    sender=B_SERIES_POLICY_NAME,
+                    topic="action.selection",
+                    payload={
+                        "policy_mode": policy_mode,
+                        "direct_policy_logits": total_logits.round(6).tolist(),
+                        "policy": policy.round(6).tolist(),
+                        "selected_action": ACTIONS[motor_action_idx],
+                        "executed_action": ACTIONS[action_idx],
+                        "value_estimate": round(float(value), 6),
+                        **direct_policy_trace_payload,
+                    },
+                )
+            elif self.config.is_true_monolithic:
                 bus.publish(
                     sender=self.TRUE_MONOLITHIC_POLICY_NAME,
                     topic="action.selection",
@@ -1512,12 +1848,14 @@ class BrainRuntimeMixin:
                 )
 
         step_observation: Dict[str, np.ndarray] = {}
-        if policy_mode == "normal" and self.config.is_true_monolithic:
+        if policy_mode == "normal" and (
+            self.config.is_true_monolithic or self.config.is_b_series
+        ):
             brain_observation_keys = set(observation.keys())
             step_observation = {
                 key: np.asarray(observation[key], dtype=float).copy()
                 for key in brain_observation_keys
-                if key in observation
+                if key in observation and key != "meta"
             }
         elif (
             policy_mode == "normal"
@@ -1576,6 +1914,11 @@ class BrainRuntimeMixin:
             option_age=int(option_age),
             option_termination_reason=option_termination_reason,
             option_logits=np.asarray(option_logits, dtype=float).copy(),
+            option_leaf_logits=np.asarray(option_leaf_logits, dtype=float).copy(),
+            option_owned_action=option_owned_action,
+            safety_mask_applied=bool(safety_mask_applied),
+            safety_masked_actions=tuple(safety_masked_actions),
+            external_override_count=int(external_override_count),
             affordance_blocked_logits=np.asarray(
                 affordance_blocked_logits,
                 dtype=float,
@@ -1601,6 +1944,84 @@ class BrainRuntimeMixin:
                 transition_rollout_prediction_logits,
                 dtype=float,
             ).copy(),
+            b_level=int(self.config.b_level) if self.config.is_b_series else -1,
+            b_effective_level=(
+                str(direct_policy_trace_payload.get("b_effective_level"))
+                if self.config.is_b_series
+                and direct_policy_trace_payload.get("b_effective_level") is not None
+                else None
+            ),
+            b_mode=str(self.config.b_mode) if self.config.is_b_series else None,
+            semantic_action=(
+                direct_policy_trace_payload.get("semantic_action")
+                if self.config.is_b_series
+                else None
+            ),
+            semantic_action_idx=(
+                int(direct_policy_trace_payload.get("semantic_action_idx", -1))
+                if self.config.is_b_series
+                else -1
+            ),
+            learned_semantic_action=(
+                direct_policy_trace_payload.get("learned_semantic_action")
+                if self.config.is_b_series
+                else None
+            ),
+            learned_semantic_action_idx=(
+                int(direct_policy_trace_payload.get("learned_semantic_action_idx", -1))
+                if self.config.is_b_series
+                else -1
+            ),
+            semantic_action_source=(
+                direct_policy_trace_payload.get("semantic_action_source")
+                if self.config.is_b_series
+                else None
+            ),
+            semantic_action_reason=(
+                direct_policy_trace_payload.get("semantic_action_reason")
+                if self.config.is_b_series
+                else None
+            ),
+            semantic_override_count=(
+                int(direct_policy_trace_payload.get("semantic_override_count", 0))
+                if self.config.is_b_series
+                else 0
+            ),
+            semantic_logits=(
+                np.asarray(semantic_logits, dtype=float).copy()
+                if self.config.is_b_series
+                else np.zeros(0, dtype=float)
+            ),
+            semantic_policy=(
+                np.asarray(semantic_policy, dtype=float).copy()
+                if self.config.is_b_series
+                else np.zeros(0, dtype=float)
+            ),
+            bridge_primitive_action=(
+                direct_policy_trace_payload.get("bridge_primitive_action")
+                if self.config.is_b_series
+                else None
+            ),
+            bridge_reason=(
+                direct_policy_trace_payload.get("bridge_reason")
+                if self.config.is_b_series
+                else None
+            ),
+            blocked_mask=(
+                dict(direct_policy_trace_payload.get("blocked_mask", {}))
+                if self.config.is_b_series
+                else {}
+            ),
+            food_delta_used=(
+                float(direct_policy_trace_payload.get("food_delta_used", 0.0))
+                if self.config.is_b_series
+                else 0.0
+            ),
+            shelter_delta_used=(
+                float(direct_policy_trace_payload.get("shelter_delta_used", 0.0))
+                if self.config.is_b_series
+                else 0.0
+            ),
         )
 
     def estimate_value(self, observation: Dict[str, np.ndarray]) -> float:
@@ -1615,6 +2036,15 @@ class BrainRuntimeMixin:
         Returns:
             float: Scalar value estimate for the provided observation.
         """
+        if self.config.is_b_series:
+            if self.b_series_policy is None:
+                raise RuntimeError(
+                    "B-series policy unavailable for the configured architecture."
+                )
+            monolithic_observation = self._build_monolithic_observation(observation)
+            return float(
+                self.b_series_policy.value_only(monolithic_observation)
+            )
         if self.config.is_true_monolithic:
             if self.true_monolithic_policy is None:
                 raise RuntimeError(
@@ -1683,6 +2113,8 @@ class BrainRuntimeMixin:
             return [spec.name for spec in self.module_bank.enabled_specs]
         if self.true_monolithic_policy is not None:
             return [self.TRUE_MONOLITHIC_POLICY_NAME]
+        if getattr(self, "b_series_policy", None) is not None:
+            return [B_SERIES_POLICY_NAME]
         return [self.MONOLITHIC_POLICY_NAME]
 
     def _architecture_signature(self) -> dict[str, object]:
@@ -1718,6 +2150,8 @@ class BrainRuntimeMixin:
             motor_hidden_dim=self.config.motor_hidden_dim,
             integration_hidden_dim=self.config.integration_hidden_dim,
             monolithic_hidden_dim=self.config.monolithic_hidden_dim,
+            b_level=getattr(self.config, "b_level", 0),
+            b_mode=getattr(self.config, "b_mode", "current_bridge"),
             direct_policy_hidden_dims=self.config.direct_policy_hidden_dims or None,
             direct_policy_recurrent=bool(self.config.direct_policy_recurrent),
             direct_policy_phase_head=bool(self.config.direct_policy_phase_head),
@@ -1728,6 +2162,9 @@ class BrainRuntimeMixin:
                 self.config.direct_policy_event_buffer_size
             ),
             direct_policy_option_head=bool(self.config.direct_policy_option_head),
+            direct_policy_owned_option_controller=bool(
+                self.config.direct_policy_owned_option_controller
+            ),
             direct_policy_option_ttl=int(self.config.direct_policy_option_ttl),
             direct_policy_affordance_head=bool(
                 self.config.direct_policy_affordance_head
@@ -2192,6 +2629,8 @@ class BrainRuntimeMixin:
             norms[self.TRUE_MONOLITHIC_POLICY_NAME] = (
                 self.true_monolithic_policy.parameter_norm()
             )
+        if getattr(self, "b_series_policy", None) is not None:
+            norms[B_SERIES_POLICY_NAME] = self.b_series_policy.parameter_norm()
         if self.arbitration_network is not None:
             norms[self.ARBITRATION_NETWORK_NAME] = self.arbitration_network.parameter_norm()
         if self.action_center is not None:
@@ -2217,6 +2656,8 @@ class BrainRuntimeMixin:
             counts[self.TRUE_MONOLITHIC_POLICY_NAME] = (
                 self.true_monolithic_policy.count_parameters()
             )
+        if getattr(self, "b_series_policy", None) is not None:
+            counts[B_SERIES_POLICY_NAME] = self.b_series_policy.count_parameters()
         if self.arbitration_network is not None:
             counts[self.ARBITRATION_NETWORK_NAME] = self.arbitration_network.count_parameters()
         if self.action_center is not None:
@@ -2242,4 +2683,6 @@ class BrainRuntimeMixin:
             ] + [self.ARBITRATION_NETWORK_NAME, "action_center", "motor_cortex"]
         if self.true_monolithic_policy is not None:
             return [self.TRUE_MONOLITHIC_POLICY_NAME]
+        if getattr(self, "b_series_policy", None) is not None:
+            return [B_SERIES_POLICY_NAME]
         return [self.MONOLITHIC_POLICY_NAME, self.ARBITRATION_NETWORK_NAME, "action_center", "motor_cortex"]

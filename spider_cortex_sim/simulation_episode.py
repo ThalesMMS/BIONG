@@ -3051,6 +3051,8 @@ class SimulationEpisodeMixin:
             brain_observation = observation_vectors_from_adapters(
                 observation_adapters
             )
+            if self.brain.config.is_b_series:
+                brain_observation["meta"] = observation["meta"]
 
             if training:
                 decision = self.brain.act_train(
@@ -3176,6 +3178,8 @@ class SimulationEpisodeMixin:
             next_brain_observation = observation_vectors_from_adapters(
                 next_observation_adapters
             )
+            if self.brain.config.is_b_series:
+                next_brain_observation["meta"] = next_observation["meta"]
             self._attach_motor_execution_info(decision, info)
             self._record_direct_policy_events(
                 step=step,
@@ -3269,6 +3273,29 @@ class SimulationEpisodeMixin:
                     "done": bool(done),
                     "messages": self.bus.serialize_current_tick(),
                 }
+                if self.brain.config.is_b_series:
+                    item["b_level"] = int(decision.b_level)
+                    item["b_effective_level"] = decision.b_effective_level
+                    item["b_mode"] = decision.b_mode
+                    item["semantic_action"] = decision.semantic_action
+                    item["learned_semantic_action"] = decision.learned_semantic_action
+                    item["semantic_action_source"] = decision.semantic_action_source
+                    item["semantic_action_reason"] = decision.semantic_action_reason
+                    item["semantic_override_count"] = int(
+                        decision.semantic_override_count
+                    )
+                    item["semantic_logits"] = decision.semantic_logits.round(6).tolist()
+                    item["bridge_primitive_action"] = decision.bridge_primitive_action
+                    item["bridge_reason"] = decision.bridge_reason
+                    item["blocked_mask"] = dict(decision.blocked_mask)
+                    item["food_delta_used"] = round(float(decision.food_delta_used), 6)
+                    item["shelter_delta_used"] = round(
+                        float(decision.shelter_delta_used),
+                        6,
+                    )
+                    item["external_override_count"] = int(
+                        decision.external_override_count
+                    )
                 if debug_trace:
                     arbitration_payload = (
                         decision.arbitration_decision.to_payload()
@@ -3381,6 +3408,58 @@ class SimulationEpisodeMixin:
                             "option_target_idx": int(decision.teacher_option_target_idx),
                             "option_stage": decision.teacher_option_target_stage,
                         },
+                        **(
+                            {
+                                "b_series": {
+                                    "b_level": int(decision.b_level),
+                                    "b_effective_level": decision.b_effective_level,
+                                    "b_mode": decision.b_mode,
+                                    "semantic_action": decision.semantic_action,
+                                    "semantic_action_idx": int(
+                                        decision.semantic_action_idx
+                                    ),
+                                    "learned_semantic_action": (
+                                        decision.learned_semantic_action
+                                    ),
+                                    "learned_semantic_action_idx": int(
+                                        decision.learned_semantic_action_idx
+                                    ),
+                                    "semantic_action_source": (
+                                        decision.semantic_action_source
+                                    ),
+                                    "semantic_action_reason": (
+                                        decision.semantic_action_reason
+                                    ),
+                                    "semantic_override_count": int(
+                                        decision.semantic_override_count
+                                    ),
+                                    "semantic_logits": decision.semantic_logits.round(
+                                        6
+                                    ).tolist(),
+                                    "semantic_policy": decision.semantic_policy.round(
+                                        6
+                                    ).tolist(),
+                                    "bridge_primitive_action": (
+                                        decision.bridge_primitive_action
+                                    ),
+                                    "bridge_reason": decision.bridge_reason,
+                                    "blocked_mask": dict(decision.blocked_mask),
+                                    "food_delta_used": round(
+                                        float(decision.food_delta_used),
+                                        6,
+                                    ),
+                                    "shelter_delta_used": round(
+                                        float(decision.shelter_delta_used),
+                                        6,
+                                    ),
+                                    "external_override_count": int(
+                                        decision.external_override_count
+                                    ),
+                                },
+                            }
+                            if self.brain.config.is_b_series
+                            else {}
+                        ),
                         "final_reflex_override": bool(decision.final_reflex_override),
                         "total_logits_without_reflex": decision.total_logits_without_reflex.round(6).tolist(),
                         "total_logits": decision.total_logits.round(6).tolist(),

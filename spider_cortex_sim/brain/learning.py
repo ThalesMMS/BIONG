@@ -11,6 +11,7 @@ from ..direct_policy_affordances import (
     AFFORDANCE_SHELTER_ROLE_NAMES,
 )
 from ..direct_policy_options import OPTION_NAMES, OPTION_TO_INDEX
+from ..b_series import B_SERIES_POLICY_NAME, B_SEMANTIC_ACTIONS
 from ..distillation.dataset import (
     DistillationConfig,
     DistillationDataset,
@@ -1565,6 +1566,55 @@ class BrainLearningMixin:
         next_value = 0.0 if done else self.estimate_value(next_observation)
         td_target = reward + self.gamma * next_value
         advantage = float(np.clip(td_target - decision.value, -4.0, 4.0))
+        if self.config.is_b_series:
+            if self.b_series_policy is None:
+                raise RuntimeError(
+                    "B-series policy unavailable for the configured architecture."
+                )
+            if decision.semantic_policy.size != len(B_SEMANTIC_ACTIONS):
+                raise ValueError(
+                    "B-series learning requires a semantic policy over the six B0 actions."
+                )
+            semantic_action_idx = int(decision.semantic_action_idx)
+            if not 0 <= semantic_action_idx < len(B_SEMANTIC_ACTIONS):
+                raise ValueError(
+                    f"Invalid B-series semantic_action_idx: {semantic_action_idx}."
+                )
+            grad_policy_logits = advantage * (
+                decision.semantic_policy
+                - one_hot(semantic_action_idx, len(B_SEMANTIC_ACTIONS))
+            )
+            value_grad = decision.value - td_target
+            if B_SERIES_POLICY_NAME not in self._frozen_modules:
+                self.b_series_policy.backward(
+                    grad_policy_logits=grad_policy_logits,
+                    grad_value=value_grad,
+                    lr=self.module_lr,
+                )
+            entropy = -float(
+                np.sum(
+                    decision.semantic_policy
+                    * np.log(decision.semantic_policy + 1e-8)
+                )
+            )
+            return {
+                "reward": float(reward),
+                "td_target": float(td_target),
+                "td_error": float(advantage),
+                "value": float(decision.value),
+                "next_value": float(next_value),
+                "entropy": entropy,
+                "credit_strategy": "b_series_semantic_policy",
+                "module_gradient_norms": {
+                    B_SERIES_POLICY_NAME: float(np.linalg.norm(grad_policy_logits))
+                },
+                "b_level": int(self.config.b_level),
+                "b_mode": str(self.config.b_mode),
+                "semantic_action": decision.semantic_action,
+                "bridge_primitive_action": decision.bridge_primitive_action,
+                "bridge_reason": decision.bridge_reason,
+                "external_override_count": int(decision.external_override_count),
+            }
         grad_policy_logits = advantage * (decision.policy - one_hot(decision.action_idx, self.action_dim))
         effective_credit_strategy = self.config.credit_strategy
         uses_counterfactual_credit = self.config.uses_counterfactual_credit

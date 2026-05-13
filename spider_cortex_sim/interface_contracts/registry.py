@@ -11,6 +11,7 @@ from .module_specs import (
     MODULE_INTERFACES,
     MOTOR_CONTEXT_INTERFACE,
 )
+from ..b_series import B_SERIES_POLICY_NAME, B_SEMANTIC_ACTIONS
 from .observations import ObservationView
 from .variants import VARIANT_INTERFACES, get_interface_variant
 
@@ -125,6 +126,8 @@ def _validate_proposal_order(
         allowed = {spec.name for spec in MODULE_INTERFACES}
     elif proposal_backend == "true_monolithic":
         allowed = {"true_monolithic_policy"}
+    elif proposal_backend == "b_series":
+        allowed = {B_SERIES_POLICY_NAME}
     else:
         allowed = {"monolithic_policy"}
     unknown = sorted({name for name in resolved_order if name not in allowed})
@@ -175,6 +178,7 @@ def architecture_signature(
     direct_policy_event_attention: bool = False,
     direct_policy_event_buffer_size: int = 0,
     direct_policy_option_head: bool = False,
+    direct_policy_owned_option_controller: bool = False,
     direct_policy_option_ttl: int = 0,
     direct_policy_affordance_head: bool = False,
     direct_policy_affordance_feedback: bool = False,
@@ -244,6 +248,8 @@ def architecture_signature(
     direct_policy_executive_post_food_return: bool = False,
     direct_policy_executive_post_food_vector_return: bool = False,
     direct_policy_executive_post_food_path_return: bool = False,
+    b_level: int = 0,
+    b_mode: str = "current_bridge",
     capacity_profile: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """
@@ -280,15 +286,17 @@ def architecture_signature(
             - backend-specific sections: "arbitration_network" / "action_center" / "motor_cortex" or "direct_policy"
             - "fingerprint": SHA-256 fingerprint of the returned payload
     """
-    if proposal_backend not in {"modular", "monolithic", "true_monolithic"}:
+    if proposal_backend not in {"modular", "monolithic", "true_monolithic", "b_series"}:
         raise ValueError(
-            "proposal_backend must be 'modular', 'monolithic', or 'true_monolithic'."
+            "proposal_backend must be 'modular', 'monolithic', 'true_monolithic', or 'b_series'."
         )
     if proposal_order is None:
         if proposal_backend == "modular":
             proposal_order = [spec.name for spec in MODULE_INTERFACES]
         elif proposal_backend == "true_monolithic":
             proposal_order = ["true_monolithic_policy"]
+        elif proposal_backend == "b_series":
+            proposal_order = [B_SERIES_POLICY_NAME]
         else:
             proposal_order = ["monolithic_policy"]
     proposal_order = _validate_proposal_order(proposal_backend, proposal_order)
@@ -319,8 +327,9 @@ def architecture_signature(
         "threat_center": "threat",
         "monolithic_policy": "integrated_policy",
         "true_monolithic_policy": "integrated_policy",
+        B_SERIES_POLICY_NAME: "semantic_bridge",
     }
-    if proposal_backend in {"monolithic", "true_monolithic"}:
+    if proposal_backend in {"monolithic", "true_monolithic", "b_series"}:
         filtered_module_roles = (
             {
                 name: arbitration_module_roles[name]
@@ -406,7 +415,9 @@ def architecture_signature(
         or direct_policy_phase_head
         or direct_policy_event_attention
         or direct_policy_option_head
+        or direct_policy_owned_option_controller
         or direct_policy_affordance_head
+        or proposal_backend == "b_series"
     ):
         capacity_payload: dict[str, object] = {}
         if capacity_profile is not None:
@@ -448,6 +459,8 @@ def architecture_signature(
             capacity_payload["direct_policy_option_ttl"] = int(
                 direct_policy_option_ttl
             )
+        if direct_policy_owned_option_controller:
+            capacity_payload["direct_policy_owned_option_controller"] = True
         if direct_policy_affordance_head:
             capacity_payload["direct_policy_affordance_head"] = True
         if direct_policy_affordance_feedback:
@@ -653,6 +666,9 @@ def architecture_signature(
             capacity_payload[
                 "direct_policy_executive_post_food_return"
             ] = True
+        if proposal_backend == "b_series":
+            capacity_payload["b_level"] = int(b_level)
+            capacity_payload["b_mode"] = str(b_mode)
         payload["capacity"] = capacity_payload
     if proposal_backend == "true_monolithic":
         payload["direct_policy"] = {
@@ -664,6 +680,7 @@ def architecture_signature(
             "phase_head": bool(direct_policy_phase_head),
             "event_attention": bool(direct_policy_event_attention),
             "option_head": bool(direct_policy_option_head),
+            "owned_option_controller": bool(direct_policy_owned_option_controller),
             "affordance_head": bool(direct_policy_affordance_head),
             "affordance_feedback": bool(direct_policy_affordance_feedback),
             "geometry_head": bool(direct_policy_geometry_head),
@@ -849,6 +866,19 @@ def architecture_signature(
             payload["direct_policy"]["hidden_sizes"] = [
                 int(hidden_dim) for hidden_dim in direct_policy_hidden_dims
             ]
+    elif proposal_backend == "b_series":
+        payload["b_series_policy"] = {
+            "observation_sources": [spec.name for spec in MODULE_INTERFACES],
+            "observation_keys": [spec.observation_key for spec in MODULE_INTERFACES],
+            "semantic_outputs": list(B_SEMANTIC_ACTIONS),
+            "public_outputs": list(LOCOMOTION_ACTIONS),
+            "value_head": True,
+            "bridge": "semantic_action_to_primitive_action",
+            "b_level": int(b_level),
+            "b_mode": str(b_mode),
+        }
+        if monolithic_hidden_dim is not None:
+            payload["b_series_policy"]["hidden_dim"] = int(monolithic_hidden_dim)
     else:
         payload["arbitration_network"] = {
             "learned": bool(learned_arbitration),

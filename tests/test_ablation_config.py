@@ -550,7 +550,17 @@ class BrainAblationConfigToSummaryTest(unittest.TestCase):
             "motor_hidden_dim",
             "integration_hidden_dim",
             "monolithic_hidden_dim",
+            "b_level",
+            "b_mode",
+            "b_hidden_dim",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_min_coverage",
+            "b_transfer_allow_low_coverage",
         }
+        expected_keys.update(
+            key for key in self.summary if key.startswith("direct_policy_")
+        )
         self.assertEqual(set(self.summary.keys()), expected_keys)
 
     def test_summary_name_matches(self) -> None:

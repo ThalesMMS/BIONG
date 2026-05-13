@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Mapping, Sequence
 
 from ..capacity_profiles import CapacityProfile, resolve_capacity_profile
+from ..b_series import B_SERIES_MODES, B_SERIES_POLICY_NAME
 from ..interfaces import MODULE_INTERFACES
 
 
@@ -27,6 +28,7 @@ PROPOSAL_SOURCE_NAMES: tuple[str, ...] = (
     *MODULE_NAMES,
     MONOLITHIC_POLICY_NAME,
     TRUE_MONOLITHIC_POLICY_NAME,
+    B_SERIES_POLICY_NAME,
 )
 REFLEX_MODULE_NAMES: tuple[str, ...] = tuple(
     spec.name for spec in MODULE_INTERFACES if spec.role == "proposal"
@@ -68,7 +70,7 @@ def _normalize_module_names(
             if False, deduplicate and return names sorted.
         invalid_msg: Prefix for the ValueError message when unknown names are present.
         monolithic_msg: Error message used when a non-empty result is not allowed under the
-            current monolithic architecture.
+    current monolithic or B-series architecture.
         architecture: Architecture identifier; if `"monolithic"` or `"true_monolithic"`, a
             non-empty normalized result is rejected.
     
@@ -86,7 +88,7 @@ def _normalize_module_names(
     invalid = [n for n in normalized if n not in MODULE_NAMES]
     if invalid:
         raise ValueError(f"{invalid_msg}: {invalid}.")
-    if architecture in {"monolithic", "true_monolithic"} and normalized:
+    if architecture in {"monolithic", "true_monolithic", "b_series"} and normalized:
         raise ValueError(monolithic_msg)
     return normalized
 
@@ -106,6 +108,8 @@ def architecture_description(architecture: str) -> str:
         return "true monolithic direct control"
     if architecture == "monolithic":
         return "monolithic proposer + action/motor pipeline"
+    if architecture == "b_series":
+        return "B-series semantic option bridge"
     return "full modular with arbitration"
 
 
@@ -136,6 +140,7 @@ class BrainAblationConfig:
     direct_policy_event_attention: bool = False
     direct_policy_event_buffer_size: int = 0
     direct_policy_option_head: bool = False
+    direct_policy_owned_option_controller: bool = False
     direct_policy_option_ttl: int = 0
     direct_policy_affordance_head: bool = False
     direct_policy_affordance_feedback: bool = False
@@ -209,13 +214,20 @@ class BrainAblationConfig:
     arbitration_hidden_dim: int | None = None
     motor_hidden_dim: int | None = None
     integration_hidden_dim: int | None = None
+    b_level: int = 0
+    b_mode: str = "current_bridge"
+    b_hidden_dim: int | None = None
+    b_parent_level: int | None = None
+    b_transfer_source_checkpoint: str | None = None
+    b_transfer_min_coverage: float = 0.50
+    b_transfer_allow_low_coverage: bool = False
 
     def __post_init__(self) -> None:
         """
         Validate and normalize dataclass fields after initialization.
         
         Normalizes and persists these fields on the frozen dataclass:
-        - `architecture`: coerced to `str` and must be one of "modular", "monolithic", or "true_monolithic".
+        - `architecture`: coerced to `str` and must be one of "modular", "monolithic", "true_monolithic", or "b_series".
         - `module_dropout`: coerced to `float`, must be finite, and must be in [0.0, 1.0].
         - `use_learned_arbitration`: coerced to `bool`.
         - `enable_deterministic_guards`: coerced to `bool`.
@@ -230,7 +242,7 @@ class BrainAblationConfig:
         - `module_reflex_scales`: keys coerced to `str`, values coerced to `float`, sorted by key into a `dict`; each key must be in `REFLEX_MODULE_NAMES`, each value must be finite and >= 0.0.
         
         Raises:
-            ValueError: If `architecture` is not "modular", "monolithic", or "true_monolithic";
+            ValueError: If `architecture` is not "modular", "monolithic", "true_monolithic", or "b_series";
                         if `module_dropout` or any `module_reflex_scales` value is not finite;
                         if `module_dropout` is outside [0.0, 1.0];
                         if `warm_start_scale` is outside [0.0, 1.0];
@@ -240,7 +252,7 @@ class BrainAblationConfig:
                         or if `architecture` is "monolithic" or "true_monolithic" while `disabled_modules`, `recurrent_modules`, or `module_reflex_scales` are non-empty.
         """
         architecture = str(self.architecture)
-        if architecture not in {"modular", "monolithic", "true_monolithic"}:
+        if architecture not in {"modular", "monolithic", "true_monolithic", "b_series"}:
             raise ValueError(f"Invalid ablation architecture: {architecture!r}.")
         object.__setattr__(self, "architecture", architecture)
         module_dropout = float(self.module_dropout)
@@ -357,6 +369,29 @@ class BrainAblationConfig:
             "direct_policy_option_head",
             bool(self.direct_policy_option_head),
         )
+        owned_option_controller = bool(self.direct_policy_owned_option_controller)
+        object.__setattr__(
+            self,
+            "direct_policy_owned_option_controller",
+            owned_option_controller,
+        )
+        if owned_option_controller:
+            if architecture != "true_monolithic":
+                raise ValueError(
+                    "direct_policy_owned_option_controller is only supported for true_monolithic architectures."
+                )
+            if not bool(self.direct_policy_recurrent):
+                raise ValueError(
+                    "direct_policy_owned_option_controller requires direct_policy_recurrent=True."
+                )
+            if not bool(self.direct_policy_event_attention):
+                raise ValueError(
+                    "direct_policy_owned_option_controller requires direct_policy_event_attention=True."
+                )
+            if not bool(self.direct_policy_option_head):
+                raise ValueError(
+                    "direct_policy_owned_option_controller requires direct_policy_option_head=True."
+                )
         direct_policy_option_ttl = int(self.direct_policy_option_ttl)
         if bool(self.direct_policy_option_head):
             if architecture != "true_monolithic":
@@ -571,9 +606,11 @@ class BrainAblationConfig:
                 raise ValueError(
                     "direct_policy_handoff_teacher is only supported for true_monolithic architectures."
                 )
-            if not bool(self.direct_policy_shelter_position_head):
+            if not bool(self.direct_policy_shelter_position_head) and not bool(
+                self.direct_policy_owned_option_controller
+            ):
                 raise ValueError(
-                    "direct_policy_handoff_teacher requires direct_policy_shelter_position_head=True."
+                    "direct_policy_handoff_teacher requires direct_policy_shelter_position_head=True unless direct_policy_owned_option_controller=True."
                 )
         object.__setattr__(
             self,
@@ -1570,11 +1607,64 @@ class BrainAblationConfig:
             raise ValueError(
                 "module_reflex_scales must contain only non-negative values."
             )
-        if architecture in {"monolithic", "true_monolithic"} and normalized_reflex_scales:
+        if architecture in {"monolithic", "true_monolithic", "b_series"} and normalized_reflex_scales:
             raise ValueError(
-                "Monolithic baselines do not accept per-module module_reflex_scales."
+                "Monolithic and B-series baselines do not accept per-module module_reflex_scales."
             )
         object.__setattr__(self, "module_reflex_scales", normalized_reflex_scales)
+        b_level = int(self.b_level)
+        if b_level < 0:
+            raise ValueError("b_level must be >= 0.")
+        object.__setattr__(self, "b_level", b_level)
+        b_mode = str(self.b_mode)
+        if architecture == "b_series" and b_mode not in B_SERIES_MODES:
+            raise ValueError(
+                f"Invalid b_mode: {b_mode!r}; expected one of {B_SERIES_MODES}."
+            )
+        object.__setattr__(self, "b_mode", b_mode)
+        b_hidden_dim = (
+            int(self.b_hidden_dim)
+            if self.b_hidden_dim is not None
+            else int(action_center_hidden_dim)
+        )
+        if b_hidden_dim <= 0:
+            raise ValueError("b_hidden_dim must be positive.")
+        object.__setattr__(self, "b_hidden_dim", b_hidden_dim)
+        b_parent_level = (
+            None if self.b_parent_level is None else int(self.b_parent_level)
+        )
+        if b_parent_level is not None and b_parent_level < 0:
+            raise ValueError("b_parent_level must be >= 0 when provided.")
+        object.__setattr__(self, "b_parent_level", b_parent_level)
+        b_transfer_source_checkpoint = (
+            None
+            if self.b_transfer_source_checkpoint in {None, ""}
+            else str(self.b_transfer_source_checkpoint)
+        )
+        if architecture == "b_series" and b_level > 0 and b_transfer_source_checkpoint is None:
+            raise ValueError(
+                "B-series levels above B0 require b_transfer_source_checkpoint."
+            )
+        object.__setattr__(
+            self,
+            "b_transfer_source_checkpoint",
+            b_transfer_source_checkpoint,
+        )
+        b_transfer_min_coverage = float(self.b_transfer_min_coverage)
+        if not math.isfinite(b_transfer_min_coverage):
+            raise ValueError("b_transfer_min_coverage must be finite.")
+        if b_transfer_min_coverage < 0.0 or b_transfer_min_coverage > 1.0:
+            raise ValueError("b_transfer_min_coverage must be in [0.0, 1.0].")
+        object.__setattr__(
+            self,
+            "b_transfer_min_coverage",
+            b_transfer_min_coverage,
+        )
+        object.__setattr__(
+            self,
+            "b_transfer_allow_low_coverage",
+            bool(self.b_transfer_allow_low_coverage),
+        )
 
     @property
     def is_modular(self) -> bool:
@@ -1605,6 +1695,10 @@ class BrainAblationConfig:
             True if the architecture is 'true_monolithic', False otherwise.
         """
         return self.architecture == "true_monolithic"
+
+    @property
+    def is_b_series(self) -> bool:
+        return self.architecture == "b_series"
 
     @property
     def uses_local_credit_only(self) -> bool:
@@ -1648,6 +1742,8 @@ class BrainAblationConfig:
         Returns:
             int: Sum of all module hidden dimensions.
         """
+        if self.architecture == "b_series":
+            return int(self.b_hidden_dim or 0)
         if self.direct_policy_hidden_dims:
             return int(sum(self.direct_policy_hidden_dims))
         return int(sum(self.module_hidden_dims.values()))
@@ -1721,6 +1817,9 @@ class BrainAblationConfig:
                 self.direct_policy_event_buffer_size
             ),
             "direct_policy_option_head": bool(self.direct_policy_option_head),
+            "direct_policy_owned_option_controller": bool(
+                self.direct_policy_owned_option_controller
+            ),
             "direct_policy_option_ttl": int(self.direct_policy_option_ttl),
             "direct_policy_affordance_head": bool(
                 self.direct_policy_affordance_head
@@ -1931,6 +2030,15 @@ class BrainAblationConfig:
             "motor_hidden_dim": int(self.motor_hidden_dim or 0),
             "integration_hidden_dim": int(self.integration_hidden_dim or 0),
             "monolithic_hidden_dim": self.monolithic_hidden_dim,
+            "b_level": int(self.b_level),
+            "b_mode": str(self.b_mode),
+            "b_hidden_dim": int(self.b_hidden_dim or 0),
+            "b_parent_level": self.b_parent_level,
+            "b_transfer_source_checkpoint": self.b_transfer_source_checkpoint,
+            "b_transfer_min_coverage": float(self.b_transfer_min_coverage),
+            "b_transfer_allow_low_coverage": bool(
+                self.b_transfer_allow_low_coverage
+            ),
         }
 
     @classmethod
@@ -2037,6 +2145,9 @@ class BrainAblationConfig:
             ),
             direct_policy_option_head=bool(
                 summary.get("direct_policy_option_head", False)
+            ),
+            direct_policy_owned_option_controller=bool(
+                summary.get("direct_policy_owned_option_controller", False)
             ),
             direct_policy_option_ttl=int(
                 summary.get("direct_policy_option_ttl", 0)
@@ -2366,6 +2477,29 @@ class BrainAblationConfig:
             motor_hidden_dim=summary.get(
                 "motor_hidden_dim",
                 legacy_integration_hidden_dim,
+            ),
+            b_level=int(summary.get("b_level", 0) or 0),
+            b_mode=str(summary.get("b_mode", "current_bridge") or "current_bridge"),
+            b_hidden_dim=(
+                int(summary.get("b_hidden_dim"))
+                if summary.get("b_hidden_dim") is not None
+                else None
+            ),
+            b_parent_level=(
+                int(summary.get("b_parent_level"))
+                if summary.get("b_parent_level") is not None
+                else None
+            ),
+            b_transfer_source_checkpoint=(
+                None
+                if summary.get("b_transfer_source_checkpoint") in {None, ""}
+                else str(summary.get("b_transfer_source_checkpoint"))
+            ),
+            b_transfer_min_coverage=float(
+                summary.get("b_transfer_min_coverage", 0.50)
+            ),
+            b_transfer_allow_low_coverage=bool(
+                summary.get("b_transfer_allow_low_coverage", False)
             ),
         )
 
