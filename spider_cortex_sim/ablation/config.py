@@ -221,6 +221,8 @@ class BrainAblationConfig:
     b_transfer_source_checkpoint: str | None = None
     b_transfer_min_coverage: float = 0.50
     b_transfer_allow_low_coverage: bool = False
+    b_controller_profile: str | None = None
+    b_controller_params: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """
@@ -1665,6 +1667,19 @@ class BrainAblationConfig:
             "b_transfer_allow_low_coverage",
             bool(self.b_transfer_allow_low_coverage),
         )
+        b_controller_profile = (
+            None
+            if self.b_controller_profile in {None, ""}
+            else str(self.b_controller_profile)
+        )
+        object.__setattr__(self, "b_controller_profile", b_controller_profile)
+        b_controller_params: dict[str, float] = {}
+        for key, value in dict(self.b_controller_params).items():
+            param_value = float(value)
+            if not math.isfinite(param_value):
+                raise ValueError("b_controller_params values must be finite.")
+            b_controller_params[str(key)] = param_value
+        object.__setattr__(self, "b_controller_params", b_controller_params)
 
     @property
     def is_modular(self) -> bool:
@@ -2039,6 +2054,8 @@ class BrainAblationConfig:
             "b_transfer_allow_low_coverage": bool(
                 self.b_transfer_allow_low_coverage
             ),
+            "b_controller_profile": self.b_controller_profile,
+            "b_controller_params": dict(self.b_controller_params),
         }
 
     @classmethod
@@ -2501,6 +2518,17 @@ class BrainAblationConfig:
             b_transfer_allow_low_coverage=bool(
                 summary.get("b_transfer_allow_low_coverage", False)
             ),
+            b_controller_profile=(
+                None
+                if summary.get("b_controller_profile") in {None, ""}
+                else str(summary.get("b_controller_profile"))
+            ),
+            b_controller_params={
+                str(key): float(value)
+                for key, value in dict(
+                    summary.get("b_controller_params", {}) or {}
+                ).items()
+            },
         )
 
 

@@ -90,6 +90,7 @@ class BrainInputMixin:
             )
 
     def set_direct_policy_event_clock(self, tick: int) -> None:
+        self._direct_policy_event_clock = int(tick)
         if self.true_monolithic_policy is not None and hasattr(
             self.true_monolithic_policy,
             "set_event_clock",
