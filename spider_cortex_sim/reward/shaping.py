@@ -338,6 +338,46 @@ SCENARIO_AUSTERE_REQUIREMENTS: Dict[str, ScenarioAustereRequirement] = {
             "memory_improves_shelter_return",
         ],
     },
+    "continuous_survival_bootstrap": {
+        "requirement_level": "excluded",
+        "rationale": "Bootstrap survival is a scaffolded long-run diagnostic, not an austere survival gate.",
+        "claim_test_linkage": ["continuous_survival_curriculum"],
+    },
+    "continuous_survival_canonical": {
+        "requirement_level": "excluded",
+        "rationale": "Canonical continuous survival is reported separately from the reward-shaping reduction gates.",
+        "claim_test_linkage": ["continuous_survival_curriculum"],
+    },
+    "continuous_survival_easy_v1": {
+        "requirement_level": "excluded",
+        "rationale": "Easy continuous survival is an indulgent learnability diagnostic, not final austere evidence.",
+        "claim_test_linkage": ["continuous_survival_curriculum"],
+    },
+    "continuous_survival_medium_v1": {
+        "requirement_level": "excluded",
+        "rationale": "Medium continuous survival is a curriculum bridge and should not hard-gate shaping reduction.",
+        "claim_test_linkage": ["continuous_survival_curriculum"],
+    },
+    "continuous_survival_post_rest_inside_v1": {
+        "requirement_level": "excluded",
+        "rationale": "Post-rest inside continuation is training-only curriculum coverage, not austere gate evidence.",
+        "claim_test_linkage": ["continuous_survival_curriculum"],
+    },
+    "continuous_survival_post_rest_entrance_v1": {
+        "requirement_level": "excluded",
+        "rationale": "Post-rest entrance continuation is training-only handoff coverage, not an austere gate.",
+        "claim_test_linkage": ["continuous_survival_curriculum"],
+    },
+    "continuous_survival_return_after_late_forage_v1": {
+        "requirement_level": "excluded",
+        "rationale": "Late-forage return is curriculum coverage for long-run loops, not a reward-shaping gate.",
+        "claim_test_linkage": ["continuous_survival_curriculum"],
+    },
+    "continuous_survival_re_rest_after_return_v1": {
+        "requirement_level": "excluded",
+        "rationale": "Re-rest after return is curriculum coverage for later cycles, not austere gate evidence.",
+        "claim_test_linkage": ["continuous_survival_curriculum"],
+    },
     "predator_edge": {
         "requirement_level": "gate",
         "rationale": "Core predator-response claim; escape behavior must survive without progress escape rewards.",

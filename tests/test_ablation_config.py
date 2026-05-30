@@ -553,6 +553,8 @@ class BrainAblationConfigToSummaryTest(unittest.TestCase):
             "b_level",
             "b_mode",
             "b_hidden_dim",
+            "b_controller_profile",
+            "b_controller_params",
             "b_parent_level",
             "b_transfer_source_checkpoint",
             "b_transfer_min_coverage",

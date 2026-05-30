@@ -1,46 +1,46 @@
-# B-Series Evolution: B0 to B5
+# Evolução B-Series: B0 a B5
 
-Updated on 2026-05-16.
+Atualizado em 2026-05-16.
 
-This document summarizes only the B-series line that worked, that is, the
-checkpoints accepted and reused as transfer sources for the next level.
-Discarded candidates are mentioned only when they help explain why the accepted
-architecture was chosen.
+Este documento resume apenas a linha B-series que deu certo, isto é, os
+checkpoints aceitos e reutilizados como fonte de transferência para o nível
+seguinte. Candidatos descartados são citados apenas quando ajudam a explicar por
+que a arquitetura aceita foi escolhida.
 
-## Principles Of The B Line
+## Princípios Da Linha B
 
-The B-series line is a parallel diagnostic track. It does not replace the A
-line by itself. The goal of each `Bx` level is to preserve reasonable
-learning/survival while adding a small amount of complexity, modularity, or
-bioinspiration relative to `B(x-1)`.
+A linha B-series é uma trilha diagnóstica paralela. Ela não substitui a linha A
+por si só. O objetivo de cada nível `Bx` é preservar aprendizado/sobrevivência
+razoável enquanto adiciona uma pequena dose de complexidade, modularidade ou
+bioinspiração em relação a `B(x-1)`.
 
-The rules that consolidated from B0 to B5:
+As regras que se consolidaram de B0 a B5:
 
-- The public action space of `SpiderWorld.step()` remains primitive. No
-  semantic action enters the world.
-- The six semantic actions remain internal: `MOVE_TO_FOOD`,
-  `MOVE_TO_SHELTER`, `EXPLORE`, `STAY`, `EAT`, and `SLEEP`.
-- The semantic-primitive bridge transforms the internal intention into an
-  `ACTIONS` action.
-- Starting at B1, every accepted level is born through transfer learning from
-  the accepted `best` checkpoint of the previous level.
-- A candidate that does not pass the level gate is saved in `discarded` and
-  does not become evolutionary substrate.
-- Local validation is focused on B-series and behavior smoke tests; the full
-  suite remaining partially red does not invalidate promotion of a B level.
+- O action space público de `SpiderWorld.step()` continua primitivo. Nenhuma
+  ação semântica entra no mundo.
+- As seis ações semânticas continuam internas: `MOVE_TO_FOOD`,
+  `MOVE_TO_SHELTER`, `EXPLORE`, `STAY`, `EAT` e `SLEEP`.
+- A ponte semântica-primitiva transforma a intenção interna em uma ação de
+  `ACTIONS`.
+- A partir de B1, todo nível aceito nasce por transfer learning a partir do
+  checkpoint `best` aceito do nível anterior.
+- Candidato que não passa o gate do nível é salvo em `discarded` e não vira
+  substrato evolutivo.
+- A validação local é focada em B-series e smoke de comportamento; a suíte
+  completa continuar parcialmente vermelha não invalida a promoção de um nível B.
 
-## Accepted Chain
+## Cadeia Aceita
 
-| Level | Accepted architecture | Source used | Coverage | Main gate |
+| Nível | Arquitetura aceita | Fonte usada | Coverage | Gate principal |
 | --- | --- | --- | ---: | --- |
-| B0 | `b0_current_bridge_policy` | no previous B source | n/a | full easy horizon |
-| B1 | `b1_threat_guard_bridge_policy` | B0 current bridge | 0.666896 | full easy horizon |
-| B2 | `b2_temporal_threat_h48_bridge_policy` | B1 threat guard | 1.0 | easy + canonical progress |
-| B3 | `b3_recurrent_guard_h48_bridge_policy` | B2 temporal threat | 1.0 | easy + robust canonical ep0/ep1 |
-| B4 | `b4_genetic_recovery_h48_bridge_policy` | B3 recurrent guard | 1.0 | easy 0..4 + canonical 0..9 retention |
-| B5 | `b5_genetic_homeostasis_h48_bridge_policy` | B4 genetic recovery | 1.0 | easy 0..4 + canonical 0..9 + homeostatic probes |
+| B0 | `b0_current_bridge_policy` | sem fonte B anterior | n/a | easy completo |
+| B1 | `b1_threat_guard_bridge_policy` | B0 current bridge | 0.666896 | easy completo |
+| B2 | `b2_temporal_threat_h48_bridge_policy` | B1 threat guard | 1.0 | easy + progresso canonical |
+| B3 | `b3_recurrent_guard_h48_bridge_policy` | B2 temporal threat | 1.0 | easy + canonical ep0/ep1 robusto |
+| B4 | `b4_genetic_recovery_h48_bridge_policy` | B3 recurrent guard | 1.0 | easy 0..4 + retenção canonical 0..9 |
+| B5 | `b5_genetic_homeostasis_h48_bridge_policy` | B4 genetic recovery | 1.0 | easy 0..4 + canonical 0..9 + probes homeostáticos |
 
-Accepted checkpoints:
+Checkpoints aceitos:
 
 - B0:
   `artifacts/b_series/evolution/b0_current_bridge_policy/seed_7/best`
@@ -55,395 +55,396 @@ Accepted checkpoints:
 - B5:
   `artifacts/b_series/evolution/b5_genetic_homeostasis_h48_bridge_policy/seed_7/best`
 
-## B0: Current Primitive Semantic Bridge
+## B0: Ponte Semântica Primitiva Atual
 
-Accepted architecture: `b0_current_bridge_policy`.
+Arquitetura aceita: `b0_current_bridge_policy`.
 
-B0 created the minimum substrate of the current line: the policy still produces
-and records internal semantic intentions, but the world receives only a
-primitive action. The level separates three responsibilities:
+B0 criou o substrato mínimo da linha atual: a política ainda produz e registra
+intenções semânticas internas, mas o mundo recebe somente uma ação primitiva. O
+nível separa três responsabilidades:
 
-- auditable semantic selection;
-- local movement bridge toward food/shelter;
-- primitive execution in the current world.
+- seleção semântica auditável;
+- ponte de movimento local para comida/abrigo;
+- execução primitiva no mundo atual.
 
-The fundamental difference from `b0_legacy_semantic_policy` is that B0 current
-does not give macro actions to the environment. `MOVE_TO_FOOD` and
-`MOVE_TO_SHELTER` do not enter `SpiderWorld.step()`: they are converted first
-into primitive movement.
+A diferença fundamental em relação ao `b0_legacy_semantic_policy` é que B0
+current não dá ações macro ao ambiente. `MOVE_TO_FOOD` e `MOVE_TO_SHELTER` não
+entram em `SpiderWorld.step()`: elas são convertidas antes em movimento
+primitivo.
 
-Recorded result:
+Resultado registrado:
 
 - seed: `7`
-- training: `24` episodes
-- easy scenario: `432` steps alive
-- food: `21`
-- sleep: `100`
-- shelter entries: `14`
-- predator contacts: `1`
-- final health: `1.0`
-- primitive trace: valid
+- treino: `24` episódios
+- cenário easy: `432` steps vivo
+- comida: `21`
+- sono: `100`
+- entradas em abrigo: `14`
+- contatos com predador: `1`
+- saúde final: `1.0`
+- trace primitivo: válido
 
-B0 is the evolutionary base of the line, but it is still deliberately simple.
-The main complexity is in the bridge and in the basic semantic loop, not in a
-more modular neural control system.
+B0 é a base evolutiva da linha, mas ainda é deliberadamente simples. A
+complexidade principal está na ponte e no ciclo semântico básico, não em um
+controle neural mais modular.
 
-## B1: Initial Threat Guard
+## B1: Guardião De Ameaça Inicial
 
-Accepted architecture: `b1_threat_guard_bridge_policy`.
+Arquitetura aceita: `b1_threat_guard_bridge_policy`.
 
-Source:
+Fonte:
 `artifacts/b_series/evolution/b0_current_bridge_policy/seed_7/best`.
 
-Transfer:
+Transferência:
 
 - parent level: `0`
 - target level: `1`
 - coverage: `0.666896`
-- loaded parameters: `6791 / 10183`
-- low coverage override: disabled
+- parâmetros carregados: `6791 / 10183`
+- low coverage override: desabilitado
 
-B1 started as a conservative capacity attempt. The capacity-only candidates
-`b1_capacity_h48_bridge_policy` and `b1_capacity_h64_bridge_policy` were
-discarded because they did not sustain the easy gate. The accepted candidate
-added a minimal threat guard without changing the public world contract.
+B1 começou como tentativa conservadora de capacidade. Os candidatos
+capacity-only `b1_capacity_h48_bridge_policy` e
+`b1_capacity_h64_bridge_policy` foram descartados porque não sustentaram o gate
+easy. O candidato aceito adicionou uma guarda de ameaça mínima sem alterar o
+contrato público do mundo.
 
-Main architectural change:
+Mudança arquitetural principal:
 
-- keeps the six internal semantic actions;
-- keeps the primitive bridge;
-- increases hidden capacity to `48`;
-- adds B1-local threat control with
+- mantém as seis ações semânticas internas;
+- mantém a ponte primitiva;
+- aumenta a capacidade oculta para `48`;
+- adiciona controle B1-local de ameaça com
   `semantic_action_source="b1_threat_guard_controller"`.
 
-Accepted result:
+Resultado aceito:
 
-- training: `24` episodes
-- easy: `432` steps alive
-- food: `21`
-- sleep: `72`
-- shelter entries: `18`
-- predator contacts: `1`
-- final health: `1.0`
+- treino: `24` episódios
+- easy: `432` steps vivo
+- comida: `21`
+- sono: `72`
+- entradas em abrigo: `18`
+- contatos com predador: `1`
+- saúde final: `1.0`
 
-Canonical diagnosis still weak, used as reference for B2:
+Diagnóstico canonical ainda fraco, usado como referência para B2:
 
 - `69` steps
-- food: `3`
-- sleep: `3`
-- shelter entries: `5`
-- predator contacts: `5`
-- final health: `0.0`
+- comida: `3`
+- sono: `3`
+- entradas em abrigo: `5`
+- contatos com predador: `5`
+- saúde final: `0.0`
 
-B1 proved that transfer from B0 to a larger network and a simple guard
-preserved easy learning, but it still did not solve temporal threat in
+B1 provou que a transferência de B0 para uma rede maior e uma guarda simples
+mantinha o aprendizado no easy, mas ainda não resolvia ameaça temporal no
 canonical.
 
-## B2: Temporal Threat Control
+## B2: Controle Temporal De Ameaça
 
-Accepted architecture: `b2_temporal_threat_h48_bridge_policy`.
+Arquitetura aceita: `b2_temporal_threat_h48_bridge_policy`.
 
-Source:
+Fonte:
 `artifacts/b_series/evolution/b1_threat_guard_bridge_policy/seed_7/best`.
 
-Transfer:
+Transferência:
 
 - parent level: `1`
 - target level: `2`
 - coverage: `1.0`
-- loaded parameters: `10183 / 10183`
+- parâmetros carregados: `10183 / 10183`
 
-B2 kept `h48` capacity, the same semantic actions, and the same bridge, but
-added a temporal threat controller. The goal was to attack the canonical blocker
-observed in B1: predator contact and risk were not handled with enough memory.
+B2 manteve capacidade `h48`, mesmas ações semânticas e mesma ponte, mas
+adicionou um controlador temporal de ameaça. O objetivo foi atacar o bloqueador
+do canonical observado em B1: contato e risco de predador não eram tratados com
+memória suficiente.
 
-Main architectural change:
+Mudança arquitetural principal:
 
 - `semantic_action_source="b2_temporal_threat_controller"`;
-- current threat pressure;
-- short predator memory;
-- temporal predator trace;
-- tendency to return to/hold shelter when recent threat is active.
+- pressão de ameaça atual;
+- memória curta de predador;
+- traço temporal de predador;
+- tendência a retornar/segurar abrigo quando ameaça recente está ativa.
 
-Accepted result:
+Resultado aceito:
 
-- training: `48` episodes
-- easy: `432` steps alive, `19` food items, `76` sleep events, `15` shelter
-  entries, `1` contact, final health `1.0`
-- canonical ep0: `300` steps alive, `13` food items, `46` sleep events, `12`
-  shelter entries, `9` contacts, final health `0.063414`
+- treino: `48` episódios
+- easy: `432` steps vivo, `19` comidas, `76` eventos de sono, `15` entradas em
+  abrigo, `1` contato, saúde final `1.0`
+- canonical ep0: `300` steps vivo, `13` comidas, `46` eventos de sono, `12`
+  entradas em abrigo, `9` contatos, saúde final `0.063414`
 
-B2 passed because it completed the canonical horizon and showed clear progress
-against the B1 baseline, although still with many contacts.
+B2 passou porque completou o horizonte canonical e demonstrou progresso claro
+contra o baseline B1, embora ainda com muitos contatos.
 
-## B3: Recurrent Guard And Contact Memory
+## B3: Guarda Recorrente E Memória De Contato
 
-Accepted architecture: `b3_recurrent_guard_h48_bridge_policy`.
+Arquitetura aceita: `b3_recurrent_guard_h48_bridge_policy`.
 
-Source:
+Fonte:
 `artifacts/b_series/evolution/b2_temporal_threat_h48_bridge_policy/seed_7/best`.
 
-Transfer:
+Transferência:
 
 - parent level: `2`
 - target level: `3`
 - coverage: `1.0`
-- loaded parameters: `10183 / 10183`
+- parâmetros carregados: `10183 / 10183`
 
-B3 started by testing direct contact memory. The variants
+B3 começou testando memória de contato direta. As variantes
 `b3_contact_memory_h48_bridge_policy`,
-`b3_contact_memory_strict_h48_bridge_policy`, and
-`b3_contact_memory_h56_bridge_policy` were discarded because they failed easy or
-canonical. The accepted architecture was the recurrent `h48` guard, which
-preserved the B2 substrate and added a transient per-episode profile.
+`b3_contact_memory_strict_h48_bridge_policy` e
+`b3_contact_memory_h56_bridge_policy` foram descartadas por falhas em easy ou
+canonical. A arquitetura aceita foi a guarda recorrente `h48`, que preservou o
+substrato B2 e adicionou perfil transitório por episódio.
 
-Main architectural change:
+Mudança arquitetural principal:
 
-- `semantic_action_source="b3_contact_memory_controller"` in the B3 family;
-- post-contact cooldown;
-- post-food cooldown;
-- hunger-drop detection;
-- per-episode recurrent profile, with a stricter guard at the beginning and
-  later release.
+- `semantic_action_source="b3_contact_memory_controller"` na família B3;
+- cooldown pós-contato;
+- cooldown pós-comida;
+- detecção de queda de fome;
+- perfil recorrente por episódio, com guarda mais rígida no começo e liberação
+  posterior.
 
-Accepted result:
+Resultado aceito:
 
-- training: `48` episodes
-- easy: `432` steps alive, `19` food items, `76` sleep events, `15` shelter
-  entries, `1` contact, final health `1.0`
-- canonical ep0: `300` steps alive, `15` food items, `39` sleep events, `10`
-  shelter entries, `2` contacts, final health `0.827079`
-- canonical ep1: `300` steps alive, `16` food items, `65` sleep events, `13`
-  shelter entries, `1` contact, final health `1.0`
+- treino: `48` episódios
+- easy: `432` steps vivo, `19` comidas, `76` eventos de sono, `15` entradas em
+  abrigo, `1` contato, saúde final `1.0`
+- canonical ep0: `300` steps vivo, `15` comidas, `39` eventos de sono, `10`
+  entradas em abrigo, `2` contatos, saúde final `0.827079`
+- canonical ep1: `300` steps vivo, `16` comidas, `65` eventos de sono, `13`
+  entradas em abrigo, `1` contato, saúde final `1.0`
 
-B3 was the first level to make canonical robust in diagnostic episodes 0 and 1.
-The improvement did not come from more capacity, but from transient state memory
-and a temporal control profile.
+B3 foi o primeiro nível a tornar o canonical robusto nos episódios diagnósticos
+0 e 1. A melhoria não veio de mais capacidade, mas de memória de estado
+transitória e perfil temporal de controle.
 
-## B4: Multi-Episode Recovery With Genetic Search
+## B4: Recuperação Multi-Episódio Com Busca Genética
 
-Accepted architecture: `b4_genetic_recovery_h48_bridge_policy`.
+Arquitetura aceita: `b4_genetic_recovery_h48_bridge_policy`.
 
-Source:
+Fonte:
 `artifacts/b_series/evolution/b3_recurrent_guard_h48_bridge_policy/seed_7/best`.
 
-Transfer:
+Transferência:
 
 - parent level: `3`
 - target level: `4`
 - coverage: `1.0`
-- loaded parameters: `10183 / 10183`
+- parâmetros carregados: `10183 / 10183`
 
-B4 shifted the focus from local ep0/ep1 robustness to multi-episode retention in
-canonical `0..9`. The goal was not necessarily to beat B3 on every number, but
-to preserve reasonable survival with a more bioinspired recovery module.
+B4 mudou o foco de robustez local ep0/ep1 para retenção multi-episódio em
+canonical `0..9`. O objetivo não era obrigatoriamente bater B3 em todos os
+números, mas preservar sobrevivência razoável com um módulo de recuperação mais
+bioinspirado.
 
-The fixed variants passed easy, but were discarded for insufficient retention
-in multi-episode canonical. The small genetic fallback searched recovery
-thresholds and promoted the first confirmed profile.
+As variantes fixas passaram easy, mas foram descartadas por retenção
+insuficiente no canonical multi-episódio. O fallback genético pequeno buscou
+thresholds de recuperação e promoveu o primeiro perfil confirmado.
 
-Main architectural change:
+Mudança arquitetural principal:
 
 - `semantic_action_source="b4_genetic_recovery_controller"`;
-- recovery pressure;
-- sleep/shelter retention when health, fatigue, or sleep debt indicate risk;
-- premature-exit blocking;
-- controlled foraging release;
-- winning thresholds persisted in `b_controller_params`.
+- pressão de recuperação;
+- retenção de sono/abrigo quando saúde, fadiga ou dívida de sono indicam risco;
+- bloqueio de saída prematura;
+- liberação controlada de forrageamento;
+- thresholds vencedores persistidos em `b_controller_params`.
 
-Accepted result:
+Resultado aceito:
 
-- training: `48` episodes
-- search: hybrid, workers `4`, GA population `12`, generations `4`
-- easy `0..4`: passed
-- canonical `0..9`: passed retention gate
-- completed horizons: `4 / 10`
-- minimum steps: `49`
-- total contacts: `24`
-- episodes with food cycle: `9`
-- episodes with sleep cycle: `9`
-- episodes with shelter cycle: `10`
+- treino: `48` episódios
+- busca: híbrida, workers `4`, população GA `12`, gerações `4`
+- easy `0..4`: passou
+- canonical `0..9`: passou gate de retenção
+- horizontes completos: `4 / 10`
+- mínimo de steps: `49`
+- total de contatos: `24`
+- episódios com ciclo de comida: `9`
+- episódios com ciclo de sono: `9`
+- episódios com ciclo de abrigo: `10`
 
-Preserved canonical anchors:
+Âncoras canonical preservadas:
 
-- ep0: `300` steps alive, `14` food items, `54` sleep events, `10` shelter
-  entries, `2` contacts, final health `1.0`
-- ep1: `300` steps alive, `15` food items, `46` sleep events, `11` shelter
-  entries, `4` contacts, final health `1.0`
+- ep0: `300` steps vivo, `14` comidas, `54` eventos de sono, `10` entradas em
+  abrigo, `2` contatos, saúde final `1.0`
+- ep1: `300` steps vivo, `15` comidas, `46` eventos de sono, `11` entradas em
+  abrigo, `4` contatos, saúde final `1.0`
 
-Residual weakness that motivated B5:
+Fraqueza residual que motivou B5:
 
-- canonical episode `8` still collapsed due to homeostasis/shelter exit without
-  enough sleep, near `49` steps.
+- episódio canonical `8` ainda colapsava por homeostase/saída de abrigo sem
+  sono suficiente, perto de `49` steps.
 
-## B5: Modular Homeostatic Arbiter
+## B5: Árbitro Homeostático Modular
 
-Accepted architecture: `b5_genetic_homeostasis_h48_bridge_policy`.
+Arquitetura aceita: `b5_genetic_homeostasis_h48_bridge_policy`.
 
-Source:
+Fonte:
 `artifacts/b_series/evolution/b4_genetic_recovery_h48_bridge_policy/seed_7/best`.
 
-Transfer:
+Transferência:
 
 - parent level: `4`
 - target level: `5`
 - coverage: `1.0`
-- loaded parameters: `10183 / 10183`
+- parâmetros carregados: `10183 / 10183`
 
-B5 kept the B4 checkpoint as substrate and added a more explicit interoceptive
-arbiter. The level separated hunger, sleep, recovery, and threat pressures, with
-transient per-episode locks.
+B5 manteve o checkpoint B4 como substrato e adicionou um árbitro interoceptivo
+mais explícito. O nível separou pressões de fome, sono, recuperação e ameaça,
+com locks transitórios por episódio.
 
-The fixed variants passed easy and the two required probes, but were discarded
-for insufficient canonical retention. The genetic profile was accepted.
+As variantes fixas passaram easy e os dois probes obrigatórios, mas foram
+descartadas por retenção canonical insuficiente. O perfil genético foi aceito.
 
-Main architectural change:
+Mudança arquitetural principal:
 
 - `semantic_action_source="b5_genetic_homeostasis_controller"`;
 - `b_effective_level="B5-homeostatic-arbiter"`;
-- hunger pressure;
-- sleep pressure;
-- recovery debt;
-- threat gate;
+- pressão de fome;
+- pressão de sono;
+- dívida de recuperação;
+- gate de ameaça;
 - `sleep_bout_lock`;
 - `forage_commitment_lock`;
-- homeostatic decision recorded in trace;
-- winning thresholds persisted in `b_controller_params`.
+- decisão homeostática registrada em trace;
+- thresholds vencedores persistidos em `b_controller_params`.
 
-Accepted result:
+Resultado aceito:
 
-- training: `48` episodes
-- search: hybrid, workers `4`, GA population `12`, generations `4`
-- easy `0..4`: passed
-- canonical `0..9`: passed retention
-- completed horizons: `5 / 10`
-- minimum steps: `52`
-- total contacts: `24`
-- episodes with food cycle: `9`
-- episodes with sleep cycle: `9`
-- episodes with shelter cycle: `10`
+- treino: `48` episódios
+- busca: híbrida, workers `4`, população GA `12`, gerações `4`
+- easy `0..4`: passou
+- canonical `0..9`: passou retenção
+- horizontes completos: `5 / 10`
+- mínimo de steps: `52`
+- total de contatos: `24`
+- episódios com ciclo de comida: `9`
+- episódios com ciclo de sono: `9`
+- episódios com ciclo de abrigo: `10`
 
-Required complex probes:
+Probes complexos obrigatórios:
 
-- `food_deprivation` ep0..2: passed, with `2 / 3` episodes showing progress
-- `sleep_vs_exploration_conflict` ep0..2: passed, post-recovery movement metric
-  exposed and `3 / 3` episodes with post-recovery movement
+- `food_deprivation` ep0..2: passou, com `2 / 3` episódios de progresso
+- `sleep_vs_exploration_conflict` ep0..2: passou, métrica de movimento
+  pós-recuperação exposta e `3 / 3` episódios com movimento pós-recuperação
 
-Problematic non-blocking diagnostics:
+Diagnósticos não bloqueantes ainda problemáticos:
 
-- `food_vs_predator_conflict`: scorers still fail threat priority and foraging
-  suppression under threat.
-- `corridor_gauntlet`: there is initial progress, but rapid death due to lack
-  of sustained survival in the corridor.
+- `food_vs_predator_conflict`: scorers ainda falham em prioridade de ameaça e
+  supressão de forrageamento sob ameaça.
+- `corridor_gauntlet`: há progresso inicial, mas morte rápida por falta de
+  sobrevivência sustentada no corredor.
 
-B5 is therefore the first level in the line to combine B4 retention, explicit
-modular homeostasis, and additional environmental probes without changing the
-public action space.
+B5 é, portanto, o primeiro nível da linha a combinar retenção B4, homeostase
+modular explícita e probes ambientais adicionais sem alterar o action space
+público.
 
-## Reading The Evolution
+## Leitura Da Evolução
 
-The successful progression was not a simple escalation of hidden size. The
-pattern that worked was:
+A progressão bem-sucedida não foi uma simples escalada de hidden size. O padrão
+que funcionou foi:
 
-1. B0 created an auditable bridge between semantic intention and primitive
-   action.
-2. B1 added a minimal threat guard when capacity-only failed.
-3. B2 added temporal threat memory.
-4. B3 added episodic contact memory and a recurrent profile.
-5. B4 added recovery and genetic search over control thresholds.
-6. B5 added modular homeostatic arbitration and harder environmental probes.
+1. B0 criou uma ponte auditável entre intenção semântica e ação primitiva.
+2. B1 adicionou uma guarda mínima de ameaça quando capacity-only falhou.
+3. B2 adicionou memória temporal de ameaça.
+4. B3 adicionou memória episódica de contato e perfil recorrente.
+5. B4 adicionou recuperação e busca genética sobre thresholds de controle.
+6. B5 adicionou arbitragem homeostática modular e probes ambientais mais duros.
 
-Across all accepted levels, the new complexity stayed above the primitive
-bridge, without changing the `SpiderWorld.step()` contract.
+Em todos os níveis aceitos, a complexidade nova ficou acima da ponte primitiva,
+sem mudar o contrato de `SpiderWorld.step()`.
 
-## Next Steps
+## Próximos Passos
 
-### 1. Formalize B6 From The Accepted B5
+### 1. Formalizar B6 A Partir Do B5 Aceito
 
-Proposed required source:
+Fonte obrigatória proposta:
 `artifacts/b_series/evolution/b5_genetic_homeostasis_h48_bridge_policy/seed_7/best`.
 
-B6 objective: maintain B5 retention and turn the non-blocking B5 diagnostics
-into architectural axes, without requiring a general improvement over B5.
+Objetivo de B6: manter a retenção B5 e transformar os diagnósticos não
+bloqueantes de B5 em eixos de arquitetura, sem exigir uma superação geral de B5.
 
-Recommended direction: a bioinspired risk-foraging arbitration module, with
-attention to local threat and corridor affordances.
+Direção recomendada: um módulo bioinspirado de arbitragem risco-forrageamento,
+com atenção a ameaça local e affordances de corredor.
 
-Suggested initial variants:
+Variantes iniciais sugeridas:
 
 - `b6_risk_forage_arbiter_h48_bridge_policy`
 - `b6_corridor_affordance_guard_h48_bridge_policy`
 - `b6_threat_priority_memory_h48_bridge_policy`
-- `b6_genetic_risk_homeostasis_h48_bridge_policy` as fallback if the fixed
-  profiles fail
+- `b6_genetic_risk_homeostasis_h48_bridge_policy` como fallback se os perfis
+  fixos falharem
 
-### 2. Promote B5 Diagnostics To Partial B6 Gates
+### 2. Promover Diagnósticos B5 Para Gates B6 Parciais
 
-The `food_vs_predator_conflict` and `corridor_gauntlet` scenarios should not
-require perfect success at first, but they need to stop being only diagnostic
-text.
+Os cenários `food_vs_predator_conflict` e `corridor_gauntlet` não devem exigir
+sucesso perfeito de início, mas precisam deixar de ser apenas texto diagnóstico.
 
-Suggested B6 gate:
+Gate B6 sugerido:
 
-- keep easy `0..4`;
-- keep canonical `0..9` retention at a B5-level floor;
-- keep `food_deprivation`;
-- keep `sleep_vs_exploration_conflict`;
-- require measurable progress in `food_vs_predator_conflict`;
-- require measurable progress in `corridor_gauntlet`.
+- manter easy `0..4`;
+- manter retenção canonical `0..9` em patamar B5;
+- manter `food_deprivation`;
+- manter `sleep_vs_exploration_conflict`;
+- exigir progresso mensurável em `food_vs_predator_conflict`;
+- exigir progresso mensurável em `corridor_gauntlet`.
 
-Possible partial criteria:
+Critérios parciais possíveis:
 
-- fewer contacts or prioritized threat in `food_vs_predator_conflict`;
-- more steps alive or later death in `corridor_gauntlet`;
-- preserve primitive trace in all probes.
+- menos contatos ou ameaça priorizada em `food_vs_predator_conflict`;
+- mais steps vivos ou morte mais tardia em `corridor_gauntlet`;
+- preservar trace primitivo em todos os probes.
 
-### 3. Improve Observability Before More Complexity
+### 3. Melhorar Observabilidade Antes De Mais Complexidade
 
-Before a larger structural change, it is worth adding trace fields for B6:
+Antes de uma mudança estrutural maior, vale adicionar campos de trace para B6:
 
-- risk-versus-hunger decision;
-- threat used by the arbiter;
-- reason for suppressing foraging;
-- corridor commitment;
-- local progress in corridor;
-- reason for abandoning shelter;
-- return-to-shelter lock.
+- decisão risco-versus-fome;
+- ameaça usada pelo arbiter;
+- motivo de supressão de forrageamento;
+- compromisso de corredor;
+- progresso local em corredor;
+- motivo de abandono de abrigo;
+- lock de retorno ao abrigo.
 
-This avoids repeating an old A-line problem: bad behavior without being able to
-separate perception failure, decision failure, and bridge failure.
+Isso evita repetir um problema antigo da linha A: ter comportamento ruim sem
+conseguir separar falha de percepção, falha de decisão e falha da ponte.
 
-### 4. Preserve The Discard Regime
+### 4. Preservar O Regime De Descarte
 
-B6 should keep discarding candidates that do not pass the gate. The first
-accepted candidate becomes `best`; discarded candidates cannot become transfer
-sources.
+B6 deve continuar descartando candidatos que não passem o gate. O primeiro
+candidato aceito vira `best`; descartados não podem virar fonte de transferência.
 
-Document for each candidate:
+Documentar para cada candidato:
 
-- B5 source;
+- fonte B5;
 - coverage;
-- `accepted` or `discarded` status;
-- discard reason;
-- easy/canonical/probe metrics;
-- genetic parameters, when present.
+- status `accepted` ou `discarded`;
+- motivo de descarte;
+- métricas de easy/canonical/probes;
+- parâmetros genéticos, quando houver.
 
-### 5. Defer Broad Multi-Seed Validation
+### 5. Adiar Multi-Seed Amplo
 
-It still does not seem time to turn B6 into heavy multi-seed validation. The
-most useful gate now is incremental architecture with more informative
-scenarios. After B6 or B7 stabilizes risk-foraging and corridor behavior, the
-natural next step is a short multi-seed confirmation.
+Ainda não parece hora de transformar B6 em validação multi-seed pesada. O gate
+mais útil agora é arquitetura incremental com cenários mais informativos. Depois
+que B6 ou B7 estabilizar risco-forrageamento e corredor, a próxima etapa natural
+é uma confirmação multi-seed curta.
 
-### 6. Possible B7 Line
+### 6. Possível Linha B7
 
-If B6 maintains B5 and improves the threat/corridor diagnostics, B7 can be a
-more structural architecture:
+Se B6 mantiver B5 e melhorar os diagnósticos de ameaça/corredor, B7 pode ser uma
+arquitetura mais estrutural:
 
-- small explicit recurrent memory;
-- local affordance submodule;
-- clearer separation between interoception and exteroception;
-- gate with canonical `0..9` and conflict/corridor probes as required.
+- memória recorrente explícita pequena;
+- submódulo de affordance local;
+- separação mais clara entre interocepção e exterocepção;
+- gate com canonical `0..9` e probes de conflito/corredor como obrigatórios.
 
-The criterion should remain retention with incremental modular complexity, not
-direct competition for higher raw score.
+O critério deve continuar sendo retenção com complexidade modular incremental,
+não uma competição direta por maior score bruto.
+

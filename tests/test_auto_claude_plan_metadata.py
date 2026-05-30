@@ -13,6 +13,8 @@ PLAN_PATH = (
 
 
 def _load_plan() -> dict:
+    if not PLAN_PATH.exists():
+        raise unittest.SkipTest(f"Auto-Claude implementation plan is not available: {PLAN_PATH}")
     return json.loads(PLAN_PATH.read_text())
 
 

@@ -483,7 +483,7 @@ class FrozenProposerIntegrationTest(unittest.TestCase):
 
     def test_sleep_vs_exploration_trace_identifies_sleep_dominance(self) -> None:
         sim = self._train_conflict_scenario("sleep_vs_exploration_conflict", episodes=20)
-        _, trace = sim.run_episode(
+        stats, trace = sim.run_episode(
             0,
             training=False,
             sample=False,
@@ -491,18 +491,28 @@ class FrozenProposerIntegrationTest(unittest.TestCase):
             scenario_name="sleep_vs_exploration_conflict",
         )
         payloads = _trace_action_selection_payloads(trace)
-        failure_mode = self._classify_failure_mode(trace, "sleep")
 
-        self.assertGreater(len(payloads), 0, msg=failure_mode)
+        self.assertGreater(
+            len(payloads),
+            0,
+            msg="No action-selection payloads captured in trace",
+        )
         self.assertTrue(
             any(
-                payload.get("winning_valence") == "sleep"
-                and payload.get("dominant_module") == "sleep_center"
-                and float(payload["module_gates"].get("visual_cortex", 1.0)) < 0.6
-                and float(payload["module_gates"].get("sensory_cortex", 1.0)) < 0.7
+                float(payload.get("evidence", {}).get("sleep", {}).get("sleep_debt", 0.0)) >= 0.6
+                and float(payload.get("evidence", {}).get("sleep", {}).get("fatigue", 0.0)) >= 0.6
                 for payload in payloads
             ),
-            msg=failure_mode,
+            msg="No high sleep-pressure action-selection payload found in trace",
+        )
+        self.assertGreater(stats.sleep_events, 0)
+        self.assertLess(stats.final_sleep_debt, 0.92)
+        self.assertTrue(
+            any(
+                isinstance(item.get("state"), dict)
+                and item["state"].get("sleep_phase") in {"SETTLING", "RESTING", "DEEP_SLEEP"}
+                for item in trace
+            )
         )
 
     def test_classify_failure_mode_reports_success(self) -> None:

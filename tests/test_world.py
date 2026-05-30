@@ -452,8 +452,8 @@ class SpiderWorldCoreTest(SpiderWorldTestBase):
         threat_world.state.fatigue = 0.65
         threat_world.state.sleep_debt = 0.6
         threat_world.step(ACTION_TO_INDEX["STAY"])
-        entrance = self._entrance_cell(threat_world)
-        threat_world.lizard.x, threat_world.lizard.y = max(0, entrance[0] - 1), entrance[1]
+        deep_x, deep_y = deep
+        threat_world.lizard.x, threat_world.lizard.y = deep_x - 2, deep_y
         _, threat_reward, _, threat_info = threat_world.step(ACTION_TO_INDEX["STAY"])
 
         self.assertEqual(threat_info["state"]["sleep_phase"], "AWAKE")

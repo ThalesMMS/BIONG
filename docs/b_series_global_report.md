@@ -1,247 +1,246 @@
-# Global Report On B-Series Evolution
+# Relatorio Global Da Evolucao B-Series
 
-Updated on 2026-05-17.
+Atualizado em 2026-05-17.
 
-This report summarizes the accepted evolution of the B series, from B0 through
-B62, viewing the line as an incremental transfer program: each accepted level
-starts from the `best` checkpoint of the previous level, preserves the primitive
-public action space of `SpiderWorld.step()`, keeps the same six internal
-semantic actions, and adds a small layer of capacity, modularity, or
-bioinspiration.
+Este relatorio resume a evolucao aceita da serie B, de B0 ate B62, olhando a
+linha como um programa incremental de transferencia: cada nivel aceito parte do
+checkpoint `best` do nivel anterior, preserva o action space publico primitivo
+de `SpiderWorld.step()`, mantem as mesmas seis acoes semanticas internas e
+adiciona uma pequena camada de capacidade, modularidade ou bioinspiracao.
 
-The central rule of the B series was not "always outperform the previous
-level". The consolidated criterion was: retain reasonable learning/survival,
-keep the public world contracts, record the new layer in trace/metadata, and
-accept only candidates that pass the gate defined for that phase. Candidates
-that fail remain documented in `discarded` and do not become transfer sources.
+A regra central da serie B nao foi "superar sempre o nivel anterior". O criterio
+consolidado foi: reter aprendizado/sobrevivencia razoavel, manter os contratos
+publicos do mundo, registrar a nova camada em trace/metadata e aceitar apenas
+candidatos que passem o gate definido para aquela fase. Candidatos que falham
+ficam documentados em `discarded` e nao viram fonte de transferencia.
 
-## 1. Bioinspiration
+## 1. Bioinspiracao
 
-B-series evolution began from a biologically simple observation: the old spider
-learned when it could choose ecological intentions such as searching for food,
-returning to shelter, staying, eating, or sleeping. B0 preserved that idea as
-an internal representation, but removed the privilege at the environment
-boundary: the current world still receives only primitive actions.
+A evolucao B comecou de uma observacao biologicamente simples: a aranha antiga
+aprendia quando podia escolher intencoes ecologicas como procurar comida,
+voltar ao abrigo, ficar, comer ou dormir. B0 preservou essa ideia como
+representacao interna, mas retirou o privilegio do ambiente: o mundo atual
+continua recebendo somente acoes primitivas.
 
-From B0 to B5, the bioinspiration is mainly ethological and homeostatic:
+De B0 a B5, a bioinspiracao e principalmente etologica e homeostatica:
 
-| Range | Dominant biological idea | Role in the spider |
+| Faixa | Ideia biologica dominante | Papel na aranha |
 | --- | --- | --- |
-| B0 | Internal ecological intention | Separate "what to do" from "which primitive movement to execute". |
-| B1 | Threat guard | Prevent food seeking from ignoring basic predator signals. |
-| B2 | Temporal threat | Use short threat memory to avoid leaving shelter too early. |
-| B3 | Contact memory and recurrent guard | Make recent pain/contact relevant after the immediate tick. |
-| B4 | Multi-episode recovery | Rebalance sleep, health, and shelter exit across varied episodes. |
-| B5 | Homeostatic arbiter | Separate hunger, sleep, recovery, and threat into interoceptive pressures. |
+| B0 | Intencao ecologica interna | Separar "o que fazer" de "qual movimento primitivo executar". |
+| B1 | Guarda de ameaca | Impedir que a busca por comida ignore sinais basicos de predador. |
+| B2 | Ameaca temporal | Usar memoria curta de ameaca para nao sair cedo demais do abrigo. |
+| B3 | Memoria de contato e guarda recorrente | Tornar dor/contato recente relevantes depois do tick imediato. |
+| B4 | Recuperacao multi-episodio | Reequilibrar sono, saude e saida de abrigo em episodios variados. |
+| B5 | Arbitro homeostatico | Separar fome, sono, recuperacao e ameaca em pressoes interoceptivas. |
 
-From B6 to B14, the biological focus moved toward spatial risk and affordances.
-The spider started recording whether the corridor was viable, whether there was
-body budget to cross it, whether it should abort/return, and whether the
-decision came from a local map, waypoint, prospective replay, confidence,
-predictive attention, local search, or uncertainty. This range did not
-necessarily solve the whole corridor, but it created auditable decision signals:
-continue, abort, return, search locally, or preserve the inherited policy.
+De B6 a B14, o foco biologico migrou para risco espacial e affordances. A
+aranha passou a registrar se o corredor era viavel, se havia orcamento corporal
+para atravessar, se deveria abortar/retornar e se a decisao vinha de um mapa
+local, waypoint, replay prospectivo, confianca, atencao preditiva, busca local
+ou incerteza. Essa faixa nao resolveu necessariamente todo o corredor, mas
+criou sinais auditaveis de decisao: continuar, abortar, retornar, procurar
+localmente ou preservar a politica herdada.
 
-From B15 to B22, the inspiration became more cognitive:
+De B15 a B22, a inspiracao virou mais cognitiva:
 
-- B15/B16 introduced options and option ensembles, moving action closer to a
-  hierarchical choice.
-- B17 modulated those options through neuromodulatory signals.
-- B18/B19 added eligibility traces and episodic memory.
-- B20 formalized a working-memory gate.
-- B21/B22 added hippocampal replay and prospective map replay.
+- B15/B16 introduziram opcoes e ensemble de opcoes, aproximando a acao de uma
+  escolha hierarquica.
+- B17 modulou essas opcoes por sinais neuromodulatorios.
+- B18/B19 adicionaram tracos de elegibilidade e memoria episodica.
+- B20 formalizou um gate de memoria de trabalho.
+- B21/B22 adicionaram replay hipocampal e replay prospectivo de mapas.
 
-From B23 to B39, the series went through a layer of monitoring, value, and
-internal representation:
+De B23 a B39, a serie passou por uma camada de monitoramento, valor e
+representacao interna:
 
-- B23/B24 monitor conflict and conflict precision.
-- B25/B26 add metacognitive confidence and allostatic prediction.
-- B27/B29 modulate gain, interoceptive attention, and salience competition.
-- B30/B33 incorporate basal-ganglia gate, dopamine, actor-critic, and
-  temporal-difference error.
-- B34/B39 add temporal credit, predictive model, latent state, state
-  factorization, factor attention, and attentional binding.
+- B23/B24 monitoram conflito e precisao do conflito.
+- B25/B26 adicionam confianca metacognitiva e predicao alostatica.
+- B27/B29 modulam ganho, atencao interoceptiva e competicao de saliencia.
+- B30/B33 incorporam gate de ganglios da base, dopamina, ator-critico e erro
+  temporal-difference.
+- B34/B39 adicionam credito temporal, modelo preditivo, estado latente,
+  fatoracao de estado, atencao por fator e binding atencional.
 
-From B40 to B48, the bioinspiration moved closer to corticothalamic and
-cerebellar circuits:
+De B40 a B48, a bioinspiracao se aproximou de circuitos cortico-talamicos e
+cerebelares:
 
-- B40 creates a lightweight global workspace.
-- B41 adds executive workspace.
-- B42/B43 monitor error and adjust adaptive precision.
-- B44/B46 model thalamic relay, reticular inhibition, and corticothalamic
-  feedback.
-- B47 adds oscillatory synchronization.
-- B48 introduces cerebellar timing.
+- B40 cria um global workspace leve.
+- B41 adiciona workspace executivo.
+- B42/B43 monitoram erro e ajustam precisao adaptativa.
+- B44/B46 modelam relay talamico, inibicao reticular e feedback
+  corticotalamico.
+- B47 adiciona sincronizacao oscilatoria.
+- B48 introduz temporizacao cerebelar.
 
-From B49 to B62, the line became explicitly neuromodulatory and subcortical:
+De B49 a B62, a linha ficou explicitamente neuromodulatoria e subcortical:
 
-- B49/B50: striatal gate and habit chunking.
-- B51/B54: dopaminergic modulation, cholinergic precision, noradrenergic
-  arousal, and serotonergic patience.
-- B55/B57: hypothalamic coupling, HPA axis, and insular interoceptive
-  awareness.
-- B58/B60: ACC monitor, prefrontal context, and orbitofrontal value.
-- B61/B62: amygdala threat/safety value and PAG-like defensive selector for
-  `safe_advance`, `flee_to_shelter`, and `freeze_hold` modes.
+- B49/B50: gate estriatal e chunking de habito.
+- B51/B54: modulacao dopaminergica, precisao colinergica, arousal
+  noradrenergico e paciencia serotonergica.
+- B55/B57: acoplamento hipotalamico, eixo HPA e consciencia interoceptiva
+  insular.
+- B58/B60: monitor ACC, contexto prefrontal e valor orbitofrontal.
+- B61/B62: valor de seguranca/ameaca amigdalar e seletor defensivo tipo PAG
+  para modos `safe_advance`, `flee_to_shelter` e `freeze_hold`.
 
-The global result is a bioinspired control stack: first homeostatic survival,
-then spatial risk, then memory/planning, then metacognition/value, then
-cortical broadcast/relay, and finally subcortical modulation of drive, stress,
-safety, and defense.
+O resultado global e uma pilha bioinspirada de controle: primeiro sobrevivencia
+homeostatica, depois risco espacial, depois memoria/planejamento, depois
+metacognicao/valor, depois broadcast/relay cortical e, por fim, modulacao
+subcortical de drive, stress, seguranca e defesa.
 
-## 2. Neuromodularity
+## 2. Neuromodularidade
 
-The B series modularized behavior without modularizing the environment. The
-external contract stayed constant: `SpiderWorld.step()` receives only one of
-the nine primitive actions in `ACTIONS`; the six semantic actions of the B
-series remain internal and are converted by the semantic-primitive bridge.
+A serie B modularizou o comportamento sem modularizar o ambiente. O contrato
+externo permaneceu constante: `SpiderWorld.step()` recebe somente uma das nove
+acoes primitivas de `ACTIONS`; as seis acoes semanticas da serie B continuam
+internas e sao convertidas pela ponte semantica-primitiva.
 
-This choice created layered modularity:
+Essa escolha criou uma modularidade em camadas:
 
-1. **Internal semantic module**: chooses an auditable intention such as
-   `MOVE_TO_FOOD`, `MOVE_TO_SHELTER`, `EXPLORE`, `STAY`, `EAT`, or `SLEEP`.
-2. **Bridge module**: transforms the intention into primitive movement, using
-   local signals for food, shelter, blockage, and transition.
-3. **Bx controller module**: at each B level, adds a new set of signals, locks,
-   balances, and decisions.
-4. **Transfer module**: initializes Bx from the accepted brain of B(x-1),
-   recording coverage, parent, target, source checkpoint, and loaded keys.
-5. **Validation module**: accepts or discards candidates with gates focused on
-   retention, probes, and trace evidence.
+1. **Modulo semantico interno**: escolhe uma intencao auditavel como
+   `MOVE_TO_FOOD`, `MOVE_TO_SHELTER`, `EXPLORE`, `STAY`, `EAT` ou `SLEEP`.
+2. **Modulo ponte**: transforma a intencao em movimento primitivo, usando
+   sinais locais de comida, abrigo, bloqueio e transicao.
+3. **Modulo controlador Bx**: em cada nivel B, adiciona um novo conjunto de
+   sinais, locks, balances e decisoes.
+4. **Modulo de transferencia**: inicializa Bx a partir do cerebro aceito de
+   B(x-1), registrando coverage, parent, target, source checkpoint e chaves
+   carregadas.
+5. **Modulo de validacao**: aceita ou descarta candidatos com gates focados em
+   retencao, probes e evidencias de trace.
 
-The pattern of each Bx module stabilized around trace fields:
+O padrao de cada modulo Bx se estabilizou em torno de campos de trace:
 
-- `bX_controller_profile`: which profile/controller is active.
-- main module signals: for example value, conflict, attention, memory, drive,
-  stress, safety, or defense.
-- a composition signal: balance, confidence, stability, salience, or pressure.
-- an episodic/transient lock: preserves commits without turning the action into
-  a public macro action.
-- `bX_decision`: explicit decision that makes it possible to reject clones of
-  the previous level.
+- `bX_controller_profile`: qual perfil/controlador esta ativo.
+- sinais principais do modulo: por exemplo valor, conflito, atencao, memoria,
+  drive, stress, seguranca ou defesa.
+- um sinal de composicao: balance, confidence, stability, salience ou pressure.
+- um lock episodico/transitorio: preserva commits sem transformar a acao em
+  macro acao publica.
+- `bX_decision`: decisao explicita que permite rejeitar clones do nivel
+  anterior.
 
-This form of modularity is important because it prevents the B series from
-becoming a list of biological names without observable effect. Each module must
-leave measurable evidence in the trace and must preserve the primitive contract.
+Essa forma de modularidade e importante porque evita que a serie B vire uma
+lista de nomes biologicos sem efeito observavel. Cada modulo precisa deixar
+evidencia mensuravel no trace e precisa manter o contrato primitivo.
 
-The modular progression can be read in blocks:
+A progressao modular pode ser lida em blocos:
 
-| Block | Main modules | Modular gain |
+| Bloco | Modulos principais | Ganho modular |
 | --- | --- | --- |
-| B0-B5 | bridge, threat, contact, recovery, homeostasis | Minimal modularity between intention, bridge, and body drive. |
-| B6-B14 | corridor risk, recurrence, affordance, map, waypoint, replay, confidence, attention | Separation between spatial risk, body budget, and local planning. |
-| B15-B22 | options, ensembles, eligibility, episodic memory, working memory, hippocampal replay | Temporal and hierarchical decision modularity. |
-| B23-B39 | conflict, precision, metacognition, value, latent state, factorization, binding | Representational and monitoring modularity. |
-| B40-B48 | workspace, thalamic relay/inhibition/feedback, synchronization, timing | Global-integration and temporal-coordination modularity. |
-| B49-B62 | striatum, habit, neuromodulators, hypothalamus, HPA, insula, ACC, PFC, OFC, amygdala, defense | Subcortical and affective-homeostatic modularity. |
+| B0-B5 | ponte, ameaca, contato, recuperacao, homeostase | Modularidade minima entre intencao, ponte e drive corporal. |
+| B6-B14 | risco-corredor, recorrencia, affordance, mapa, waypoint, replay, confianca, atencao | Separacao entre risco espacial, orcamento corporal e planejamento local. |
+| B15-B22 | opcoes, ensembles, elegibilidade, memoria episodica, working memory, replay hipocampal | Modularidade temporal e hierarquica de decisao. |
+| B23-B39 | conflito, precisao, metacognicao, valor, estado latente, fatoracao, binding | Modularidade representacional e de monitoramento. |
+| B40-B48 | workspace, relay/inibicao/feedback talamico, sincronizacao, temporizacao | Modularidade de integracao global e coordenacao temporal. |
+| B49-B62 | estriado, habito, neuromoduladores, hipotalamo, HPA, insula, ACC, PFC, OFC, amigdala, defesa | Modularidade subcortical e afetivo-homeostatica. |
 
-From an engineering point of view, the neuromodularity of the B series is
-incremental and auditable: the new module does not replace the previous one; it
-wraps it, reads inherited signals, and decides whether to preserve, intensify,
-abort, return, or block a decision.
+Do ponto de vista de engenharia, a neuromodularidade da serie B e incremental e
+auditavel: o modulo novo nao substitui o anterior; ele o envolve, le os sinais
+herdados e decide se preserva, intensifica, aborta, retorna ou bloqueia uma
+decisao.
 
-## 3. Network Capacity
+## 3. Capacidade Da Rede
 
-Network capacity increased conservatively. B0 established the bridge in the
-current world. B1 introduced `b_hidden_dim=48` and partial transfer from B0,
-with approximate coverage of `0.666896`. From that point on, the accepted line
-almost always promoted the `h48` variant, because it preserved behavior with
-coverage `1.0` in most transitions. `h56` variants were used as lightweight
-capacity fallbacks, generally with expected coverage around `0.857`, but rarely
-needed promotion.
+A capacidade da rede aumentou de forma conservadora. B0 estabeleceu a ponte no
+mundo atual. B1 introduziu `b_hidden_dim=48` e transferencia parcial de B0,
+com coverage aproximado de `0.666896`. A partir dai, a linha aceita quase
+sempre promoveu a variante `h48`, porque ela preservou o comportamento com
+coverage `1.0` na maioria das transicoes. Variantes `h56` foram usadas como
+fallback de capacidade leve, geralmente com coverage esperado em torno de
+`0.857`, mas raramente precisaram ser promovidas.
 
-This shows that B-series evolution was not mainly about "increasing the number
-of neurons". The capacity gain came more from three sources:
+Isso mostra que a evolucao da serie B nao foi principalmente "aumentar o
+numero de neuronios". O ganho de capacidade veio mais de tres fontes:
 
-- **Additional internal state**: each level added short memory, locks,
-  accumulators, or decayed signals.
-- **Functional decomposition**: hunger, sleep, threat, safety, confidence,
-  conflict, value, attention, and defense gained separate channels.
-- **Progressive environmental validation**: the same small network had to
-  retain easy/canonical and then respond to probes such as `food_deprivation`,
-  `sleep_vs_exploration_conflict`, `food_vs_predator_conflict`, and
+- **Estado interno adicional**: cada nivel adicionou memoria curta, locks,
+  acumuladores ou sinais decaidos.
+- **Decomposicao funcional**: fome, sono, ameaca, seguranca, confianca,
+  conflito, valor, atencao e defesa passaram a ter canais separados.
+- **Validacao ambiental progressiva**: a mesma rede pequena precisou reter
+  easy/canonical e depois responder a probes como `food_deprivation`,
+  `sleep_vs_exploration_conflict`, `food_vs_predator_conflict` e
   `corridor_gauntlet`.
 
-Capacity growth can be summarized as follows:
+O crescimento de capacidade pode ser resumido assim:
 
-| Stage | Type of capacity added | Example |
+| Etapa | Tipo de capacidade adicionada | Exemplo |
 | --- | --- | --- |
-| B0 | Interface capacity | Convert internal semantic intention into a valid primitive action. |
-| B1-B5 | Homeostatic and temporal capacity | Threat guards, contact memory, sleep/hunger/recovery. |
-| B6-B14 | Spatial and prospective capacity | Corridor risk, local map, waypoint, replay, and predictive attention. |
-| B15-B22 | Hierarchical and episodic capacity | Options, ensembles, eligibility, working memory, and replay. |
-| B23-B39 | Evaluative and representational capacity | Conflict, precision, value, latent state, factors, and binding. |
-| B40-B48 | Integrative capacity | Workspace, thalamic relay, feedback, synchronization, and timing. |
-| B49-B62 | Neuromodulatory and defensive capacity | Habit, dopamine, choline, noradrenaline, serotonin, HPA, amygdala, and PAG. |
+| B0 | Capacidade de interface | Converter intencao semantica interna em acao primitiva valida. |
+| B1-B5 | Capacidade homeostatica e temporal | Guardas de ameaca, memoria de contato, sono/fome/recuperacao. |
+| B6-B14 | Capacidade espacial e prospectiva | Risco de corredor, mapa local, waypoint, replay e atencao preditiva. |
+| B15-B22 | Capacidade hierarquica e episodica | Opcoes, ensembles, elegibilidade, memoria de trabalho e replay. |
+| B23-B39 | Capacidade avaliativa e representacional | Conflito, precisao, valor, estado latente, fatores e binding. |
+| B40-B48 | Capacidade integrativa | Workspace, relay talamico, feedback, sincronizacao e timing. |
+| B49-B62 | Capacidade neuromodulatoria e defensiva | Habito, dopamina, colina, noradrenalina, serotonina, HPA, amigdala e PAG. |
 
-The result pattern also suggests that the `h48` architecture is sufficient to
-retain the accepted behaviors when the new level is a thin layer over the
-previous one. When the change required parametric search, capacity was explored
-through fixed profiles and genetic search, not by indiscriminately inflating the
-network.
+O padrao de resultados tambem sugere que a arquitetura `h48` e suficiente para
+reter os comportamentos aceitos quando o novo nivel e uma camada fina sobre o
+anterior. Quando a mudanca exigiu busca parametrica, a capacidade foi explorada
+por perfis fixos e genetic search, nao por inflar indiscriminadamente a rede.
 
-## 4. Neural-Network Techniques And Network Complexity
+## 4. Tecnicas De Redes Neurais E Complexidade Da Rede
 
-The central technique of the B series is incremental transfer learning. B1 and
-later levels require `b_parent_level`, `b_transfer_source_checkpoint`,
-`b_transfer_min_coverage`, and `b_transfer_allow_low_coverage=False`. Loading is
-done by stable parameter names and compatible shape overlap: compatible
-parameters are loaded; new or incompatible parameters remain normally
-initialized; everything is recorded in metadata.
+A tecnica central da serie B e transfer learning incremental. B1 e posteriores
+exigem `b_parent_level`, `b_transfer_source_checkpoint`,
+`b_transfer_min_coverage` e `b_transfer_allow_low_coverage=False`. A carga e
+feita por nomes de parametros estaveis e sobreposicao de shape compativel:
+parametros compativeis sao carregados; parametros novos ou incompativeis ficam
+inicializados normalmente; tudo e registrado em metadata.
 
-Techniques used throughout the series:
+Tecnicas usadas ao longo da serie:
 
-- **Transfer learning from accepted checkpoint**: Bx starts from the `best` of
-  B(x-1), not from discarded candidates.
-- **Partial weight loading**: allows increasing from `h48` to `h56` without
-  requiring identical shapes, as long as the minimum coverage is respected.
-- **Controllers with lightweight recurrent state**: locks, decayed memories,
-  accumulated values, and episodic cooldowns.
-- **Deterministic promotion gates**: fixed candidates can run in parallel, but
-  promotion follows defined priority, not completion order.
-- **Local genetic search**: used when interdependent thresholds were the
-  bottleneck, as in B4/B5/B6 and parameterized fallbacks.
-- **Ensembles and options**: B15-B17 introduce option-based decisions and
-  ensemble modulation.
-- **Temporal credit and RL value signals**: B18 and B31-B34 add eligibility
-  traces, dopamine, actor-critic, TD error, and delayed credit.
-- **Model-based/predictive components**: B10-B12, B21-B22, and B35-B36 add
-  replay, prediction, transition model, and latent state.
-- **Attention/workspace mechanisms**: B12-B14, B38-B41, and B43 use attention,
-  binding, workspace, and adaptive precision.
-- **Neuromodulatory gain control**: B27, B43, B51-B54, and B56 modulate
-  thresholds, patience, arousal, precision, stress, and recovery.
+- **Transfer learning por checkpoint aceito**: Bx parte do `best` de B(x-1),
+  nao de candidatos descartados.
+- **Partial weight loading**: permite aumentar de `h48` para `h56` sem exigir
+  shapes identicos, desde que a coverage minima seja respeitada.
+- **Controladores com estado recorrente leve**: locks, memorias decaidas,
+  valores acumulados e cooldowns episodicos.
+- **Gates deterministas de promocao**: candidatos fixos podem rodar em
+  paralelo, mas a promocao segue prioridade definida, nao ordem de conclusao.
+- **Busca genetica local**: usada quando thresholds interdependentes eram o
+  gargalo, como em B4/B5/B6 e nos fallbacks parametrizados.
+- **Ensembles e opcoes**: B15-B17 introduzem decisao por opcoes e modulacao
+  de ensemble.
+- **Credito temporal e RL value signals**: B18, B31-B34 adicionam tracos de
+  elegibilidade, dopamina, ator-critico, TD error e credito atrasado.
+- **Model-based/predictive components**: B10-B12, B21-B22 e B35-B36 adicionam
+  replay, predicao, modelo de transicao e estado latente.
+- **Attention/workspace mechanisms**: B12-B14, B38-B41 e B43 usam atencao,
+  binding, workspace e precisao adaptativa.
+- **Neuromodulatory gain control**: B27, B43, B51-B54 e B56 modulam thresholds,
+  paciencia, arousal, precisao, stress e recuperacao.
 
-Network complexity grew in layers, not in raw width. Each new phase added:
+A complexidade da rede cresceu em camadas, nao em largura bruta. Cada nova
+fase adicionou:
 
-1. policy and checkpoint constants;
-2. catalog config with parent/source/coverage;
-3. runtime that wraps the previous level's decision;
-4. new fields in `BrainStep` and trace;
-5. gate that rejects a clone of the previous level without evidence of the new
-   module;
-6. runner that saves `attempt_report.json`, `metadata.json`, `best`, or
+1. constantes de politica e checkpoint;
+2. config no catalogo com parent/source/coverage;
+3. runtime que envolve a decisao do nivel anterior;
+4. campos novos em `BrainStep` e trace;
+5. gate que rejeita clone do nivel anterior sem evidencia do novo modulo;
+6. runner que salva `attempt_report.json`, `metadata.json`, `best` ou
    `discarded`;
-7. unit tests for catalog, transfer, runtime, trace, and gate.
+7. testes unitarios de catalogo, transferencia, runtime, trace e gate.
 
-At the end of B62, the accepted line contains a large stack of techniques, but
-the operational contract remains narrow:
+Ao final de B62, a linha aceita contem uma pilha grande de tecnicas, mas o
+contrato operacional continua estreito:
 
-- public action space: still primitive;
-- internal semantic actions: still the same six;
-- source checkpoint: always the immediately previous accepted level;
-- dominant accepted network: `h48`;
-- typical recent coverage: `1.0`;
-- recurring validation: compile, B-series tests, GUI tests, and `git diff --check`;
-- recent accepted behavior: easy `0..4`, canonical `0..9`, homeostatic probes,
-  food-predator conflict, and corridor evidence.
+- action space publico: ainda primitivo;
+- acoes semanticas internas: ainda as mesmas seis;
+- checkpoint fonte: sempre o nivel aceito imediatamente anterior;
+- rede aceita dominante: `h48`;
+- coverage tipica recente: `1.0`;
+- validacao recorrente: compile, testes B-series, testes GUI e `git diff --check`;
+- comportamento aceito recente: easy `0..4`, canonical `0..9`, probes
+  homeostaticos, conflito comida-predador e evidencia de corredor.
 
-The current accepted phase is B62:
+A fase atual aceita e B62:
 
 `artifacts/b_series/evolution/b62_defensive_mode_selector_h48_bridge_policy/seed_7/best`
 
-It represents a neural architecture that is still small in width, but highly
-modular in control: the final decision passes through semantic intention,
-primitive bridge, homeostasis, risk, memory, planning, metacognition, workspace,
-neuromodulation, affective value, and defensive mode before reaching a single
-primitive action sent to the world.
+Ela representa uma arquitetura neural ainda pequena em largura, mas altamente
+modular em controle: a decisao final passa por intencao semantica, ponte
+primitiva, homeostase, risco, memoria, planejamento, metacognicao, workspace,
+neuromodulacao, valor afetivo e modo defensivo antes de chegar a uma unica
+acao primitiva enviada ao mundo.

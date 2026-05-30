@@ -687,7 +687,7 @@ class PhysiologyModuleTest(unittest.TestCase):
 
         resolve_autonomic_behaviors(
             world,
-            action_name="UP",
+            action_name="MOVE_UP",
             predator_threat=False,
             night=True,
             reward_components=reward_components,
@@ -696,12 +696,12 @@ class PhysiologyModuleTest(unittest.TestCase):
         )
 
         event_names = [e.name for e in ctx.event_log]
-        self.assertIn("sleep_reset_non_stay", event_names)
+        self.assertIn("sleep_reset_move", event_names)
         self.assertIn("rest_blocked", event_names)
         self.assertNotIn("rest_phase", event_names)
-        reset_event = next(e for e in ctx.event_log if e.name == "sleep_reset_non_stay")
+        reset_event = next(e for e in ctx.event_log if e.name == "sleep_reset_move")
         self.assertEqual(reset_event.stage, "autonomic")
-        self.assertEqual(reset_event.payload["action"], "UP")
+        self.assertEqual(reset_event.payload["action"], "MOVE_UP")
         self.assertEqual(world.state.sleep_phase, "AWAKE")
         self.assertEqual(world.state.rest_streak, 0)
         self.assertAlmostEqual(world.state.sleep_debt, 0.7)

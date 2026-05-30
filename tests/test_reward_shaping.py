@@ -255,6 +255,16 @@ class ShapingReductionRoadmapTest(unittest.TestCase):
             "exposed_day_foraging",
             "food_deprivation",
         }
+        excluded_scenarios = {
+            "continuous_survival_bootstrap",
+            "continuous_survival_canonical",
+            "continuous_survival_easy_v1",
+            "continuous_survival_medium_v1",
+            "continuous_survival_post_rest_inside_v1",
+            "continuous_survival_post_rest_entrance_v1",
+            "continuous_survival_return_after_late_forage_v1",
+            "continuous_survival_re_rest_after_return_v1",
+        }
         self.assertEqual(
             {
                 name
@@ -278,6 +288,14 @@ class ShapingReductionRoadmapTest(unittest.TestCase):
                 if entry["requirement_level"] == "diagnostic"
             },
             diagnostic_scenarios,
+        )
+        self.assertEqual(
+            {
+                name
+                for name, entry in SCENARIO_AUSTERE_REQUIREMENTS.items()
+                if entry["requirement_level"] == "excluded"
+            },
+            excluded_scenarios,
         )
         for scenario_name, entry in SCENARIO_AUSTERE_REQUIREMENTS.items():
             with self.subTest(scenario=scenario_name):
