@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping as _Mapping, Sequence as _Sequence
+from dataclasses import dataclass as _dataclass
+
 from .config import *
 from .config import _arbitration_fields
 from ..b_series import (
@@ -391,6 +394,149 @@ B6_ACCEPTED_FUSED_PARAMS: dict[str, float] = B5_ACCEPTED_HOMEOSTASIS_PARAMS | {
     "b6_return_lock_ticks": 8.0,
     "b6_recurrent_decay": 0.70,
 }
+
+
+@_dataclass(frozen=True)
+class BSeriesDiagnosticVariantSpec:
+    name: str
+    b_level: int
+    b_hidden_dim: int
+    b_mode: str = "current_bridge"
+    b_parent_level: int | None = None
+    b_transfer_source_checkpoint: str | None = None
+    b_transfer_min_coverage: float = 0.50
+    b_transfer_allow_low_coverage: bool = False
+    b_controller_profile: str | None = None
+    b_controller_params: _Mapping[str, float] | None = None
+
+
+def b_series_diagnostic_variant(
+    name: str,
+    b_level: int,
+    b_hidden_dim: int,
+    *,
+    b_mode: str = "current_bridge",
+    parent_level: int | None = None,
+    source_checkpoint: str | None = None,
+    transfer_min_coverage: float = 0.50,
+    transfer_allow_low_coverage: bool = False,
+    controller_profile: str | None = None,
+    controller_params: _Mapping[str, float] | None = None,
+) -> BSeriesDiagnosticVariantSpec:
+    return BSeriesDiagnosticVariantSpec(
+        name=name,
+        b_level=b_level,
+        b_mode=b_mode,
+        b_hidden_dim=b_hidden_dim,
+        b_parent_level=parent_level,
+        b_transfer_source_checkpoint=source_checkpoint,
+        b_transfer_min_coverage=transfer_min_coverage,
+        b_transfer_allow_low_coverage=transfer_allow_low_coverage,
+        b_controller_profile=controller_profile,
+        b_controller_params=controller_params,
+    )
+
+
+def build_b_series_diagnostic_config(
+    spec: BSeriesDiagnosticVariantSpec,
+    profile_fields: dict[str, object],
+) -> BrainAblationConfig:
+    fields: dict[str, object] = {
+        "name": spec.name,
+        "architecture": "b_series",
+        "module_dropout": 0.0,
+        "enable_reflexes": False,
+        "enable_auxiliary_targets": False,
+        **_arbitration_fields(
+            use_learned_arbitration=False,
+            warm_start_scale=0.0,
+            enable_food_direction_bias=False,
+        ),
+        "credit_strategy": "broadcast",
+        "disabled_modules": (),
+        "reflex_scale": 0.0,
+        "module_reflex_scales": {},
+        "b_level": spec.b_level,
+        "b_mode": spec.b_mode,
+        "b_hidden_dim": spec.b_hidden_dim,
+        "b_parent_level": spec.b_parent_level,
+        "b_transfer_source_checkpoint": spec.b_transfer_source_checkpoint,
+        "b_transfer_min_coverage": spec.b_transfer_min_coverage,
+        "b_transfer_allow_low_coverage": spec.b_transfer_allow_low_coverage,
+        "b_controller_profile": spec.b_controller_profile,
+        "b_controller_params": dict(spec.b_controller_params or {}),
+    }
+    fields.update(profile_fields)
+    return BrainAblationConfig(**fields)
+
+
+def build_b_series_diagnostic_configs(
+    specs: _Sequence[BSeriesDiagnosticVariantSpec],
+    profile_fields: dict[str, object],
+) -> Dict[str, BrainAblationConfig]:
+    return {
+        spec.name: build_b_series_diagnostic_config(spec, profile_fields)
+        for spec in specs
+    }
+
+
+@_dataclass(frozen=True)
+class DirectPolicyDiagnosticVariantSpec:
+    name: str
+    hidden_dims: tuple[int, ...] = (32,)
+    enable_food_direction_bias: bool = True
+    fields: _Mapping[str, object] | None = None
+
+
+def direct_policy_diagnostic_variant(
+    name: str,
+    *,
+    hidden_dims: tuple[int, ...] = (32,),
+    enable_food_direction_bias: bool = True,
+    **fields: object,
+) -> DirectPolicyDiagnosticVariantSpec:
+    return DirectPolicyDiagnosticVariantSpec(
+        name=name,
+        hidden_dims=hidden_dims,
+        enable_food_direction_bias=enable_food_direction_bias,
+        fields=fields,
+    )
+
+
+def build_direct_policy_diagnostic_config(
+    spec: DirectPolicyDiagnosticVariantSpec,
+    profile_fields: dict[str, object],
+) -> BrainAblationConfig:
+    fields: dict[str, object] = {
+        "name": spec.name,
+        "architecture": "true_monolithic",
+        "module_dropout": 0.0,
+        "enable_reflexes": False,
+        "enable_auxiliary_targets": False,
+        **_arbitration_fields(
+            use_learned_arbitration=False,
+            warm_start_scale=0.0,
+            enable_food_direction_bias=spec.enable_food_direction_bias,
+        ),
+        "credit_strategy": "broadcast",
+        "disabled_modules": (),
+        "reflex_scale": 0.0,
+        "module_reflex_scales": {},
+        "direct_policy_hidden_dims": spec.hidden_dims,
+    }
+    fields.update(spec.fields or {})
+    fields.update(profile_fields)
+    return BrainAblationConfig(**fields)
+
+
+def build_direct_policy_diagnostic_configs(
+    specs: _Sequence[DirectPolicyDiagnosticVariantSpec],
+    profile_fields: dict[str, object],
+) -> Dict[str, BrainAblationConfig]:
+    return {
+        spec.name: build_direct_policy_diagnostic_config(spec, profile_fields)
+        for spec in specs
+    }
 
 B7_BASE_AFFORDANCE_PARAMS: dict[str, float] = B6_ACCEPTED_FUSED_PARAMS | {
     "b7_budget_step_cost": 0.085,

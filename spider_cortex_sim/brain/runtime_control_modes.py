@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .b_series_progression import find_b_series_semantic_progression_descriptor
 from .runtime_shared import *
 
 
@@ -215,143 +216,43 @@ class _BrainRuntimePart9Mixin:
         b_level: int,
         b_effective_level: str,
     ) -> tuple[str, str, str, int, dict[str, object], str]:
-        if (
-            b_level == 0
-            and str(getattr(self.config, "b_mode", "")) == "current_bridge"
-        ):
-            (
-                semantic_action,
-                semantic_action_source,
-                semantic_action_reason,
-                semantic_override_count,
-            ) = self._b0_current_simple_semantic_action(
-                observation,
-                learned_semantic_action=learned_semantic_action,
+        b_series_progression_descriptor = (
+            find_b_series_semantic_progression_descriptor(
+                b_level=b_level,
+                config_name=str(getattr(self.config, "name", "")),
+                b_mode=str(getattr(self.config, "b_mode", "")),
             )
-            b_effective_level = B_CURRENT_BRIDGE_EFFECTIVE_LEVEL
-        elif (
-            b_level == 1
-            and str(getattr(self.config, "name", "")) == B1_THREAT_GUARD_POLICY_NAME
-        ):
-            (
-                semantic_action,
-                semantic_action_source,
-                semantic_action_reason,
-                semantic_override_count,
-            ) = self._b1_threat_guard_semantic_action(
-                observation,
-                learned_semantic_action=learned_semantic_action,
+        )
+        if b_series_progression_descriptor is not None:
+            semantic_selector = getattr(
+                self,
+                b_series_progression_descriptor.selector_name,
             )
-            b_effective_level = B1_THREAT_GUARD_EFFECTIVE_LEVEL
-        elif b_level == 2 and str(getattr(self.config, "name", "")) in {
-            B2_TEMPORAL_THREAT_H48_POLICY_NAME,
-            B2_TEMPORAL_THREAT_H56_POLICY_NAME,
-            B2_TEMPORAL_THREAT_H64_POLICY_NAME,
-        }:
-            (
-                semantic_action,
-                semantic_action_source,
-                semantic_action_reason,
-                semantic_override_count,
-                b_temporal_threat_trace,
-            ) = self._b2_temporal_threat_semantic_action(
-                observation,
-                learned_semantic_action=learned_semantic_action,
-            )
-            b_effective_level = B2_TEMPORAL_THREAT_EFFECTIVE_LEVEL
-        elif b_level == 3 and str(getattr(self.config, "name", "")) in {
-            B3_CONTACT_MEMORY_H48_POLICY_NAME,
-            B3_CONTACT_MEMORY_STRICT_H48_POLICY_NAME,
-            B3_CONTACT_MEMORY_H56_POLICY_NAME,
-        }:
-            (
-                semantic_action,
-                semantic_action_source,
-                semantic_action_reason,
-                semantic_override_count,
-                b_temporal_threat_trace,
-            ) = self._b3_contact_memory_semantic_action(
-                observation,
-                learned_semantic_action=learned_semantic_action,
-            )
-            b_effective_level = B3_CONTACT_MEMORY_EFFECTIVE_LEVEL
-        elif b_level == 3 and str(getattr(self.config, "name", "")) == (
-            B3_RECURRENT_GUARD_H48_POLICY_NAME
-        ):
-            (
-                semantic_action,
-                semantic_action_source,
-                semantic_action_reason,
-                semantic_override_count,
-                b_temporal_threat_trace,
-            ) = self._b3_recurrent_guard_semantic_action(
-                observation,
-                learned_semantic_action=learned_semantic_action,
-            )
-            b_effective_level = B3_RECURRENT_GUARD_EFFECTIVE_LEVEL
-        elif b_level == 4 and str(getattr(self.config, "name", "")) in {
-            B4_RECOVERY_BALANCE_H48_POLICY_NAME,
-            B4_PREDATOR_EXIT_MEMORY_H48_POLICY_NAME,
-            B4_RECOVERY_BALANCE_H56_POLICY_NAME,
-            B4_GENETIC_RECOVERY_H48_POLICY_NAME,
-        }:
-            (
-                semantic_action,
-                semantic_action_source,
-                semantic_action_reason,
-                semantic_override_count,
-                b_temporal_threat_trace,
-            ) = self._b4_recovery_balance_semantic_action(
-                observation,
-                learned_semantic_action=learned_semantic_action,
-            )
-            b_effective_level = B4_RECOVERY_BALANCE_EFFECTIVE_LEVEL
-        elif b_level == 5 and str(getattr(self.config, "name", "")) in {
-            B5_HOMEOSTATIC_ARBITER_H48_POLICY_NAME,
-            B5_CIRCADIAN_RECOVERY_H48_POLICY_NAME,
-            B5_HOMEOSTATIC_ARBITER_H56_POLICY_NAME,
-            B5_GENETIC_HOMEOSTASIS_H48_POLICY_NAME,
-        }:
-            (
-                semantic_action,
-                semantic_action_source,
-                semantic_action_reason,
-                semantic_override_count,
-                b_temporal_threat_trace,
-            ) = self._b5_homeostatic_arbiter_semantic_action(
-                observation,
-                learned_semantic_action=learned_semantic_action,
-            )
-            b_effective_level = B5_HOMEOSTATIC_ARBITER_EFFECTIVE_LEVEL
-        elif b_level == 6 and str(getattr(self.config, "name", "")) in {
-            B6_RISK_FORAGE_ARBITER_H48_POLICY_NAME,
-            B6_CORRIDOR_SURVIVAL_GUARD_H48_POLICY_NAME,
-            B6_THREAT_PRIORITY_MEMORY_H48_POLICY_NAME,
-            B6_RISK_CORRIDOR_H56_POLICY_NAME,
-            B6_GENETIC_RISK_CORRIDOR_H48_POLICY_NAME,
-            B6_RECURRENT_CONTEXT_H48_POLICY_NAME,
-            B6_RECURRENT_THREAT_HOMEOSTASIS_H48_POLICY_NAME,
-            B6_RECURRENT_CORRIDOR_GUARD_H48_POLICY_NAME,
-            B6_RECURRENT_CONTEXT_H56_POLICY_NAME,
-            B6_GENETIC_RECURRENT_MEMORY_H48_POLICY_NAME,
-            B6_FUSED_RISK_RECURRENT_H48_POLICY_NAME,
-        }:
-            (
-                semantic_action,
-                semantic_action_source,
-                semantic_action_reason,
-                semantic_override_count,
-                b_temporal_threat_trace,
-            ) = self._b6_risk_corridor_semantic_action(
-                observation,
-                learned_semantic_action=learned_semantic_action,
-            )
-            if semantic_action_source == B6_FUSED_RISK_RECURRENT_SELECTION_SOURCE:
-                b_effective_level = B6_FUSED_RISK_RECURRENT_EFFECTIVE_LEVEL
-            elif semantic_action_source == B6_RECURRENT_MEMORY_SELECTION_SOURCE:
-                b_effective_level = B6_RECURRENT_MEMORY_EFFECTIVE_LEVEL
+            if b_series_progression_descriptor.updates_temporal_threat_trace:
+                (
+                    semantic_action,
+                    semantic_action_source,
+                    semantic_action_reason,
+                    semantic_override_count,
+                    b_temporal_threat_trace,
+                ) = semantic_selector(
+                    observation,
+                    learned_semantic_action=learned_semantic_action,
+                )
             else:
-                b_effective_level = B6_RISK_CORRIDOR_EFFECTIVE_LEVEL
+                (
+                    semantic_action,
+                    semantic_action_source,
+                    semantic_action_reason,
+                    semantic_override_count,
+                ) = semantic_selector(
+                    observation,
+                    learned_semantic_action=learned_semantic_action,
+                )
+            b_effective_level = b_series_progression_descriptor.effective_level_for(
+                semantic_action_source,
+                fallback=b_effective_level,
+            )
         elif b_level == 7 and str(getattr(self.config, "name", "")) in {
             B7_AFFORDANCE_BUDGET_H48_POLICY_NAME,
             B7_ENERGY_BUDGET_CORRIDOR_H48_POLICY_NAME,

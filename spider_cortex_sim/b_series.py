@@ -5,6 +5,8 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from .local_ecology_observation import LocalEcologyObservationAdapter
+
 
 B_SERIES_POLICY_NAME = "b_series_policy"
 B0_CURRENT_BRIDGE_POLICY_NAME = "b0_current_bridge_policy"
@@ -1093,13 +1095,11 @@ def _submapping(value: object) -> Mapping[str, object]:
 def b_series_blocked_mask(
     observation: Mapping[str, object],
 ) -> dict[str, bool]:
-    meta = _meta_from_observation(observation)
-    local_affordances = _submapping(meta.get("local_affordances"))
+    local_ecology = LocalEcologyObservationAdapter.from_observation(observation)
     blocked: dict[str, bool] = {}
     for action_name in LOCOMOTION_ACTIONS:
         if action_name in BRIDGE_MOVE_ACTIONS:
-            affordance = _submapping(local_affordances.get(action_name))
-            blocked[action_name] = bool(affordance.get("blocked", False))
+            blocked[action_name] = local_ecology.affordance_for(action_name).blocked
         else:
             blocked[action_name] = False
     return blocked
@@ -1124,27 +1124,24 @@ def _movement_candidates(blocked_mask: Mapping[str, bool]) -> list[str]:
 
 
 def _transition_for(
-    meta: Mapping[str, object],
+    local_ecology: LocalEcologyObservationAdapter,
     action_name: str,
-) -> Mapping[str, object]:
-    transitions = _submapping(meta.get("local_transition_consequences"))
-    return _submapping(transitions.get(action_name))
+):
+    return local_ecology.transition_for(action_name)
 
 
 def _geodesic_for(
-    meta: Mapping[str, object],
+    local_ecology: LocalEcologyObservationAdapter,
     action_name: str,
-) -> Mapping[str, object]:
-    geodesics = _submapping(meta.get("local_geodesic_consequences"))
-    return _submapping(geodesics.get(action_name))
+):
+    return local_ecology.geodesic_for(action_name)
 
 
 def _affordance_for(
-    meta: Mapping[str, object],
+    local_ecology: LocalEcologyObservationAdapter,
     action_name: str,
-) -> Mapping[str, object]:
-    affordances = _submapping(meta.get("local_affordances"))
-    return _submapping(affordances.get(action_name))
+):
+    return local_ecology.affordance_for(action_name)
 
 
 def _target_vector(
@@ -1194,6 +1191,7 @@ def _predator_pressure(meta: Mapping[str, object]) -> float:
 
 def _best_exit_action(
     meta: Mapping[str, object],
+    local_ecology: LocalEcologyObservationAdapter,
     candidates: Sequence[str],
 ) -> tuple[str, float, str]:
     best_exit_action = "STAY"
@@ -1201,19 +1199,19 @@ def _best_exit_action(
     best_exit_score = -1e9
     predator_pressure = _predator_pressure(meta)
     for action_name in candidates:
-        transition = _transition_for(meta, action_name)
-        geodesic = _geodesic_for(meta, action_name)
-        exit_delta = _float_value(geodesic.get("exit_geodesic_delta"), 0.0)
-        predator_delta = _float_value(transition.get("predator_dist_delta"), 0.0)
+        transition = _transition_for(local_ecology, action_name)
+        geodesic = _geodesic_for(local_ecology, action_name)
+        exit_delta = geodesic.exit_geodesic_delta
+        predator_delta = transition.predator_dist_delta
         score = exit_delta + (1.00 * predator_pressure * predator_delta)
         if predator_pressure >= 0.50 and predator_delta <= -0.5:
             score -= 4.0
-        if bool(geodesic.get("next_on_exit_target", False)):
+        if geodesic.next_on_exit_target:
             score += 0.75
         if score > best_exit_score:
             best_exit_score = score
             best_exit_action = action_name
-            best_exit_delta = _float_value(transition.get("food_dist_delta"), 0.0)
+            best_exit_delta = transition.food_dist_delta
     if best_exit_score > 0.0:
         return best_exit_action, best_exit_delta, "food_exit_to_outside"
     return "STAY", 0.0, "no_exit_progress"
@@ -1221,6 +1219,7 @@ def _best_exit_action(
 
 def _vector_guided_food_action(
     meta: Mapping[str, object],
+    local_ecology: LocalEcologyObservationAdapter,
     candidates: Sequence[str],
 ) -> tuple[str, float, str] | None:
     target_dx, target_dy, source = _target_vector(meta, "food")
@@ -1234,12 +1233,12 @@ def _vector_guided_food_action(
     predator_pressure = _predator_pressure(meta)
     for action_name in candidates:
         action_dx, action_dy = BRIDGE_ACTION_DELTAS[action_name]
-        transition = _transition_for(meta, action_name)
-        affordance = _affordance_for(meta, action_name)
-        next_role = str(affordance.get("next_role", current_role))
-        next_has_food = bool(transition.get("next_cell_has_food", False))
-        food_delta = _float_value(transition.get("food_dist_delta"), 0.0)
-        predator_delta = _float_value(transition.get("predator_dist_delta"), 0.0)
+        transition = _transition_for(local_ecology, action_name)
+        affordance = _affordance_for(local_ecology, action_name)
+        next_role = affordance.next_role
+        next_has_food = transition.next_cell_has_food
+        food_delta = transition.food_dist_delta
+        predator_delta = transition.predator_dist_delta
         score = (
             action_dx * target_dx
             + action_dy * target_dy
@@ -1270,19 +1269,20 @@ def _vector_guided_food_action(
 
 def _best_food_action(
     meta: Mapping[str, object],
+    local_ecology: LocalEcologyObservationAdapter,
     candidates: Sequence[str],
 ) -> tuple[str, float, str]:
     if bool(meta.get("on_shelter", False)) and str(meta.get("shelter_role", "outside")) not in {
         "outside",
         "entrance",
     }:
-        exit_action = _best_exit_action(meta, candidates)
+        exit_action = _best_exit_action(meta, local_ecology, candidates)
         if exit_action[0] != "STAY":
             return exit_action
         if _predator_pressure(meta) >= 0.50:
             return exit_action
 
-    vector_action = _vector_guided_food_action(meta, candidates)
+    vector_action = _vector_guided_food_action(meta, local_ecology, candidates)
     if vector_action is not None:
         return vector_action
 
@@ -1291,13 +1291,13 @@ def _best_food_action(
     best_score = -1e9
     current_role = str(meta.get("shelter_role", "outside"))
     for action_name in candidates:
-        transition = _transition_for(meta, action_name)
-        affordance = _affordance_for(meta, action_name)
-        delta = _float_value(transition.get("food_dist_delta"), 0.0)
-        predator_delta = _float_value(transition.get("predator_dist_delta"), 0.0)
-        next_has_food = bool(transition.get("next_cell_has_food", False))
+        transition = _transition_for(local_ecology, action_name)
+        affordance = _affordance_for(local_ecology, action_name)
+        delta = transition.food_dist_delta
+        predator_delta = transition.predator_dist_delta
+        next_has_food = transition.next_cell_has_food
         score = delta + 0.40 * predator_delta
-        next_role = str(affordance.get("next_role", current_role))
+        next_role = affordance.next_role
         if not next_has_food and current_role == "outside" and next_role != "outside":
             score -= 1.50
         elif (
@@ -1319,6 +1319,7 @@ def _best_food_action(
 
 def _best_shelter_action(
     meta: Mapping[str, object],
+    local_ecology: LocalEcologyObservationAdapter,
     candidates: Sequence[str],
 ) -> tuple[str, float, str]:
     best_action = "STAY"
@@ -1326,12 +1327,12 @@ def _best_shelter_action(
     best_score = -1e9
     predator_pressure = _predator_pressure(meta)
     for action_name in candidates:
-        transition = _transition_for(meta, action_name)
-        geodesic = _geodesic_for(meta, action_name)
-        shelter_delta = _float_value(transition.get("shelter_dist_delta"), 0.0)
-        predator_delta = _float_value(transition.get("predator_dist_delta"), 0.0)
-        exit_delta = _float_value(geodesic.get("exit_geodesic_delta"), 0.0)
-        deep_delta = _float_value(geodesic.get("deep_geodesic_delta"), 0.0)
+        transition = _transition_for(local_ecology, action_name)
+        geodesic = _geodesic_for(local_ecology, action_name)
+        shelter_delta = transition.shelter_dist_delta
+        predator_delta = transition.predator_dist_delta
+        exit_delta = geodesic.exit_geodesic_delta
+        deep_delta = geodesic.deep_geodesic_delta
         score = (
             shelter_delta
             + 0.35 * exit_delta
@@ -1340,9 +1341,9 @@ def _best_shelter_action(
         )
         if predator_pressure >= 0.50 and predator_delta <= -0.5:
             score -= 4.0
-        if bool(geodesic.get("next_on_deep_target", False)):
+        if geodesic.next_on_deep_target:
             score += 1.0
-        elif bool(geodesic.get("next_on_exit_target", False)):
+        elif geodesic.next_on_exit_target:
             score += 0.5
         if score > best_score:
             best_score = score
@@ -1381,6 +1382,7 @@ def bridge_b_semantic_action(
     if semantic_action not in B_SEMANTIC_ACTION_TO_INDEX:
         raise ValueError(f"Unknown B-series semantic action: {semantic_action!r}.")
     meta = _meta_from_observation(observation)
+    local_ecology = LocalEcologyObservationAdapter.from_meta(meta)
     blocked_mask = b_series_blocked_mask(observation)
     candidates = _movement_candidates(blocked_mask)
     food_delta = 0.0
@@ -1391,7 +1393,11 @@ def bridge_b_semantic_action(
             primitive_action = "STAY"
             reason = "already_on_food"
         else:
-            primitive_action, food_delta, reason = _best_food_action(meta, candidates)
+            primitive_action, food_delta, reason = _best_food_action(
+                meta,
+                local_ecology,
+                candidates,
+            )
     elif semantic_action == "MOVE_TO_SHELTER":
         shelter_role = str(meta.get("shelter_role", "outside"))
         shelter_role_level = _float_value(meta.get("shelter_role_level"), 0.0)
@@ -1406,6 +1412,7 @@ def bridge_b_semantic_action(
         else:
             primitive_action, shelter_delta, reason = _best_shelter_action(
                 meta,
+                local_ecology,
                 candidates,
             )
     elif semantic_action == "EXPLORE":

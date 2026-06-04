@@ -12,5 +12,7 @@ from tests.b_series_cases.bseriesevolutiongatetest_part2 import BSeriesEvolution
 from tests.b_series_cases.bseriesevolutiongatetest_part3 import BSeriesEvolutionGateTestPart3
 from tests.b_series_cases.bseriesevolutiongatetest_part4 import BSeriesEvolutionGateTestPart4
 from tests.b_series_cases.bserieslegacyharnesstest import BSeriesLegacyHarnessTest
+from tests.b_series_cases.bseriesprogressiondescriptortest import BSeriesProgressionDescriptorTest
+from tests.b_series_cases.bseriestracefieldregistrytest import BSeriesTraceFieldRegistryTest
 
-__all__ = ['BSeriesActionSpaceTest', 'BSeriesBridgeTest', 'BSeriesRuntimeTestPart1', 'BSeriesRuntimeTestPart2', 'BSeriesRuntimeTestPart3', 'BSeriesCheckpointTestPart1', 'BSeriesCheckpointTestPart2', 'BSeriesCheckpointTestPart3', 'BSeriesCheckpointTestPart4', 'BSeriesEvolutionGateTestPart1', 'BSeriesEvolutionGateTestPart2', 'BSeriesEvolutionGateTestPart3', 'BSeriesEvolutionGateTestPart4', 'BSeriesLegacyHarnessTest']
+__all__ = ['BSeriesActionSpaceTest', 'BSeriesBridgeTest', 'BSeriesRuntimeTestPart1', 'BSeriesRuntimeTestPart2', 'BSeriesRuntimeTestPart3', 'BSeriesCheckpointTestPart1', 'BSeriesCheckpointTestPart2', 'BSeriesCheckpointTestPart3', 'BSeriesCheckpointTestPart4', 'BSeriesEvolutionGateTestPart1', 'BSeriesEvolutionGateTestPart2', 'BSeriesEvolutionGateTestPart3', 'BSeriesEvolutionGateTestPart4', 'BSeriesLegacyHarnessTest', 'BSeriesProgressionDescriptorTest', 'BSeriesTraceFieldRegistryTest']

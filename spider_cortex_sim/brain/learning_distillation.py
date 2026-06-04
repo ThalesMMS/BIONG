@@ -76,15 +76,16 @@ class _BrainLearningDistillationMixin:
         shelter_column_grad_logits = np.zeros(0, dtype=float)
         shelter_position_grad_logits = np.zeros(0, dtype=float)
         total_loss = 0.0
+        direct_policy_capabilities = get_direct_policy_capabilities(self)
         continuation_margin_weight = float(
-            getattr(self.config, "direct_policy_continuation_margin_weight", 0.0)
+            direct_policy_capabilities.teachers.continuation_margin_weight
         )
         stay_action_idx = int(ACTION_TO_INDEX["STAY"])
         return_option_idx = int(OPTION_NAMES.index("RETURN_TO_SHELTER"))
         initial_forage_phase_idx = int(PHASE_LABELS.index("INITIAL_FORAGE"))
 
         if (
-            self.config.direct_policy_handoff_teacher
+            direct_policy_capabilities.teachers.handoff
             and 0 <= int(replay_decision.teacher_action_target_idx) < self.action_dim
             and replay_decision.total_logits.size == self.action_dim
         ):
@@ -134,7 +135,7 @@ class _BrainLearningDistillationMixin:
                     )
                 )
         if (
-            self.config.direct_policy_handoff_option_teacher
+            direct_policy_capabilities.teachers.handoff_option
             and 0 <= int(replay_decision.teacher_option_target_idx) < len(OPTION_NAMES)
             and replay_decision.option_logits.size == len(OPTION_NAMES)
         ):
@@ -187,7 +188,7 @@ class _BrainLearningDistillationMixin:
                     )
                 )
         if (
-            self.config.direct_policy_phase_head
+            direct_policy_capabilities.heads.phase
             and replay_decision.phase_target_idx >= 0
             and replay_decision.phase_logits.size == len(PHASE_LABELS)
         ):
@@ -238,7 +239,7 @@ class _BrainLearningDistillationMixin:
                 )
         total_loss += float(post_rest_sequence_distill_loss)
         if (
-            self.config.direct_policy_affordance_head
+            direct_policy_capabilities.heads.affordance
             and replay_decision.affordance_blocked_logits.size == self.action_dim
             and replay_decision.affordance_blocked_targets.size == self.action_dim
         ):
@@ -273,7 +274,7 @@ class _BrainLearningDistillationMixin:
         affordance_role_dim = len(AFFORDANCE_SHELTER_ROLE_NAMES)
         expected_affordance_role_size = self.action_dim * affordance_role_dim
         if (
-            self.config.direct_policy_affordance_head
+            direct_policy_capabilities.heads.affordance
             and replay_decision.affordance_role_logits.size
             == expected_affordance_role_size
             and replay_decision.affordance_role_targets.size == self.action_dim
@@ -310,7 +311,7 @@ class _BrainLearningDistillationMixin:
         geometry_dim = len(AFFORDANCE_GEOMETRY_TARGET_NAMES)
         expected_geometry_size = self.action_dim * geometry_dim
         if (
-            self.config.direct_policy_geometry_head
+            direct_policy_capabilities.heads.geometry
             and replay_decision.geometry_logits.size == expected_geometry_size
             and replay_decision.geometry_targets.size == expected_geometry_size
         ):
@@ -339,7 +340,7 @@ class _BrainLearningDistillationMixin:
         shelter_column_dim = len(AFFORDANCE_SHELTER_COLUMN_NAMES)
         expected_shelter_column_size = self.action_dim * shelter_column_dim
         if (
-            self.config.direct_policy_shelter_column_head
+            direct_policy_capabilities.heads.shelter_column
             and replay_decision.shelter_column_logits.size
             == expected_shelter_column_size
             and replay_decision.shelter_column_targets.size == self.action_dim
@@ -386,7 +387,7 @@ class _BrainLearningDistillationMixin:
         shelter_position_dim = len(AFFORDANCE_SHELTER_POSITION_NAMES)
         expected_shelter_position_size = self.action_dim * shelter_position_dim
         if (
-            self.config.direct_policy_shelter_position_head
+            direct_policy_capabilities.heads.shelter_position
             and replay_decision.shelter_position_logits.size
             == expected_shelter_position_size
             and replay_decision.shelter_position_targets.size == self.action_dim
@@ -435,7 +436,7 @@ class _BrainLearningDistillationMixin:
         transition_prediction_grad_logits = np.zeros(0, dtype=float)
         transition_rollout_prediction_grad_logits = np.zeros(0, dtype=float)
         if (
-            getattr(self.config, "direct_policy_transition_prediction_head", False)
+            direct_policy_capabilities.heads.transition_prediction
             and replay_decision.transition_prediction_logits.size
             == replay_decision.transition_prediction_targets.size
             and replay_decision.transition_prediction_logits.size > 0
@@ -554,7 +555,7 @@ class _BrainLearningDistillationMixin:
                 "lr": self.module_lr * float(lr_scale),
             }
             if (
-                self.config.direct_policy_handoff_option_teacher
+                direct_policy_capabilities.teachers.handoff_option
                 and replay_decision.option_logits.size == len(OPTION_NAMES)
             ):
                 backward_kwargs["grad_option_logits"] = (

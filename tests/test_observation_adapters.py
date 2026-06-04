@@ -10,6 +10,7 @@ from spider_cortex_sim.interfaces import (
     MOTOR_CONTEXT_INTERFACE,
 )
 from spider_cortex_sim.observation_adapters import (
+    LocalEcologyObservationAdapter,
     adapt_observation_contracts,
     adapter_trace_summary,
     observation_vectors_from_adapters,
@@ -128,6 +129,115 @@ class ObservationAdaptersTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "expected shape"):
             adapt_observation_contracts(observation, tick=0)
+
+    def test_local_ecology_adapter_projects_complete_meta(self) -> None:
+        adapter = LocalEcologyObservationAdapter.from_observation(
+            {
+                "meta": {
+                    "shelter_role": "inside",
+                    "shelter_role_level": 0.6,
+                    "map_template": "corridor_escape",
+                    "local_affordances": {
+                        "MOVE_UP": {
+                            "blocked": True,
+                            "next_role": "entrance",
+                            "next_role_level": 0.3,
+                        },
+                    },
+                    "local_transition_consequences": {
+                        "MOVE_UP": {
+                            "food_dist_delta": 1.2,
+                            "shelter_dist_delta": -0.4,
+                            "predator_dist_delta": 0.5,
+                            "next_cell_has_food": True,
+                        },
+                    },
+                    "local_transition_rollouts": {
+                        "MOVE_UP": {
+                            "best_food_dist_delta": 0.8,
+                            "best_shelter_dist_delta": -0.2,
+                            "best_predator_dist_delta": 0.7,
+                            "food_reachable_within_two_steps": True,
+                        },
+                    },
+                    "local_geodesic_consequences": {
+                        "MOVE_UP": {
+                            "exit_geodesic_delta": 0.9,
+                            "deep_geodesic_delta": -0.6,
+                            "next_on_exit_target": True,
+                            "next_on_deep_target": False,
+                        },
+                    },
+                    "local_spatial_patch": {
+                        "blocked": [1.0, 0.0, 1.0],
+                    },
+                },
+            }
+        )
+
+        affordance = adapter.affordance_for("MOVE_UP")
+        transition = adapter.transition_for("MOVE_UP")
+        rollout = adapter.transition_rollout_for("MOVE_UP")
+        geodesic = adapter.geodesic_for("MOVE_UP")
+
+        self.assertEqual(adapter.shelter_role, "inside")
+        self.assertEqual(adapter.shelter_role_level, 0.6)
+        self.assertEqual(adapter.map_template, "corridor_escape")
+        self.assertTrue(affordance.blocked)
+        self.assertEqual(affordance.next_role, "entrance")
+        self.assertEqual(affordance.next_role_level, 0.3)
+        self.assertEqual(transition.food_dist_delta, 1.2)
+        self.assertEqual(transition.shelter_dist_delta, -0.4)
+        self.assertEqual(transition.predator_dist_delta, 0.5)
+        self.assertTrue(transition.next_cell_has_food)
+        self.assertEqual(rollout.best_food_dist_delta, 0.8)
+        self.assertTrue(rollout.food_reachable_within_two_steps)
+        self.assertEqual(geodesic.exit_geodesic_delta, 0.9)
+        self.assertTrue(geodesic.next_on_exit_target)
+        self.assertEqual(adapter.spatial_patch_values("blocked"), (1.0, 0.0, 1.0))
+
+    def test_local_ecology_adapter_preserves_partial_meta_fallbacks(self) -> None:
+        adapter = LocalEcologyObservationAdapter.from_meta(
+            {
+                "shelter_role": "inside",
+                "shelter_role_level": 0.6,
+                "local_affordances": {
+                    "MOVE_UP": {
+                        "blocked": False,
+                    },
+                },
+                "local_transition_consequences": [],
+                "local_spatial_patch": {"blocked": "bad"},
+            }
+        )
+
+        move_up = adapter.affordance_for("MOVE_UP")
+        move_down = adapter.affordance_for("MOVE_DOWN")
+        transition = adapter.transition_for("MOVE_UP")
+
+        self.assertFalse(move_up.blocked)
+        self.assertEqual(move_up.next_role, "inside")
+        self.assertEqual(move_up.next_role_level, 0.6)
+        self.assertFalse(move_down.blocked)
+        self.assertEqual(move_down.next_role, "inside")
+        self.assertEqual(move_down.next_role_level, 0.6)
+        self.assertEqual(transition.food_dist_delta, 0.0)
+        self.assertFalse(transition.next_cell_has_food)
+        self.assertEqual(adapter.spatial_patch_values("blocked"), ())
+
+    def test_local_ecology_adapter_handles_missing_meta(self) -> None:
+        adapter = LocalEcologyObservationAdapter.from_observation({})
+
+        self.assertEqual(adapter.shelter_role, "outside")
+        self.assertEqual(adapter.shelter_role_level, 0.0)
+        self.assertFalse(adapter.affordance_for("MOVE_UP").blocked)
+        self.assertEqual(adapter.transition_for("MOVE_UP").food_dist_delta, 0.0)
+        self.assertEqual(
+            adapter.transition_rollout_for("MOVE_UP").best_food_dist_delta,
+            0.0,
+        )
+        self.assertEqual(adapter.geodesic_for("MOVE_UP").exit_geodesic_delta, 0.0)
+        self.assertEqual(adapter.spatial_patch_values("blocked"), ())
 
 
 if __name__ == "__main__":

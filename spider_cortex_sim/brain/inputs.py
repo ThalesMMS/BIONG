@@ -24,6 +24,8 @@ from ..direct_policy_affordances import (
 from ..modules import ModuleResult
 from ..nn import softmax
 from ..noise import _compute_execution_difficulty_core
+from ..local_ecology_observation import LocalEcologyObservationAdapter
+from ..direct_policy_capabilities import get_direct_policy_capabilities
 from ..world import ACTIONS
 
 
@@ -122,32 +124,21 @@ class BrainInputMixin:
             DIRECT_POLICY_LOCAL_AFFORDANCE_INPUT_DIM,
             dtype=float,
         )
-        meta = observation.get("meta")
-        if not isinstance(meta, dict):
-            return affordance_input
-        current_role = str(meta.get("shelter_role", "outside"))
+        local_ecology = LocalEcologyObservationAdapter.from_observation(observation)
+        current_role = local_ecology.shelter_role
         current_role_idx = AFFORDANCE_SHELTER_ROLE_TO_INDEX.get(current_role)
         if current_role_idx is not None:
             affordance_input[current_role_idx] = 1.0
-        current_role_level = float(meta.get("shelter_role_level", 0.0))
-        local_affordances = meta.get("local_affordances")
-        if not isinstance(local_affordances, dict):
-            return affordance_input
+        current_role_level = local_ecology.shelter_role_level
         offset = len(AFFORDANCE_SHELTER_ROLE_NAMES)
         for action_name in DIRECT_POLICY_LOCAL_AFFORDANCE_ACTION_NAMES:
-            affordance = local_affordances.get(action_name, {})
-            if not isinstance(affordance, dict):
-                affordance = {}
-            next_role = str(affordance.get("next_role", current_role))
-            next_role_level = float(
-                affordance.get("next_role_level", current_role_level)
-            )
-            affordance_input[offset + 0] = float(bool(affordance.get("blocked", False)))
+            affordance = local_ecology.affordance_for(action_name)
+            affordance_input[offset + 0] = float(affordance.blocked)
             affordance_input[offset + 1] = float(
-                np.clip(next_role_level - current_role_level, -1.0, 1.0)
+                np.clip(affordance.next_role_level - current_role_level, -1.0, 1.0)
             )
-            affordance_input[offset + 2] = float(next_role == "entrance")
-            affordance_input[offset + 3] = float(next_role == "outside")
+            affordance_input[offset + 2] = float(affordance.next_role == "entrance")
+            affordance_input[offset + 3] = float(affordance.next_role == "outside")
             offset += 4
         return affordance_input
 
@@ -159,21 +150,14 @@ class BrainInputMixin:
             DIRECT_POLICY_LOCAL_SPATIAL_INPUT_DIM,
             dtype=float,
         )
-        meta = observation.get("meta")
-        if not isinstance(meta, dict):
-            return spatial_input
-        local_patch = meta.get("local_spatial_patch")
-        if not isinstance(local_patch, dict):
-            return spatial_input
+        local_ecology = LocalEcologyObservationAdapter.from_observation(observation)
         offset = 0
         for key in ("blocked", "shelter_role_level", "food"):
-            values = local_patch.get(key, ())
-            if not isinstance(values, (list, tuple)):
-                values = ()
+            values = local_ecology.spatial_patch_values(key, max_count=9)
             count = min(len(values), 9)
             if count > 0:
                 spatial_input[offset : offset + count] = np.asarray(
-                    values[:count],
+                    values,
                     dtype=float,
                 )
             offset += 9
@@ -187,29 +171,20 @@ class BrainInputMixin:
             DIRECT_POLICY_LOCAL_TRANSITION_INPUT_DIM,
             dtype=float,
         )
-        meta = observation.get("meta")
-        if not isinstance(meta, dict):
-            return transition_input
-        transitions = meta.get("local_transition_consequences")
-        if not isinstance(transitions, dict):
-            return transition_input
+        local_ecology = LocalEcologyObservationAdapter.from_observation(observation)
         offset = 0
         for action_name in DIRECT_POLICY_LOCAL_AFFORDANCE_ACTION_NAMES:
-            consequence = transitions.get(action_name, {})
-            if not isinstance(consequence, dict):
-                consequence = {}
+            consequence = local_ecology.transition_for(action_name)
             transition_input[offset + 0] = float(
-                np.clip(consequence.get("food_dist_delta", 0.0), -1.0, 1.0)
+                np.clip(consequence.food_dist_delta, -1.0, 1.0)
             )
             transition_input[offset + 1] = float(
-                np.clip(consequence.get("shelter_dist_delta", 0.0), -1.0, 1.0)
+                np.clip(consequence.shelter_dist_delta, -1.0, 1.0)
             )
             transition_input[offset + 2] = float(
-                np.clip(consequence.get("predator_dist_delta", 0.0), -1.0, 1.0)
+                np.clip(consequence.predator_dist_delta, -1.0, 1.0)
             )
-            transition_input[offset + 3] = float(
-                bool(consequence.get("next_cell_has_food", False))
-            )
+            transition_input[offset + 3] = float(consequence.next_cell_has_food)
             offset += 4
         return transition_input
 
@@ -221,29 +196,20 @@ class BrainInputMixin:
             DIRECT_POLICY_LOCAL_TRANSITION_ROLLOUT_INPUT_DIM,
             dtype=float,
         )
-        meta = observation.get("meta")
-        if not isinstance(meta, dict):
-            return rollout_input
-        rollouts = meta.get("local_transition_rollouts")
-        if not isinstance(rollouts, dict):
-            return rollout_input
+        local_ecology = LocalEcologyObservationAdapter.from_observation(observation)
         offset = 0
         for action_name in DIRECT_POLICY_LOCAL_AFFORDANCE_ACTION_NAMES:
-            rollout = rollouts.get(action_name, {})
-            if not isinstance(rollout, dict):
-                rollout = {}
+            rollout = local_ecology.transition_rollout_for(action_name)
             rollout_input[offset + 0] = float(
-                np.clip(rollout.get("best_food_dist_delta", 0.0), -1.0, 1.0)
+                np.clip(rollout.best_food_dist_delta, -1.0, 1.0)
             )
             rollout_input[offset + 1] = float(
-                np.clip(rollout.get("best_shelter_dist_delta", 0.0), -1.0, 1.0)
+                np.clip(rollout.best_shelter_dist_delta, -1.0, 1.0)
             )
             rollout_input[offset + 2] = float(
-                np.clip(rollout.get("best_predator_dist_delta", 0.0), -1.0, 1.0)
+                np.clip(rollout.best_predator_dist_delta, -1.0, 1.0)
             )
-            rollout_input[offset + 3] = float(
-                bool(rollout.get("food_reachable_within_two_steps", False))
-            )
+            rollout_input[offset + 3] = float(rollout.food_reachable_within_two_steps)
             offset += 4
         return rollout_input
 
@@ -255,29 +221,18 @@ class BrainInputMixin:
             DIRECT_POLICY_LOCAL_GEODESIC_INPUT_DIM,
             dtype=float,
         )
-        meta = observation.get("meta")
-        if not isinstance(meta, dict):
-            return geodesic_input
-        geodesics = meta.get("local_geodesic_consequences")
-        if not isinstance(geodesics, dict):
-            return geodesic_input
+        local_ecology = LocalEcologyObservationAdapter.from_observation(observation)
         offset = 0
         for action_name in DIRECT_POLICY_LOCAL_AFFORDANCE_ACTION_NAMES:
-            consequence = geodesics.get(action_name, {})
-            if not isinstance(consequence, dict):
-                consequence = {}
+            consequence = local_ecology.geodesic_for(action_name)
             geodesic_input[offset + 0] = float(
-                np.clip(consequence.get("exit_geodesic_delta", 0.0), -1.0, 1.0)
+                np.clip(consequence.exit_geodesic_delta, -1.0, 1.0)
             )
             geodesic_input[offset + 1] = float(
-                np.clip(consequence.get("deep_geodesic_delta", 0.0), -1.0, 1.0)
+                np.clip(consequence.deep_geodesic_delta, -1.0, 1.0)
             )
-            geodesic_input[offset + 2] = float(
-                bool(consequence.get("next_on_exit_target", False))
-            )
-            geodesic_input[offset + 3] = float(
-                bool(consequence.get("next_on_deep_target", False))
-            )
+            geodesic_input[offset + 2] = float(consequence.next_on_exit_target)
+            geodesic_input[offset + 3] = float(consequence.next_on_deep_target)
             offset += 4
         return geodesic_input
 
@@ -307,7 +262,8 @@ class BrainInputMixin:
             ],
             axis=0,
         )
-        if bool(getattr(self.config, "direct_policy_local_affordance_inputs", False)):
+        local_inputs = get_direct_policy_capabilities(self).local_inputs
+        if local_inputs.affordance:
             monolithic_observation = np.concatenate(
                 [
                     monolithic_observation,
@@ -315,7 +271,7 @@ class BrainInputMixin:
                 ],
                 axis=0,
             )
-        if bool(getattr(self.config, "direct_policy_local_spatial_inputs", False)):
+        if local_inputs.spatial:
             monolithic_observation = np.concatenate(
                 [
                     monolithic_observation,
@@ -323,7 +279,7 @@ class BrainInputMixin:
                 ],
                 axis=0,
             )
-        if bool(getattr(self.config, "direct_policy_local_transition_inputs", False)):
+        if local_inputs.transition:
             monolithic_observation = np.concatenate(
                 [
                     monolithic_observation,
@@ -331,9 +287,7 @@ class BrainInputMixin:
                 ],
                 axis=0,
             )
-        if bool(
-            getattr(self.config, "direct_policy_local_transition_rollout_inputs", False)
-        ):
+        if local_inputs.transition_rollout:
             monolithic_observation = np.concatenate(
                 [
                     monolithic_observation,
@@ -343,7 +297,7 @@ class BrainInputMixin:
                 ],
                 axis=0,
             )
-        if bool(getattr(self.config, "direct_policy_local_geodesic_inputs", False)):
+        if local_inputs.geodesic:
             monolithic_observation = np.concatenate(
                 [
                     monolithic_observation,

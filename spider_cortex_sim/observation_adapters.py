@@ -6,6 +6,13 @@ from typing import Mapping
 import numpy as np
 
 from .interfaces import ACTION_CONTEXT_INTERFACE, MODULE_INTERFACES, MOTOR_CONTEXT_INTERFACE
+from .local_ecology_observation import (
+    LocalActionAffordance,
+    LocalEcologyObservationAdapter,
+    LocalGeodesicConsequence,
+    LocalTransitionConsequence,
+    LocalTransitionRollout,
+)
 
 
 def _clamp01(value: float) -> float:
@@ -166,6 +173,11 @@ def adapter_trace_summary(
 
 
 __all__ = [
+    "LocalActionAffordance",
+    "LocalEcologyObservationAdapter",
+    "LocalGeodesicConsequence",
+    "LocalTransitionConsequence",
+    "LocalTransitionRollout",
     "ObservationAdapterPayload",
     "adapt_observation_contracts",
     "adapter_trace_summary",

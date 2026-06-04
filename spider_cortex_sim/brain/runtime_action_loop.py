@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..direct_policy_capabilities import get_direct_policy_capabilities
+from ..local_ecology_observation import LocalEcologyObservationAdapter
 from .runtime_shared import *
 
 
@@ -174,24 +176,13 @@ class _BrainRuntimePart10Mixin:
                     b_temporal_threat_trace.get("b6_decision", "")
                 ).startswith("corridor_commitment")
             ):
-                transitions = bridge_meta.get("local_transition_consequences")
-                transitions = transitions if isinstance(transitions, dict) else {}
-                affordances = bridge_meta.get("local_affordances")
-                affordances = affordances if isinstance(affordances, dict) else {}
-                up_transition = transitions.get("MOVE_UP")
-                up_transition = up_transition if isinstance(up_transition, dict) else {}
-                right_transition = transitions.get("MOVE_RIGHT")
-                right_transition = (
-                    right_transition if isinstance(right_transition, dict) else {}
-                )
-                up_affordance = affordances.get("MOVE_UP")
-                up_affordance = up_affordance if isinstance(up_affordance, dict) else {}
-                right_affordance = affordances.get("MOVE_RIGHT")
-                right_affordance = (
-                    right_affordance if isinstance(right_affordance, dict) else {}
-                )
-                up_delta = self._b_series_float(up_transition, "food_dist_delta")
-                right_delta = self._b_series_float(right_transition, "food_dist_delta")
+                local_ecology = LocalEcologyObservationAdapter.from_meta(bridge_meta)
+                up_transition = local_ecology.transition_for("MOVE_UP")
+                right_transition = local_ecology.transition_for("MOVE_RIGHT")
+                up_affordance = local_ecology.affordance_for("MOVE_UP")
+                right_affordance = local_ecology.affordance_for("MOVE_RIGHT")
+                up_delta = up_transition.food_dist_delta
+                right_delta = right_transition.food_dist_delta
                 try:
                     food_dist = float(bridge_meta.get("food_dist", 0.0))
                 except (TypeError, ValueError):
@@ -199,9 +190,9 @@ class _BrainRuntimePart10Mixin:
                 if not np.isfinite(food_dist):
                     food_dist = 0.0
                 if (
-                    not bool(right_affordance.get("blocked", False))
+                    not right_affordance.blocked
                     and (
-                        bool(right_transition.get("next_cell_has_food", False))
+                        right_transition.next_cell_has_food
                         or (food_dist > 7.0 and right_delta >= 0.0)
                     )
                 ):
@@ -212,7 +203,7 @@ class _BrainRuntimePart10Mixin:
                         food_delta_used=float(right_delta),
                     )
                 elif (
-                    not bool(up_affordance.get("blocked", False))
+                    not up_affordance.blocked
                     and food_dist <= 7.0
                     and up_delta > 0.0
                 ):
@@ -316,7 +307,8 @@ class _BrainRuntimePart10Mixin:
             if self.true_monolithic_policy is None:
                 raise RuntimeError(
                     "True monolithic network unavailable for the configured architecture."
-            )
+                )
+            direct_policy_capabilities = get_direct_policy_capabilities(self)
             monolithic_observation = self._build_monolithic_observation(observation)
             if hasattr(self.true_monolithic_policy, "set_runtime_observation_meta"):
                 self.true_monolithic_policy.set_runtime_observation_meta(
@@ -333,9 +325,9 @@ class _BrainRuntimePart10Mixin:
             elif len(direct_forward) == 3:
                 policy_logits, value, aux_logits_raw = direct_forward
                 phase_logits_raw = (
-                    aux_logits_raw if self.config.direct_policy_phase_head else None
+                    aux_logits_raw if direct_policy_capabilities.heads.phase else None
                 )
-                if self.config.direct_policy_option_head:
+                if direct_policy_capabilities.network.option_head:
                     option_logits = np.asarray(aux_logits_raw, dtype=float).copy()
             else:
                 policy_logits, value = direct_forward

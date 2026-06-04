@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..local_ecology_observation import LocalEcologyObservationAdapter
 from .runtime_shared import *
 
 
@@ -534,33 +535,23 @@ class _BrainRuntimePart2Mixin:
 
         meta = observation.get("meta")
         meta = meta if isinstance(meta, dict) else {}
+        local_ecology = LocalEcologyObservationAdapter.from_meta(meta)
         map_template = str(meta.get("map_template", ""))
         sleep_obs = self._bound_observation("sleep_center", observation)
         health = self._b_series_float(sleep_obs, "health")
 
-        def _raw_float(mapping: dict[str, object], key: str, default: float = 0.0) -> float:
-            try:
-                value = float(mapping.get(key, default))
-            except (TypeError, ValueError):
-                return float(default)
-            return float(value) if np.isfinite(value) else float(default)
-
         def _unblocked_delta(action: str, field: str) -> float:
-            affordances = meta.get("local_affordances")
-            affordances = affordances if isinstance(affordances, dict) else {}
-            transitions = meta.get("local_transition_consequences")
-            transitions = transitions if isinstance(transitions, dict) else {}
-            action_affordance = affordances.get(action)
-            action_affordance = (
-                action_affordance if isinstance(action_affordance, dict) else {}
-            )
-            if bool(action_affordance.get("blocked", False)):
+            action_affordance = local_ecology.affordance_for(action)
+            if action_affordance.blocked:
                 return -1.0
-            action_transition = transitions.get(action)
-            action_transition = (
-                action_transition if isinstance(action_transition, dict) else {}
-            )
-            return _raw_float(action_transition, field, 0.0)
+            action_transition = local_ecology.transition_for(action)
+            if field == "food_dist_delta":
+                return action_transition.food_dist_delta
+            if field == "shelter_dist_delta":
+                return action_transition.shelter_dist_delta
+            if field == "predator_dist_delta":
+                return action_transition.predator_dist_delta
+            return 0.0
 
         food_deltas = [
             _unblocked_delta(action, "food_dist_delta")

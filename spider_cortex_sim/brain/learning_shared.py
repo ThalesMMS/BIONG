@@ -10,6 +10,7 @@ from ..direct_policy_affordances import (
     AFFORDANCE_SHELTER_POSITION_NAMES,
     AFFORDANCE_SHELTER_ROLE_NAMES,
 )
+from ..direct_policy_capabilities import get_direct_policy_capabilities
 from ..direct_policy_options import OPTION_NAMES, OPTION_TO_INDEX
 from ..b_series import B_SERIES_POLICY_NAME, B_SEMANTIC_ACTIONS
 from ..distillation.dataset import (

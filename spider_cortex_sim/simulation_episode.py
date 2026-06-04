@@ -3,6 +3,7 @@ from __future__ import annotations
 from .simulation_episode_shared import *
 from .simulation_episode_b_series_trace import append_b_series_trace_fields
 from .simulation_episode_debug_trace import build_debug_trace_payload
+from .direct_policy_capabilities import get_direct_policy_capabilities
 from .simulation_episode_teacher_targets import _SimulationEpisodeTeacherTargetsMixin
 from .simulation_episode_distillation_rollouts import _SimulationEpisodeDistillationRolloutsMixin
 from .simulation_episode_metrics_trace import _SimulationEpisodeMetricsTraceMixin
@@ -121,7 +122,8 @@ class SimulationEpisodeMixin(_SimulationEpisodeTeacherTargetsMixin, _SimulationE
                     sample=False,
                     policy_mode=policy_mode,
                 )
-            if self.brain.config.direct_policy_phase_head:
+            direct_policy_capabilities = get_direct_policy_capabilities(self.brain)
+            if direct_policy_capabilities.heads.phase:
                 phase_target = derive_phase_target(
                     state=self.world.state_dict(),
                     observation_meta=observation["meta"],
@@ -142,42 +144,42 @@ class SimulationEpisodeMixin(_SimulationEpisodeTeacherTargetsMixin, _SimulationE
                     },
                 )
             decision.scenario_name = normalized_scenario
-            if self.brain.config.direct_policy_affordance_head:
+            if direct_policy_capabilities.heads.affordance:
                 (
                     decision.affordance_blocked_targets,
                     decision.affordance_role_targets,
                 ) = self._direct_policy_affordance_targets(
                     current_state=current_state_snapshot,
                 )
-            if self.brain.config.direct_policy_geometry_head:
+            if direct_policy_capabilities.heads.geometry:
                 decision.geometry_targets = self._direct_policy_geometry_targets(
                     current_state=current_state_snapshot,
                 )
-            if self.brain.config.direct_policy_shelter_column_head:
+            if direct_policy_capabilities.heads.shelter_column:
                 decision.shelter_column_targets = (
                     self._direct_policy_shelter_column_targets(
                         current_state=current_state_snapshot,
                     )
                 )
-            if self.brain.config.direct_policy_shelter_position_head:
+            if direct_policy_capabilities.heads.shelter_position:
                 decision.shelter_position_targets = (
                     self._direct_policy_shelter_position_targets(
                         current_state=current_state_snapshot,
                     )
                 )
-            if self.brain.config.direct_policy_transition_prediction_head:
+            if direct_policy_capabilities.heads.transition_prediction:
                 decision.transition_prediction_targets = (
                     self._direct_policy_transition_prediction_targets(
                         observation_meta=observation["meta"],
                     )
                 )
-            if self.brain.config.direct_policy_transition_rollout_prediction_head:
+            if direct_policy_capabilities.heads.transition_rollout_prediction:
                 decision.transition_rollout_prediction_targets = (
                     self._direct_policy_transition_rollout_prediction_targets(
                         observation_meta=observation["meta"],
                     )
                 )
-            if self.brain.config.direct_policy_handoff_teacher:
+            if direct_policy_capabilities.teachers.handoff:
                 food_direction_action = self.brain._food_direction_bias_action(
                     brain_observation
                 )
@@ -195,7 +197,7 @@ class SimulationEpisodeMixin(_SimulationEpisodeTeacherTargetsMixin, _SimulationE
                     if teacher_action_target_idx < 0
                     else ACTIONS[int(teacher_action_target_idx)]
                 )
-                if self.brain.config.direct_policy_handoff_option_teacher:
+                if direct_policy_capabilities.teachers.handoff_option:
                     teacher_option_target_idx, teacher_option_target_stage = (
                         self._direct_policy_handoff_option_teacher_target(
                             current_state=current_state_snapshot,
