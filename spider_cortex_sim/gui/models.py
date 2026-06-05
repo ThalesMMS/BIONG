@@ -8,14 +8,18 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from ..ablations import resolve_ablation_configs
-from ..b_series import B_CURRENT_BRIDGE_EFFECTIVE_LEVEL
+from ..ablations import BrainAblationConfig, resolve_ablation_configs
 from ..b_series_legacy import LEGACY_B0_ACTIONS, LegacyB0Simulation
 from ..simulation import SpiderSimulation
 from ..world import ACTIONS
 
 
 EVOLUTION_SNAPSHOT_ROOT = Path("artifacts/gui_evolution_snapshots")
+DEFAULT_CHECKPOINT_SEARCH_ROOTS: tuple[Path, ...] = (
+    Path("spider_brain"),
+    Path("artifacts"),
+    Path("backups"),
+)
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,25 @@ class GUIRunConfig:
             "operational_profile": _simple_metadata_value(self.operational_profile),
             "noise_profile": _simple_metadata_value(self.noise_profile),
         }
+
+
+@dataclass(frozen=True)
+class GUICheckpointSpec:
+    path: Path
+    label: str
+    architecture: str
+    variant: str
+    b_level: int | None
+    b_mode: str | None
+    seed: int | None
+    architecture_fingerprint: str | None
+    total_parameters: int | None
+    modules: tuple[str, ...]
+    brain_config: BrainAblationConfig
+
+    @property
+    def model_id(self) -> str:
+        return f"checkpoint:{self.path}"
 
 
 GUI_MODEL_SPECS: tuple[GUIModelSpec, ...] = (
@@ -206,6 +229,61 @@ def build_runtime_adapter(
     return CurrentWorldRuntimeAdapter(sim=sim, spec=spec, run_config=run_config)
 
 
+def discover_gui_checkpoints(
+    search_roots: Sequence[Path] | None = None,
+) -> list[GUICheckpointSpec]:
+    roots = tuple(Path(root) for root in (search_roots or DEFAULT_CHECKPOINT_SEARCH_ROOTS))
+    specs: list[GUICheckpointSpec] = []
+    seen: set[Path] = set()
+    for metadata_path in _iter_checkpoint_metadata_paths(roots):
+        checkpoint_dir = metadata_path.parent
+        dedupe_key = checkpoint_dir.resolve()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        spec = _checkpoint_spec_from_metadata(checkpoint_dir)
+        if spec is not None:
+            specs.append(spec)
+    return sorted(specs, key=_checkpoint_sort_key)
+
+
+def build_runtime_adapter_for_checkpoint(
+    run_config: GUIRunConfig,
+    checkpoint_spec: GUICheckpointSpec,
+) -> "CurrentWorldRuntimeAdapter":
+    brain_config = checkpoint_spec.brain_config
+    sim = SpiderSimulation(
+        width=run_config.width,
+        height=run_config.height,
+        food_count=run_config.food_count,
+        day_length=run_config.day_length,
+        night_length=run_config.night_length,
+        max_steps=run_config.max_steps,
+        seed=run_config.seed,
+        gamma=run_config.gamma,
+        module_lr=run_config.module_lr,
+        motor_lr=run_config.motor_lr,
+        module_dropout=run_config.module_dropout,
+        capacity_profile=run_config.capacity_profile,
+        reward_profile=run_config.reward_profile,
+        map_template=run_config.map_template,
+        brain_config=brain_config,
+        operational_profile=run_config.operational_profile,
+        noise_profile=run_config.noise_profile,
+    )
+    spec = GUIModelSpec(
+        id=checkpoint_spec.model_id,
+        label=checkpoint_spec.label,
+        family="B" if brain_config.is_b_series else "checkpoint",
+        variant=checkpoint_spec.variant,
+        runtime_kind="current_world",
+        evolution_transfer_compatible=_config_transfer_compatible(brain_config),
+        description=f"Checkpoint loaded from {checkpoint_spec.path}",
+        ablation_variant=None,
+    )
+    return CurrentWorldRuntimeAdapter(sim=sim, spec=spec, run_config=run_config)
+
+
 def adapter_for_existing_simulation(
     sim: SpiderSimulation,
     *,
@@ -285,6 +363,15 @@ class CurrentWorldRuntimeAdapter(GUIRuntimeAdapter):
 
     def audit_fields(self, decision: Any | None) -> dict[str, object]:
         config = self.brain.config
+        b_effective_level = None
+        if config.is_b_series:
+            b_effective_level = (
+                getattr(decision, "b_effective_level", None)
+                if decision is not None
+                else None
+            )
+            if b_effective_level is None:
+                b_effective_level = f"B{int(config.b_level)}"
         fields: dict[str, object] = {
             "variant": config.name,
             "architecture": config.architecture,
@@ -294,19 +381,14 @@ class CurrentWorldRuntimeAdapter(GUIRuntimeAdapter):
             "runtime": self.spec.runtime_kind,
             "action_space": f"{len(ACTIONS)} primitive",
             "b_level": int(config.b_level) if config.is_b_series else None,
-            "b_effective_level": (
-                B_CURRENT_BRIDGE_EFFECTIVE_LEVEL
-                if config.is_b_series
-                and int(config.b_level) == 0
-                and str(config.b_mode) == "current_bridge"
-                else None
-            ),
+            "b_effective_level": b_effective_level,
             "b_mode": str(config.b_mode) if config.is_b_series else None,
             "seed": int(self.seed),
             "map": str(self.world.map_template_name),
             "reward_profile": str(self.world.reward_profile),
             "evolution_transfer_compatible": bool(
                 self.spec.evolution_transfer_compatible
+                or _config_transfer_compatible(config)
             ),
         }
         if decision is not None:
@@ -443,6 +525,119 @@ def _network_metadata(state: Mapping[str, object]) -> dict[str, object]:
         for key, value in state.items()
         if not isinstance(value, np.ndarray)
     }
+
+
+def _iter_checkpoint_metadata_paths(roots: Sequence[Path]) -> list[Path]:
+    candidates: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        if root.is_file():
+            if root.name == "metadata.json":
+                candidates.append(root)
+            continue
+        direct = root / "metadata.json"
+        if direct.exists():
+            candidates.append(direct)
+        candidates.extend(root.glob("**/best/metadata.json"))
+        candidates.extend(root.glob("**/last/metadata.json"))
+        if root.name == "artifacts":
+            candidates.extend(root.glob("gui_evolution_snapshots/**/metadata.json"))
+        elif root.name == "backups":
+            candidates.extend(root.glob("**/metadata.json"))
+    return candidates
+
+
+def _checkpoint_spec_from_metadata(checkpoint_dir: Path) -> GUICheckpointSpec | None:
+    metadata_path = checkpoint_dir / "metadata.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    config_summary = metadata.get("ablation_config")
+    if not isinstance(config_summary, dict):
+        return None
+    if not _checkpoint_has_expected_weights(checkpoint_dir, metadata):
+        return None
+    try:
+        brain_config = BrainAblationConfig.from_summary(config_summary)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if brain_config.is_b_series and str(brain_config.b_mode) == "legacy_semantic":
+        return None
+    modules = _checkpoint_module_names(metadata)
+    return GUICheckpointSpec(
+        path=checkpoint_dir,
+        label=_checkpoint_label(brain_config),
+        architecture=str(brain_config.architecture),
+        variant=str(brain_config.name),
+        b_level=int(brain_config.b_level) if brain_config.is_b_series else None,
+        b_mode=str(brain_config.b_mode) if brain_config.is_b_series else None,
+        seed=_checkpoint_seed(metadata, checkpoint_dir),
+        architecture_fingerprint=_optional_str(metadata.get("architecture_fingerprint")),
+        total_parameters=_optional_int(metadata.get("total_parameters")),
+        modules=modules,
+        brain_config=brain_config,
+    )
+
+
+def _checkpoint_has_expected_weights(
+    checkpoint_dir: Path,
+    metadata: Mapping[str, object],
+) -> bool:
+    modules = metadata.get("modules")
+    if isinstance(modules, dict) and modules:
+        return any((checkpoint_dir / f"{name}.npz").exists() for name in modules)
+    return any(checkpoint_dir.glob("*.npz"))
+
+
+def _checkpoint_module_names(metadata: Mapping[str, object]) -> tuple[str, ...]:
+    modules = metadata.get("modules")
+    if not isinstance(modules, dict):
+        return ()
+    return tuple(sorted(str(name) for name in modules))
+
+
+def _checkpoint_label(config: BrainAblationConfig) -> str:
+    if config.is_b_series:
+        return f"B{int(config.b_level)} {config.name}"
+    return str(config.name)
+
+
+def _checkpoint_seed(metadata: Mapping[str, object], checkpoint_dir: Path) -> int | None:
+    seed = _optional_int(metadata.get("seed"))
+    if seed is not None:
+        return seed
+    for part in reversed(checkpoint_dir.parts):
+        if part.startswith("seed_"):
+            return _optional_int(part.removeprefix("seed_"))
+    return None
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _checkpoint_sort_key(spec: GUICheckpointSpec) -> tuple[int, str, str]:
+    b_level = spec.b_level if spec.b_level is not None else -1
+    return (-b_level, spec.variant, str(spec.path))
+
+
+def _config_transfer_compatible(config: BrainAblationConfig) -> bool:
+    return bool(config.is_b_series and str(config.b_mode) == "current_bridge")
 
 
 def _simple_metadata_value(value: object) -> object:

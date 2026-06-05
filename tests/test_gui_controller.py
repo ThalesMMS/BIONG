@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -8,12 +9,146 @@ from spider_cortex_sim.b_series_legacy import LegacyB0Simulation
 from spider_cortex_sim.gui import SpiderGUI
 from spider_cortex_sim.gui.controller import GUIController
 from spider_cortex_sim.gui.constants import BOTTOM_BAR_HEIGHT, TOP_BAR_HEIGHT
-from spider_cortex_sim.gui.models import GUI_MODEL_SPECS_BY_ID, GUIRunConfig
+from spider_cortex_sim.gui.models import (
+    GUI_MODEL_SPECS_BY_ID,
+    GUIRunConfig,
+    build_runtime_adapter_for_checkpoint,
+    discover_gui_checkpoints,
+)
 from spider_cortex_sim.simulation import SpiderSimulation
 from spider_cortex_sim.world import ACTIONS
 
 
 class GUIControllerTest(unittest.TestCase):
+    def _write_minimal_checkpoint_metadata(
+        self,
+        directory: Path,
+        *,
+        name: str = "test_checkpoint",
+        architecture: str = "modular",
+    ) -> None:
+        directory.mkdir(parents=True)
+        (directory / "metadata.json").write_text(
+            json.dumps(
+                {
+                    "architecture_fingerprint": "fake-fingerprint",
+                    "ablation_config": {
+                        "name": name,
+                        "architecture": architecture,
+                    },
+                    "total_parameters": 3,
+                    "modules": {
+                        "visual_cortex": {
+                            "type": "proposal",
+                        }
+                    },
+                }
+            )
+        )
+        (directory / "visual_cortex.npz").write_bytes(b"not-a-real-npz")
+
+    def test_discover_gui_checkpoints_reads_metadata_and_ignores_incomplete_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            valid = root / "runs" / "candidate" / "best"
+            self._write_minimal_checkpoint_metadata(valid, name="candidate_a")
+            invalid = root / "runs" / "missing_weights" / "best"
+            invalid.mkdir(parents=True)
+            (invalid / "metadata.json").write_text(
+                json.dumps({"ablation_config": {"name": "missing_weights"}})
+            )
+
+            specs = discover_gui_checkpoints([root])
+
+        self.assertEqual([spec.variant for spec in specs], ["candidate_a"])
+        self.assertEqual(specs[0].path, valid)
+        self.assertEqual(specs[0].architecture, "modular")
+        self.assertEqual(specs[0].total_parameters, 3)
+
+    def test_build_runtime_adapter_for_checkpoint_reconstructs_b78_config(self) -> None:
+        checkpoint = Path(
+            "artifacts/b_series/evolution/"
+            "b78_vestibular_balance_h48_bridge_policy/seed_7/best"
+        )
+        specs = discover_gui_checkpoints([checkpoint])
+
+        runtime = build_runtime_adapter_for_checkpoint(
+            GUIRunConfig(width=5, height=5, food_count=1, max_steps=2, seed=7),
+            specs[0],
+        )
+
+        self.assertEqual(runtime.brain.config.name, "b78_vestibular_balance_h48_bridge_policy")
+        self.assertEqual(runtime.brain.config.architecture, "b_series")
+        self.assertEqual(runtime.brain.config.b_level, 78)
+        self.assertEqual(runtime.brain.load(checkpoint), ["b_series_policy"])
+
+    def test_load_selected_checkpoint_evaluate_mode_does_not_learn(self) -> None:
+        checkpoint = Path(
+            "artifacts/b_series/evolution/"
+            "b78_vestibular_balance_h48_bridge_policy/seed_7/best"
+        )
+        controller = GUIController(
+            run_config=GUIRunConfig(width=5, height=5, food_count=1, max_steps=2, seed=7)
+        )
+        controller.available_checkpoint_specs = discover_gui_checkpoints([checkpoint])
+        controller.selected_checkpoint_index = 0
+        controller.configure_run(train_episodes=1, eval_episodes=1)
+
+        self.assertTrue(controller.load_selected_checkpoint(mode="evaluate"))
+        seen_learn_calls: list[bool] = []
+        controller.brain.learn = lambda *args, **kwargs: seen_learn_calls.append(True)
+
+        controller._do_step()
+
+        self.assertEqual(controller.brain.config.b_level, 78)
+        self.assertEqual(controller.phase, "evaluation")
+        self.assertEqual(seen_learn_calls, [])
+
+    def test_load_selected_checkpoint_train_mode_preserves_learning_flow(self) -> None:
+        checkpoint = Path(
+            "artifacts/b_series/evolution/"
+            "b78_vestibular_balance_h48_bridge_policy/seed_7/best"
+        )
+        controller = GUIController(
+            run_config=GUIRunConfig(width=5, height=5, food_count=1, max_steps=2, seed=7)
+        )
+        controller.available_checkpoint_specs = discover_gui_checkpoints([checkpoint])
+        controller.selected_checkpoint_index = 0
+        controller.configure_run(train_episodes=1, eval_episodes=1)
+
+        self.assertTrue(controller.load_selected_checkpoint(mode="train"))
+        seen_learn_calls: list[bool] = []
+        controller.brain.learn = lambda *args, **kwargs: seen_learn_calls.append(True)
+
+        controller._do_step()
+
+        self.assertEqual(controller.brain.config.b_level, 78)
+        self.assertEqual(controller.phase, "training")
+        self.assertEqual(seen_learn_calls, [True])
+
+    def test_load_selected_checkpoint_reports_incompatible_load_without_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint = root / "bad" / "best"
+            self._write_minimal_checkpoint_metadata(
+                checkpoint,
+                name="bad_true_monolithic",
+                architecture="true_monolithic",
+            )
+
+            controller = GUIController(
+                run_config=GUIRunConfig(width=5, height=5, food_count=1, max_steps=2, seed=7)
+            )
+            original_brain = controller.brain
+            controller.available_checkpoint_specs = discover_gui_checkpoints([checkpoint])
+            controller.selected_checkpoint_index = 0
+
+            self.assertFalse(controller.load_selected_checkpoint(mode="evaluate"))
+
+        self.assertIs(controller.brain, original_brain)
+        self.assertTrue(controller.toast_is_error)
+        self.assertIn("Load error", controller.toast_text)
+
     def test_gui_model_registry_exposes_a0_and_b0_variants(self) -> None:
         self.assertIn("a0_true_monolithic", GUI_MODEL_SPECS_BY_ID)
         self.assertIn("a0_owned_option", GUI_MODEL_SPECS_BY_ID)

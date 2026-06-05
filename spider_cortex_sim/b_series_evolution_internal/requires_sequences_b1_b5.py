@@ -18,6 +18,22 @@ from .checkpoint_paths import (
     b59_prefrontal_goal_context_checkpoint_path,
     b60_orbitofrontal_outcome_value_checkpoint_path,
     b61_amygdala_safety_value_checkpoint_path,
+    b62_defensive_mode_selector_checkpoint_path,
+    b63_periaqueductal_escape_checkpoint_path,
+    b64_vagal_recovery_checkpoint_path,
+    b65_enteric_assimilation_checkpoint_path,
+    b66_immune_malaise_checkpoint_path,
+    b67_glial_energy_checkpoint_path,
+    b68_motor_pacing_checkpoint_path,
+    b69_vestibular_orientation_checkpoint_path,
+    b70_optic_flow_checkpoint_path,
+    b71_tectal_orienting_checkpoint_path,
+    b72_pulvinar_attention_checkpoint_path,
+    b73_reticular_inhibition_checkpoint_path,
+    b74_thalamic_rebound_checkpoint_path,
+    b75_basal_thalamic_release_checkpoint_path,
+    b76_cerebellar_stride_checkpoint_path,
+    b77_olivary_error_checkpoint_path,
 )
 
 from .config_builders import (
@@ -323,6 +339,326 @@ def require_b61_amygdala_safety_value_checkpoint(
     return {
         "status": "existing",
         "variant": B61_AMYGDALA_SAFETY_VALUE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b62_defensive_mode_selector_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b62_defensive_mode_selector_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B63 requires the accepted B62 checkpoint at "
+            f"{checkpoint}. Run B62 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B62_DEFENSIVE_MODE_SELECTOR_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b63_periaqueductal_escape_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b63_periaqueductal_escape_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B64 requires the accepted B63 checkpoint at "
+            f"{checkpoint}. Run B63 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B63_PERIAQUEDUCTAL_ESCAPE_SEQUENCE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b64_vagal_recovery_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b64_vagal_recovery_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B65 requires the accepted B64 checkpoint at "
+            f"{checkpoint}. Run B64 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B64_VAGAL_RECOVERY_BRAKE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b65_enteric_assimilation_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b65_enteric_assimilation_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B66 requires the accepted B65 checkpoint at "
+            f"{checkpoint}. Run B65 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B65_ENTERIC_ASSIMILATION_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b66_immune_malaise_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b66_immune_malaise_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B67 requires the accepted B66 checkpoint at "
+            f"{checkpoint}. Run B66 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B66_IMMUNE_MALAISE_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b67_glial_energy_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b67_glial_energy_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B68 requires the accepted B67 checkpoint at "
+            f"{checkpoint}. Run B67 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B67_GLIAL_ENERGY_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b68_motor_pacing_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b68_motor_pacing_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B69 requires the accepted B68 checkpoint at "
+            f"{checkpoint}. Run B68 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B68_PROPRIOCEPTIVE_PACING_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b69_vestibular_orientation_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b69_vestibular_orientation_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B70 requires the accepted B69 checkpoint at "
+            f"{checkpoint}. Run B69 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B69_VESTIBULAR_ORIENTATION_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b70_optic_flow_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b70_optic_flow_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B71 requires the accepted B70 checkpoint at "
+            f"{checkpoint}. Run B70 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B70_OPTIC_FLOW_STABILIZATION_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b71_tectal_orienting_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b71_tectal_orienting_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B72 requires the accepted B71 checkpoint at "
+            f"{checkpoint}. Run B71 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B71_TECTAL_ORIENTING_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b72_pulvinar_attention_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b72_pulvinar_attention_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B73 requires the accepted B72 checkpoint at "
+            f"{checkpoint}. Run B72 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B72_PULVINAR_ATTENTION_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b73_reticular_inhibition_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b73_reticular_inhibition_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B74 requires the accepted B73 checkpoint at "
+            f"{checkpoint}. Run B73 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B73_RETICULAR_INHIBITION_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b74_thalamic_rebound_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b74_thalamic_rebound_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B75 requires the accepted B74 checkpoint at "
+            f"{checkpoint}. Run B74 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B74_THALAMIC_REBOUND_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b75_basal_thalamic_release_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b75_basal_thalamic_release_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B76 requires the accepted B75 checkpoint at "
+            f"{checkpoint}. Run B75 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B75_BASAL_THALAMIC_RELEASE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b76_cerebellar_stride_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b76_cerebellar_stride_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B77 requires the accepted B76 checkpoint at "
+            f"{checkpoint}. Run B76 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B76_CEREBELLAR_STRIDE_GATE_H48_POLICY_NAME,
+        "checkpoint": str(checkpoint),
+    }
+
+
+def require_b77_olivary_error_checkpoint(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> dict[str, object]:
+    checkpoint = b77_olivary_error_checkpoint_path(root=root, seed=seed)
+    weights_path = checkpoint / "b_series_policy.npz"
+    metadata_path = checkpoint / "metadata.json"
+    if not weights_path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            "B78 requires the accepted B77 checkpoint at "
+            f"{checkpoint}. Run B77 evolution first."
+        )
+    return {
+        "status": "existing",
+        "variant": B77_OLIVARY_ERROR_CORRECTION_H48_POLICY_NAME,
         "checkpoint": str(checkpoint),
     }
 

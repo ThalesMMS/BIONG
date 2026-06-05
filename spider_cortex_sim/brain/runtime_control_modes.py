@@ -1261,6 +1261,294 @@ class _BrainRuntimePart9Mixin:
                 learned_semantic_action=learned_semantic_action,
             )
             b_effective_level = B62_DEFENSIVE_MODE_SELECTOR_EFFECTIVE_LEVEL
+        elif b_level == 63 and str(getattr(self.config, "name", "")) in {
+            B63_PERIAQUEDUCTAL_ESCAPE_SEQUENCE_H48_POLICY_NAME,
+            B63_FREEZE_RELEASE_ESCAPE_H48_POLICY_NAME,
+            B63_SHELTER_VECTOR_SEQUENCE_H48_POLICY_NAME,
+            B63_PERIAQUEDUCTAL_ESCAPE_SEQUENCE_H56_POLICY_NAME,
+            B63_GENETIC_ESCAPE_SEQUENCE_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b63_periaqueductal_escape_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B63_PERIAQUEDUCTAL_ESCAPE_EFFECTIVE_LEVEL
+        elif b_level == 64 and str(getattr(self.config, "name", "")) in {
+            B64_VAGAL_RECOVERY_BRAKE_H48_POLICY_NAME,
+            B64_POST_ESCAPE_REST_GATE_H48_POLICY_NAME,
+            B64_SHELTER_RECOVERY_COUPLING_H48_POLICY_NAME,
+            B64_VAGAL_RECOVERY_BRAKE_H56_POLICY_NAME,
+            B64_GENETIC_RECOVERY_BRAKE_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b64_vagal_recovery_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B64_VAGAL_RECOVERY_BRAKE_EFFECTIVE_LEVEL
+        elif b_level == 65 and str(getattr(self.config, "name", "")) in {
+            B65_ENTERIC_ASSIMILATION_GATE_H48_POLICY_NAME,
+            B65_POST_RECOVERY_FORAGE_RELEASE_H48_POLICY_NAME,
+            B65_SHELTER_DIGESTIVE_COUPLING_H48_POLICY_NAME,
+            B65_ENTERIC_ASSIMILATION_GATE_H56_POLICY_NAME,
+            B65_GENETIC_ENTERIC_ASSIMILATION_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b65_enteric_assimilation_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B65_ENTERIC_ASSIMILATION_EFFECTIVE_LEVEL
+        elif b_level == 66 and str(getattr(self.config, "name", "")) in {
+            B66_IMMUNE_MALAISE_GATE_H48_POLICY_NAME,
+            B66_INFLAMMATORY_RECOVERY_HOLD_H48_POLICY_NAME,
+            B66_DAMAGE_AWARE_FORAGE_RELEASE_H48_POLICY_NAME,
+            B66_IMMUNE_MALAISE_GATE_H56_POLICY_NAME,
+            B66_GENETIC_IMMUNE_MALAISE_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b66_immune_malaise_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B66_IMMUNE_MALAISE_EFFECTIVE_LEVEL
+        elif b_level == 67 and str(getattr(self.config, "name", "")) in {
+            B67_GLIAL_ENERGY_GATE_H48_POLICY_NAME,
+            B67_LACTATE_RECOVERY_SUPPORT_H48_POLICY_NAME,
+            B67_FATIGUE_AWARE_RELEASE_H48_POLICY_NAME,
+            B67_GLIAL_ENERGY_GATE_H56_POLICY_NAME,
+            B67_GENETIC_GLIAL_ENERGY_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b67_glial_energy_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B67_GLIAL_ENERGY_EFFECTIVE_LEVEL
+        elif b_level == 68 and str(getattr(self.config, "name", "")) in {
+            B68_PROPRIOCEPTIVE_PACING_GATE_H48_POLICY_NAME,
+            B68_STRIDE_RECOVERY_PACING_H48_POLICY_NAME,
+            B68_OVEREXERTION_AWARE_RELEASE_H48_POLICY_NAME,
+            B68_PROPRIOCEPTIVE_PACING_GATE_H56_POLICY_NAME,
+            B68_GENETIC_MOTOR_PACING_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b68_motor_pacing_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B68_MOTOR_PACING_EFFECTIVE_LEVEL
+        elif b_level == 69 and str(getattr(self.config, "name", "")) in {
+            B69_VESTIBULAR_ORIENTATION_GATE_H48_POLICY_NAME,
+            B69_HEADING_STABILITY_PACING_H48_POLICY_NAME,
+            B69_TURN_ERROR_RECOVERY_H48_POLICY_NAME,
+            B69_VESTIBULAR_ORIENTATION_GATE_H56_POLICY_NAME,
+            B69_GENETIC_ORIENTATION_GATE_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b69_vestibular_orientation_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B69_VESTIBULAR_ORIENTATION_EFFECTIVE_LEVEL
+        elif b_level == 70 and str(getattr(self.config, "name", "")) in {
+            B70_OPTIC_FLOW_STABILIZATION_GATE_H48_POLICY_NAME,
+            B70_LATERAL_FLOW_PACING_H48_POLICY_NAME,
+            B70_LOOMING_RISK_RECOVERY_H48_POLICY_NAME,
+            B70_OPTIC_FLOW_STABILIZATION_GATE_H56_POLICY_NAME,
+            B70_GENETIC_OPTIC_FLOW_GATE_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b70_optic_flow_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B70_OPTIC_FLOW_EFFECTIVE_LEVEL
+        elif b_level == 71 and str(getattr(self.config, "name", "")) in {
+            B71_TECTAL_ORIENTING_GATE_H48_POLICY_NAME,
+            B71_SALIENCE_MAP_PACING_H48_POLICY_NAME,
+            B71_COLLISION_VETO_RECOVERY_H48_POLICY_NAME,
+            B71_TECTAL_ORIENTING_GATE_H56_POLICY_NAME,
+            B71_GENETIC_TECTAL_ORIENTING_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b71_tectal_orienting_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B71_TECTAL_ORIENTING_EFFECTIVE_LEVEL
+        elif b_level == 72 and str(getattr(self.config, "name", "")) in {
+            B72_PULVINAR_ATTENTION_GATE_H48_POLICY_NAME,
+            B72_DISTRACTOR_FILTER_PACING_H48_POLICY_NAME,
+            B72_FOCUS_LOCK_RECOVERY_H48_POLICY_NAME,
+            B72_PULVINAR_ATTENTION_GATE_H56_POLICY_NAME,
+            B72_GENETIC_PULVINAR_ATTENTION_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b72_pulvinar_attention_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B72_PULVINAR_ATTENTION_EFFECTIVE_LEVEL
+        elif b_level == 73 and str(getattr(self.config, "name", "")) in {
+            B73_RETICULAR_INHIBITION_GATE_H48_POLICY_NAME,
+            B73_SURROUND_SUPPRESSION_PACING_H48_POLICY_NAME,
+            B73_FOCUS_RELEASE_RECOVERY_H48_POLICY_NAME,
+            B73_RETICULAR_INHIBITION_GATE_H56_POLICY_NAME,
+            B73_GENETIC_RETICULAR_INHIBITION_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b73_reticular_inhibition_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B73_RETICULAR_INHIBITION_EFFECTIVE_LEVEL
+        elif b_level == 74 and str(getattr(self.config, "name", "")) in {
+            B74_THALAMIC_REBOUND_GATE_H48_POLICY_NAME,
+            B74_REBOUND_RELEASE_PACING_H48_POLICY_NAME,
+            B74_POST_INHIBITION_RECOVERY_H48_POLICY_NAME,
+            B74_THALAMIC_REBOUND_GATE_H56_POLICY_NAME,
+            B74_GENETIC_THALAMIC_REBOUND_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b74_thalamic_rebound_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B74_THALAMIC_REBOUND_EFFECTIVE_LEVEL
+        elif b_level == 75 and str(getattr(self.config, "name", "")) in {
+            B75_BASAL_THALAMIC_RELEASE_H48_POLICY_NAME,
+            B75_RELEASE_BURST_PACING_H48_POLICY_NAME,
+            B75_GO_NOGO_REBOUND_TIMING_H48_POLICY_NAME,
+            B75_BASAL_THALAMIC_RELEASE_H56_POLICY_NAME,
+            B75_GENETIC_BASAL_THALAMIC_RELEASE_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b75_basal_thalamic_release_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B75_BASAL_THALAMIC_RELEASE_EFFECTIVE_LEVEL
+        elif b_level == 76 and str(getattr(self.config, "name", "")) in {
+            B76_CEREBELLAR_STRIDE_GATE_H48_POLICY_NAME,
+            B76_STRIDE_ERROR_PACING_H48_POLICY_NAME,
+            B76_BURST_SMOOTHING_RECOVERY_H48_POLICY_NAME,
+            B76_CEREBELLAR_STRIDE_GATE_H56_POLICY_NAME,
+            B76_GENETIC_CEREBELLAR_STRIDE_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b76_cerebellar_stride_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B76_CEREBELLAR_STRIDE_EFFECTIVE_LEVEL
+        elif b_level == 77 and str(getattr(self.config, "name", "")) in {
+            B77_OLIVARY_ERROR_CORRECTION_H48_POLICY_NAME,
+            B77_ERROR_PREDICTION_PACING_H48_POLICY_NAME,
+            B77_CLIMBING_FIBER_RECOVERY_H48_POLICY_NAME,
+            B77_OLIVARY_ERROR_CORRECTION_H56_POLICY_NAME,
+            B77_GENETIC_OLIVARY_ERROR_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b77_olivary_error_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B77_OLIVARY_ERROR_EFFECTIVE_LEVEL
+        elif b_level == 78 and str(getattr(self.config, "name", "")) in {
+            B78_VESTIBULAR_BALANCE_H48_POLICY_NAME,
+            B78_HEAD_STABILIZATION_H48_POLICY_NAME,
+            B78_LOCOMOTOR_CONFIDENCE_H48_POLICY_NAME,
+            B78_VESTIBULAR_BALANCE_H56_POLICY_NAME,
+            B78_GENETIC_VESTIBULAR_BALANCE_H48_POLICY_NAME,
+        }:
+            (
+                semantic_action,
+                semantic_action_source,
+                semantic_action_reason,
+                semantic_override_count,
+                b_temporal_threat_trace,
+            ) = self._b78_vestibular_balance_semantic_action(
+                observation,
+                learned_semantic_action=learned_semantic_action,
+            )
+            b_effective_level = B78_VESTIBULAR_BALANCE_EFFECTIVE_LEVEL
         return (
             semantic_action,
             semantic_action_source,

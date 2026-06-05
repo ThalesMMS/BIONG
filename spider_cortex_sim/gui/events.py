@@ -72,6 +72,16 @@ class EventHandler:
                     clicked_sidebar = True
                     if button_id.startswith("model:"):
                         self.controller.apply_model(button_id.split(":", 1)[1])
+                    elif button_id.startswith("checkpoint:"):
+                        self.controller.select_checkpoint(
+                            int(button_id.split(":", 1)[1])
+                        )
+                    elif button_id.startswith("checkpoint_mode:"):
+                        self.controller.set_checkpoint_load_mode(
+                            button_id.split(":", 1)[1]
+                        )
+                    elif button_id == "checkpoint_refresh":
+                        self.controller.refresh_checkpoints()
                     elif button_id == "evolution:save":
                         self.controller.save_evolution_snapshot()
                     break

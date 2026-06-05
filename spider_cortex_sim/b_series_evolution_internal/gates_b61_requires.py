@@ -334,6 +334,511 @@ def b62_defensive_mode_corridor_gate_result(
     }
 
 
+def b63_periaqueductal_escape_corridor_gate_result(
+    results: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    base_gate = b62_defensive_mode_corridor_gate_result(results)
+    explicit_decision_set = set(B63_CORRIDOR_EXPLICIT_DECISIONS)
+    failures: list[str] = []
+    episode_results = []
+    explicit_decision_episodes = 0
+    escape_phase_episodes = 0
+    escape_pressure_episodes = 0
+    shelter_vector_episodes = 0
+    freeze_release_episodes = 0
+    lock_or_safe_episodes = 0
+    corridor_safety_episodes = 0
+    for result in results:
+        episode = int(result["evaluation_episode"])
+        trace = result["trace"]
+        metrics = result.get("metrics", {})
+        primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
+        predator_contacts = int(
+            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
+        )
+        decisions = [
+            str(item.get("b63_decision"))
+            for item in trace
+            if item.get("b63_decision") is not None
+        ]
+        phases = [
+            str(item.get("b63_escape_phase"))
+            for item in trace
+            if item.get("b63_escape_phase") is not None
+        ]
+        urgency_values = [
+            float(item.get("b63_escape_urgency", 0.0) or 0.0)
+            for item in trace
+            if item.get("b63_escape_urgency") is not None
+        ]
+        sequence_values = [
+            float(item.get("b63_sequence_pressure", 0.0) or 0.0)
+            for item in trace
+            if item.get("b63_sequence_pressure") is not None
+        ]
+        shelter_values = [
+            float(item.get("b63_shelter_vector_gain", 0.0) or 0.0)
+            for item in trace
+            if item.get("b63_shelter_vector_gain") is not None
+        ]
+        release_values = [
+            float(item.get("b63_freeze_release", 0.0) or 0.0)
+            for item in trace
+            if item.get("b63_freeze_release") is not None
+        ]
+        locks = [
+            int(item.get("b63_escape_lock", 0) or 0)
+            for item in trace
+            if item.get("b63_escape_lock") is not None
+        ]
+        explicit_decision = any(decision in explicit_decision_set for decision in decisions)
+        escape_phase = any(phase not in {"", "None", "preserve"} for phase in phases)
+        escape_pressure = any(abs(value) > 0.0 for value in urgency_values + sequence_values)
+        shelter_vector = any(abs(value) > 0.0 for value in shelter_values)
+        freeze_release = any(abs(value) > 0.0 for value in release_values)
+        lock_or_safe = any(lock > 0 for lock in locks) or "pag_safe_advance" in decisions
+        corridor_safety = primitive_ok and predator_contacts == 0
+        if explicit_decision:
+            explicit_decision_episodes += 1
+        if escape_phase:
+            escape_phase_episodes += 1
+        if escape_pressure:
+            escape_pressure_episodes += 1
+        if shelter_vector:
+            shelter_vector_episodes += 1
+        if freeze_release:
+            freeze_release_episodes += 1
+        if lock_or_safe:
+            lock_or_safe_episodes += 1
+        if corridor_safety:
+            corridor_safety_episodes += 1
+        episode_results.append(
+            {
+                "evaluation_episode": episode,
+                "checks": {
+                    "explicit_b63_decision": bool(explicit_decision),
+                    "escape_phase": bool(escape_phase),
+                    "escape_pressure": bool(escape_pressure),
+                    "shelter_vector": bool(shelter_vector),
+                    "freeze_release": bool(freeze_release),
+                    "lock_or_safe_commit": bool(lock_or_safe),
+                    "corridor_safety": bool(corridor_safety),
+                },
+                "decisions": decisions,
+                "escape_phases": phases,
+                "escape_urgencies": urgency_values,
+                "sequence_pressures": sequence_values,
+                "shelter_vectors": shelter_values,
+                "freeze_releases": release_values,
+                "escape_locks": locks,
+                "predator_contacts": predator_contacts,
+                "primitive_violations": primitive_violations,
+            }
+        )
+    aggregate_checks = {
+        "base_b62_corridor_diagnostic": bool(base_gate["passed"]),
+        "corridor_safety_episodes": corridor_safety_episodes == len(results),
+        "explicit_b63_decision_episodes": explicit_decision_episodes >= 2,
+        "escape_phase_episodes": escape_phase_episodes >= 2,
+        "escape_pressure_episodes": escape_pressure_episodes >= 2,
+        "shelter_vector_episodes": shelter_vector_episodes >= 2,
+        "lock_or_safe_episodes": lock_or_safe_episodes >= 2,
+    }
+    failures.extend(
+        "corridor_b63_aggregate:" + name
+        for name, ok in aggregate_checks.items()
+        if not ok
+    )
+    passed = not failures
+    return {
+        "scenario": B6_CORRIDOR_SCENARIO,
+        "status": "accepted" if passed else "discarded",
+        "passed": passed,
+        "base_gate": base_gate,
+        "aggregate": {
+            "base_b62_corridor_diagnostic": bool(base_gate["passed"]),
+            "corridor_safety_episodes": int(corridor_safety_episodes),
+            "explicit_decision_episodes": int(explicit_decision_episodes),
+            "escape_phase_episodes": int(escape_phase_episodes),
+            "escape_pressure_episodes": int(escape_pressure_episodes),
+            "shelter_vector_episodes": int(shelter_vector_episodes),
+            "freeze_release_episodes": int(freeze_release_episodes),
+            "lock_or_safe_episodes": int(lock_or_safe_episodes),
+            "checks": aggregate_checks,
+        },
+        "failures": failures,
+        "episode_results": episode_results,
+    }
+
+
+def b64_vagal_recovery_corridor_gate_result(
+    results: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    base_gate = b63_periaqueductal_escape_corridor_gate_result(results)
+    explicit_decision_set = set(B64_CORRIDOR_EXPLICIT_DECISIONS)
+    failures: list[str] = []
+    episode_results = []
+    explicit_decision_episodes = 0
+    recovery_tone_episodes = 0
+    vagal_brake_episodes = 0
+    post_escape_bias_episodes = 0
+    lock_or_hold_episodes = 0
+    corridor_safety_episodes = 0
+    for result in results:
+        episode = int(result["evaluation_episode"])
+        trace = result["trace"]
+        metrics = result.get("metrics", {})
+        primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
+        predator_contacts = int(
+            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
+        )
+        decisions = [
+            str(item.get("b64_decision"))
+            for item in trace
+            if item.get("b64_decision") is not None
+        ]
+        recovery_tones = [
+            float(item.get("b64_recovery_tone", 0.0) or 0.0)
+            for item in trace
+            if item.get("b64_recovery_tone") is not None
+        ]
+        vagal_brakes = [
+            float(item.get("b64_vagal_brake", 0.0) or 0.0)
+            for item in trace
+            if item.get("b64_vagal_brake") is not None
+        ]
+        post_escape_biases = [
+            float(item.get("b64_post_escape_bias", 0.0) or 0.0)
+            for item in trace
+            if item.get("b64_post_escape_bias") is not None
+        ]
+        locks = [
+            int(item.get("b64_recovery_lock", 0) or 0)
+            for item in trace
+            if item.get("b64_recovery_lock") is not None
+        ]
+        explicit_decision = any(decision in explicit_decision_set for decision in decisions)
+        recovery_tone = any(abs(value) > 0.0 for value in recovery_tones)
+        vagal_brake = any(abs(value) > 0.0 for value in vagal_brakes)
+        post_escape_bias = any(abs(value) > 0.0 for value in post_escape_biases)
+        lock_or_hold = any(lock > 0 for lock in locks) or any(
+            decision in {"vagal_recovery_hold", "continue_recovery_brake"}
+            for decision in decisions
+        )
+        corridor_safety = primitive_ok and predator_contacts == 0
+        if explicit_decision:
+            explicit_decision_episodes += 1
+        if recovery_tone:
+            recovery_tone_episodes += 1
+        if vagal_brake:
+            vagal_brake_episodes += 1
+        if post_escape_bias:
+            post_escape_bias_episodes += 1
+        if lock_or_hold:
+            lock_or_hold_episodes += 1
+        if corridor_safety:
+            corridor_safety_episodes += 1
+        episode_results.append(
+            {
+                "evaluation_episode": episode,
+                "checks": {
+                    "explicit_b64_decision": bool(explicit_decision),
+                    "recovery_tone": bool(recovery_tone),
+                    "vagal_brake": bool(vagal_brake),
+                    "post_escape_bias": bool(post_escape_bias),
+                    "lock_or_hold": bool(lock_or_hold),
+                    "corridor_safety": bool(corridor_safety),
+                },
+                "decisions": decisions,
+                "recovery_tones": recovery_tones,
+                "vagal_brakes": vagal_brakes,
+                "post_escape_biases": post_escape_biases,
+                "recovery_locks": locks,
+                "predator_contacts": predator_contacts,
+                "primitive_violations": primitive_violations,
+            }
+        )
+    aggregate_checks = {
+        "base_b63_corridor_diagnostic": bool(base_gate["passed"]),
+        "corridor_safety_episodes": corridor_safety_episodes == len(results),
+        "explicit_b64_decision_episodes": explicit_decision_episodes >= 2,
+        "recovery_tone_episodes": recovery_tone_episodes >= 2,
+        "vagal_brake_episodes": vagal_brake_episodes >= 2,
+        "post_escape_bias_episodes": post_escape_bias_episodes >= 2,
+        "lock_or_hold_episodes": lock_or_hold_episodes >= 2,
+    }
+    failures.extend(
+        "corridor_b64_aggregate:" + name
+        for name, ok in aggregate_checks.items()
+        if not ok
+    )
+    passed = not failures
+    return {
+        "scenario": B6_CORRIDOR_SCENARIO,
+        "status": "accepted" if passed else "discarded",
+        "passed": passed,
+        "base_gate": base_gate,
+        "aggregate": {
+            "base_b63_corridor_diagnostic": bool(base_gate["passed"]),
+            "corridor_safety_episodes": int(corridor_safety_episodes),
+            "explicit_decision_episodes": int(explicit_decision_episodes),
+            "recovery_tone_episodes": int(recovery_tone_episodes),
+            "vagal_brake_episodes": int(vagal_brake_episodes),
+            "post_escape_bias_episodes": int(post_escape_bias_episodes),
+            "lock_or_hold_episodes": int(lock_or_hold_episodes),
+            "checks": aggregate_checks,
+        },
+        "failures": failures,
+        "episode_results": episode_results,
+    }
+
+
+def b65_enteric_assimilation_corridor_gate_result(
+    results: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    base_gate = b64_vagal_recovery_corridor_gate_result(results)
+    explicit_decision_set = set(B65_CORRIDOR_EXPLICIT_DECISIONS)
+    failures: list[str] = []
+    episode_results = []
+    explicit_decision_episodes = 0
+    enteric_tone_episodes = 0
+    assimilation_drive_episodes = 0
+    forage_readiness_episodes = 0
+    lock_or_release_episodes = 0
+    corridor_safety_episodes = 0
+    for result in results:
+        episode = int(result["evaluation_episode"])
+        trace = result["trace"]
+        metrics = result.get("metrics", {})
+        primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
+        predator_contacts = int(
+            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
+        )
+        decisions = [
+            str(item.get("b65_decision"))
+            for item in trace
+            if item.get("b65_decision") is not None
+        ]
+        enteric_tones = [
+            float(item.get("b65_enteric_tone", 0.0) or 0.0)
+            for item in trace
+            if item.get("b65_enteric_tone") is not None
+        ]
+        assimilation_drives = [
+            float(item.get("b65_assimilation_drive", 0.0) or 0.0)
+            for item in trace
+            if item.get("b65_assimilation_drive") is not None
+        ]
+        forage_readinesses = [
+            float(item.get("b65_forage_readiness", 0.0) or 0.0)
+            for item in trace
+            if item.get("b65_forage_readiness") is not None
+        ]
+        locks = [
+            int(item.get("b65_digestive_lock", 0) or 0)
+            for item in trace
+            if item.get("b65_digestive_lock") is not None
+        ]
+        explicit_decision = any(decision in explicit_decision_set for decision in decisions)
+        enteric_tone = any(abs(value) > 0.0 for value in enteric_tones)
+        assimilation_drive = any(abs(value) > 0.0 for value in assimilation_drives)
+        forage_readiness = any(abs(value) > 0.0 for value in forage_readinesses)
+        lock_or_release = any(lock > 0 for lock in locks) or any(
+            decision
+            in {"enteric_digestive_hold", "continue_digestive_lock", "enteric_safe_release"}
+            for decision in decisions
+        )
+        corridor_safety = primitive_ok and predator_contacts == 0
+        if explicit_decision:
+            explicit_decision_episodes += 1
+        if enteric_tone:
+            enteric_tone_episodes += 1
+        if assimilation_drive:
+            assimilation_drive_episodes += 1
+        if forage_readiness:
+            forage_readiness_episodes += 1
+        if lock_or_release:
+            lock_or_release_episodes += 1
+        if corridor_safety:
+            corridor_safety_episodes += 1
+        episode_results.append(
+            {
+                "evaluation_episode": episode,
+                "checks": {
+                    "explicit_b65_decision": bool(explicit_decision),
+                    "enteric_tone": bool(enteric_tone),
+                    "assimilation_drive": bool(assimilation_drive),
+                    "forage_readiness": bool(forage_readiness),
+                    "lock_or_release": bool(lock_or_release),
+                    "corridor_safety": bool(corridor_safety),
+                },
+                "decisions": decisions,
+                "enteric_tones": enteric_tones,
+                "assimilation_drives": assimilation_drives,
+                "forage_readinesses": forage_readinesses,
+                "digestive_locks": locks,
+                "predator_contacts": predator_contacts,
+                "primitive_violations": primitive_violations,
+            }
+        )
+    aggregate_checks = {
+        "base_b64_corridor_diagnostic": bool(base_gate["passed"]),
+        "corridor_safety_episodes": corridor_safety_episodes == len(results),
+        "explicit_b65_decision_episodes": explicit_decision_episodes >= 2,
+        "enteric_tone_episodes": enteric_tone_episodes >= 2,
+        "assimilation_drive_episodes": assimilation_drive_episodes >= 2,
+        "forage_readiness_episodes": forage_readiness_episodes >= 2,
+        "lock_or_release_episodes": lock_or_release_episodes >= 2,
+    }
+    failures.extend(
+        "corridor_b65_aggregate:" + name
+        for name, ok in aggregate_checks.items()
+        if not ok
+    )
+    passed = not failures
+    return {
+        "scenario": B6_CORRIDOR_SCENARIO,
+        "status": "accepted" if passed else "discarded",
+        "passed": passed,
+        "base_gate": base_gate,
+        "aggregate": {
+            "base_b64_corridor_diagnostic": bool(base_gate["passed"]),
+            "corridor_safety_episodes": int(corridor_safety_episodes),
+            "explicit_decision_episodes": int(explicit_decision_episodes),
+            "enteric_tone_episodes": int(enteric_tone_episodes),
+            "assimilation_drive_episodes": int(assimilation_drive_episodes),
+            "forage_readiness_episodes": int(forage_readiness_episodes),
+            "lock_or_release_episodes": int(lock_or_release_episodes),
+            "checks": aggregate_checks,
+        },
+        "failures": failures,
+        "episode_results": episode_results,
+    }
+
+
+def b66_immune_malaise_corridor_gate_result(
+    results: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    base_gate = b65_enteric_assimilation_corridor_gate_result(results)
+    explicit_decision_set = set(B66_CORRIDOR_EXPLICIT_DECISIONS)
+    failures: list[str] = []
+    episode_results = []
+    explicit_decision_episodes = 0
+    immune_tone_episodes = 0
+    malaise_drive_episodes = 0
+    recovery_veto_episodes = 0
+    lock_or_release_episodes = 0
+    corridor_safety_episodes = 0
+    for result in results:
+        episode = int(result["evaluation_episode"])
+        trace = result["trace"]
+        metrics = result.get("metrics", {})
+        primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
+        predator_contacts = int(
+            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
+        )
+        decisions = [
+            str(item.get("b66_decision"))
+            for item in trace
+            if item.get("b66_decision") is not None
+        ]
+        immune_tones = [
+            float(item.get("b66_immune_tone", 0.0) or 0.0)
+            for item in trace
+            if item.get("b66_immune_tone") is not None
+        ]
+        malaise_drives = [
+            float(item.get("b66_malaise_drive", 0.0) or 0.0)
+            for item in trace
+            if item.get("b66_malaise_drive") is not None
+        ]
+        recovery_vetoes = [
+            float(item.get("b66_recovery_veto", 0.0) or 0.0)
+            for item in trace
+            if item.get("b66_recovery_veto") is not None
+        ]
+        locks = [
+            int(item.get("b66_inflammation_lock", 0) or 0)
+            for item in trace
+            if item.get("b66_inflammation_lock") is not None
+        ]
+        explicit_decision = any(decision in explicit_decision_set for decision in decisions)
+        immune_tone = any(abs(value) > 0.0 for value in immune_tones)
+        malaise_drive = any(abs(value) > 0.0 for value in malaise_drives)
+        recovery_veto = any(abs(value) > 0.0 for value in recovery_vetoes)
+        lock_or_release = any(lock > 0 for lock in locks) or any(
+            decision
+            in {"immune_recovery_hold", "continue_inflammation_lock", "immune_safe_release"}
+            for decision in decisions
+        )
+        corridor_safety = primitive_ok and predator_contacts == 0
+        if explicit_decision:
+            explicit_decision_episodes += 1
+        if immune_tone:
+            immune_tone_episodes += 1
+        if malaise_drive:
+            malaise_drive_episodes += 1
+        if recovery_veto:
+            recovery_veto_episodes += 1
+        if lock_or_release:
+            lock_or_release_episodes += 1
+        if corridor_safety:
+            corridor_safety_episodes += 1
+        episode_results.append(
+            {
+                "evaluation_episode": episode,
+                "checks": {
+                    "explicit_b66_decision": bool(explicit_decision),
+                    "immune_tone": bool(immune_tone),
+                    "malaise_drive": bool(malaise_drive),
+                    "recovery_veto": bool(recovery_veto),
+                    "lock_or_release": bool(lock_or_release),
+                    "corridor_safety": bool(corridor_safety),
+                },
+                "decisions": decisions,
+                "immune_tones": immune_tones,
+                "malaise_drives": malaise_drives,
+                "recovery_vetoes": recovery_vetoes,
+                "inflammation_locks": locks,
+                "predator_contacts": predator_contacts,
+                "primitive_violations": primitive_violations,
+            }
+        )
+    aggregate_checks = {
+        "base_b65_corridor_diagnostic": bool(base_gate["passed"]),
+        "corridor_safety_episodes": corridor_safety_episodes == len(results),
+        "explicit_b66_decision_episodes": explicit_decision_episodes >= 2,
+        "immune_tone_episodes": immune_tone_episodes >= 2,
+        "malaise_drive_episodes": malaise_drive_episodes >= 2,
+        "recovery_veto_episodes": recovery_veto_episodes >= 2,
+        "lock_or_release_episodes": lock_or_release_episodes >= 2,
+    }
+    failures.extend(
+        "corridor_b66_aggregate:" + name
+        for name, ok in aggregate_checks.items()
+        if not ok
+    )
+    passed = not failures
+    return {
+        "scenario": B6_CORRIDOR_SCENARIO,
+        "status": "accepted" if passed else "discarded",
+        "passed": passed,
+        "base_gate": base_gate,
+        "aggregate": {
+            "base_b65_corridor_diagnostic": bool(base_gate["passed"]),
+            "corridor_safety_episodes": int(corridor_safety_episodes),
+            "explicit_decision_episodes": int(explicit_decision_episodes),
+            "immune_tone_episodes": int(immune_tone_episodes),
+            "malaise_drive_episodes": int(malaise_drive_episodes),
+            "recovery_veto_episodes": int(recovery_veto_episodes),
+            "lock_or_release_episodes": int(lock_or_release_episodes),
+            "checks": aggregate_checks,
+        },
+        "failures": failures,
+        "episode_results": episode_results,
+    }
+
+
 def _make_simulation(
     *,
     config: BrainAblationConfig,

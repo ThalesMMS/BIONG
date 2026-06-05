@@ -1246,6 +1246,402 @@ class _BrainRuntimePart8Mixin:
             trace_payload,
         )
 
+    def _b63_controller_params(self) -> dict[str, float]:
+        params = self._b62_controller_params()
+        defaults = {
+            "b63_escape_decay": 0.88,
+            "b63_escape_urgency_gain": 0.34,
+            "b63_sequence_gain": 0.30,
+            "b63_shelter_vector_gain": 0.30,
+            "b63_freeze_release_gain": 0.24,
+            "b63_escape_threshold": 0.22,
+            "b63_freeze_release_threshold": 0.20,
+            "b63_escape_lock_ticks": 4.0,
+        }
+        profile = str(
+            getattr(self.config, "b_controller_profile", None)
+            or "periaqueductal_escape_sequence"
+        )
+        if profile == "freeze_release_escape":
+            defaults.update(
+                {"b63_freeze_release_gain": 0.30, "b63_freeze_release_threshold": 0.18}
+            )
+        elif profile == "shelter_vector_sequence":
+            defaults.update({"b63_shelter_vector_gain": 0.36, "b63_escape_threshold": 0.20})
+        elif profile == "periaqueductal_escape_sequence_h56":
+            defaults.update({"b63_escape_decay": 0.90, "b63_escape_lock_ticks": 5.0})
+        elif profile == "genetic_escape_sequence":
+            defaults.update({"b63_escape_urgency_gain": 0.36, "b63_sequence_gain": 0.34})
+        params.update(defaults)
+        for key, value in dict(getattr(self.config, "b_controller_params", {})).items():
+            params[str(key)] = float(value)
+        return params
+
+    def _b63_reset_state_if_needed(self, tick: int) -> None:
+        last_tick = getattr(self, "_b63_last_tick", None)
+        if last_tick is not None and int(tick) > int(last_tick):
+            return
+        self._b63_escape_urgency = 0.0
+        self._b63_sequence_pressure = 0.0
+        self._b63_shelter_vector_gain = 0.0
+        self._b63_freeze_release = 0.0
+        self._b63_escape_lock = 0
+        self._b63_last_tick = int(tick)
+
+    def _b63_periaqueductal_escape_semantic_action(
+        self,
+        observation: Dict[str, np.ndarray],
+        *,
+        learned_semantic_action: str,
+    ) -> tuple[str, str, str, int, dict[str, object]]:
+        (
+            semantic_action,
+            _source,
+            reason,
+            _override_count,
+            trace_payload,
+        ) = self._b62_defensive_mode_selector_semantic_action(
+            observation,
+            learned_semantic_action=learned_semantic_action,
+        )
+        trace_payload = dict(trace_payload)
+        params = self._b63_controller_params()
+        profile = str(
+            getattr(self.config, "b_controller_profile", None)
+            or "periaqueductal_escape_sequence"
+        )
+        tick = int(getattr(self, "_direct_policy_event_clock", -1))
+        self._b63_reset_state_if_needed(tick)
+
+        meta = observation.get("meta")
+        meta = meta if isinstance(meta, dict) else {}
+        corridor_map = str(meta.get("map_template", "")) == "corridor_escape"
+        shelter_role = str(meta.get("shelter_role", "outside"))
+        b62_decision = str(trace_payload.get("b62_decision", "preserve_b61"))
+        b62_mode = str(trace_payload.get("b62_defensive_mode", "preserve"))
+        freeze_pressure = float(trace_payload.get("b62_freeze_pressure", 0.0) or 0.0)
+        flee_pressure = float(trace_payload.get("b62_flee_pressure", 0.0) or 0.0)
+        shelter_bias = float(trace_payload.get("b62_shelter_bias", 0.0) or 0.0)
+        defense_balance = float(trace_payload.get("b62_defense_balance", 0.0) or 0.0)
+        current_threat = max(
+            self._b_series_float(meta, "predator_smell_strength"),
+            self._b_series_float(meta, "predator_motion_salience"),
+            self._b_series_float(meta, "recent_pain"),
+            self._b_series_float(meta, "recent_contact"),
+        )
+        hunger = self._b_series_float(meta, "hunger")
+        health = self._b_series_float(meta, "health")
+        sleep_debt = self._b_series_float(meta, "sleep_debt")
+        shelter_dist = self._b_series_float(meta, "shelter_dist")
+        food_dist = self._b_series_float(meta, "food_dist")
+        near_shelter = 1.0 if shelter_dist <= 2.0 or shelter_role in {"at_shelter", "deep_shelter"} else 0.0
+        homeostatic_vulnerability = float(
+            np.clip((1.0 - health) * 0.45 + sleep_debt * 0.25 + hunger * 0.18, 0.0, 1.0)
+        )
+        shelter_advantage = float(
+            np.clip((food_dist - shelter_dist) * 0.05 + near_shelter * 0.20, 0.0, 1.0)
+        )
+
+        decay = float(params["b63_escape_decay"])
+        previous_urgency = float(getattr(self, "_b63_escape_urgency", 0.0))
+        previous_sequence = float(getattr(self, "_b63_sequence_pressure", 0.0))
+        previous_vector = float(getattr(self, "_b63_shelter_vector_gain", 0.0))
+        previous_release = float(getattr(self, "_b63_freeze_release", 0.0))
+        escape_urgency = float(
+            np.clip(
+                previous_urgency * decay
+                + max(flee_pressure, current_threat, max(0.0, defense_balance))
+                * float(params["b63_escape_urgency_gain"])
+                + homeostatic_vulnerability * 0.08,
+                0.0,
+                1.0,
+            )
+        )
+        sequence_pressure = float(
+            np.clip(
+                previous_sequence * decay
+                + escape_urgency * float(params["b63_sequence_gain"])
+                + shelter_bias * 0.16
+                + (1.0 if b62_mode in {"flee_to_shelter", "continue_defense_lock"} else 0.0)
+                * 0.05,
+                0.0,
+                1.0,
+            )
+        )
+        shelter_vector_gain = float(
+            np.clip(
+                previous_vector * decay
+                + shelter_advantage * float(params["b63_shelter_vector_gain"])
+                + shelter_bias * 0.12,
+                0.0,
+                1.0,
+            )
+        )
+        freeze_release = float(
+            np.clip(
+                previous_release * decay
+                + max(0.0, freeze_pressure - flee_pressure * 0.5)
+                * float(params["b63_freeze_release_gain"])
+                + near_shelter * 0.05,
+                0.0,
+                1.0,
+            )
+        )
+        escape_lock = int(getattr(self, "_b63_escape_lock", 0))
+        decision_label = "preserve_b62"
+        escape_phase = "preserve"
+
+        if corridor_map:
+            if escape_lock > 0 and hunger < 0.97:
+                semantic_action = "MOVE_TO_SHELTER"
+                escape_phase = "sequence_lock"
+                decision_label = "continue_escape_sequence"
+                reason = "b63_continue_escape_sequence"
+            elif (
+                escape_urgency >= float(params["b63_escape_threshold"])
+                and shelter_vector_gain > 0.0
+                and hunger < 0.96
+            ):
+                semantic_action = "MOVE_TO_SHELTER"
+                escape_lock = max(escape_lock, int(params["b63_escape_lock_ticks"]))
+                escape_phase = "flight"
+                decision_label = "pag_escape_to_shelter"
+                reason = "b63_pag_escape_to_shelter"
+            elif (
+                freeze_release >= float(params["b63_freeze_release_threshold"])
+                and near_shelter > 0.0
+                and hunger < 0.92
+            ):
+                semantic_action = "STAY"
+                escape_lock = max(escape_lock, int(params["b63_escape_lock_ticks"]))
+                escape_phase = "freeze"
+                decision_label = "pag_freeze_then_escape"
+                reason = "b63_pag_freeze_then_escape"
+            elif (
+                b62_decision == "defensive_safe_advance"
+                and sequence_pressure < float(params["b63_escape_threshold"])
+            ):
+                semantic_action = "MOVE_TO_FOOD"
+                escape_phase = "safe_advance"
+                decision_label = "pag_safe_advance"
+                reason = "b63_pag_safe_advance"
+
+        trace_payload.update(
+            {
+                "b63_controller_profile": profile,
+                "b63_escape_phase": escape_phase,
+                "b63_escape_urgency": round(float(escape_urgency), 6),
+                "b63_sequence_pressure": round(float(sequence_pressure), 6),
+                "b63_shelter_vector_gain": round(float(shelter_vector_gain), 6),
+                "b63_freeze_release": round(float(freeze_release), 6),
+                "b63_escape_lock": int(escape_lock),
+                "b63_decision": decision_label,
+            }
+        )
+        if "ga_generation" in params:
+            trace_payload["b63_genetic_generation"] = int(params["ga_generation"])
+        if "ga_candidate" in params:
+            trace_payload["b63_genetic_candidate"] = int(params["ga_candidate"])
+
+        self._b63_escape_urgency = float(escape_urgency)
+        self._b63_sequence_pressure = float(sequence_pressure)
+        self._b63_shelter_vector_gain = float(shelter_vector_gain)
+        self._b63_freeze_release = float(freeze_release)
+        self._b63_escape_lock = max(0, int(escape_lock) - 1)
+        self._b63_last_tick = int(tick)
+        return (
+            semantic_action,
+            B63_PERIAQUEDUCTAL_ESCAPE_SELECTION_SOURCE,
+            reason,
+            int(semantic_action != learned_semantic_action),
+            trace_payload,
+        )
+
+    def _b64_controller_params(self) -> dict[str, float]:
+        params = self._b63_controller_params()
+        defaults = {
+            "b64_recovery_decay": 0.90,
+            "b64_recovery_tone_gain": 0.34,
+            "b64_vagal_brake_gain": 0.32,
+            "b64_post_escape_gain": 0.30,
+            "b64_recovery_threshold": 0.18,
+            "b64_rest_threshold": 0.22,
+            "b64_recovery_lock_ticks": 4.0,
+        }
+        profile = str(
+            getattr(self.config, "b_controller_profile", None)
+            or "vagal_recovery_brake"
+        )
+        if profile == "post_escape_rest_gate":
+            defaults.update({"b64_recovery_tone_gain": 0.38, "b64_rest_threshold": 0.18})
+        elif profile == "shelter_recovery_coupling":
+            defaults.update({"b64_post_escape_gain": 0.36, "b64_recovery_threshold": 0.16})
+        elif profile == "vagal_recovery_brake_h56":
+            defaults.update({"b64_recovery_decay": 0.92, "b64_recovery_lock_ticks": 5.0})
+        elif profile == "genetic_recovery_brake":
+            defaults.update({"b64_vagal_brake_gain": 0.34, "b64_post_escape_gain": 0.34})
+        params.update(defaults)
+        for key, value in dict(getattr(self.config, "b_controller_params", {})).items():
+            params[str(key)] = float(value)
+        return params
+
+    def _b64_reset_state_if_needed(self, tick: int) -> None:
+        last_tick = getattr(self, "_b64_last_tick", None)
+        if last_tick is not None and int(tick) > int(last_tick):
+            return
+        self._b64_recovery_tone = 0.0
+        self._b64_vagal_brake = 0.0
+        self._b64_post_escape_bias = 0.0
+        self._b64_recovery_lock = 0
+        self._b64_last_tick = int(tick)
+
+    def _b64_vagal_recovery_semantic_action(
+        self,
+        observation: Dict[str, np.ndarray],
+        *,
+        learned_semantic_action: str,
+    ) -> tuple[str, str, str, int, dict[str, object]]:
+        (
+            semantic_action,
+            _source,
+            reason,
+            _override_count,
+            trace_payload,
+        ) = self._b63_periaqueductal_escape_semantic_action(
+            observation,
+            learned_semantic_action=learned_semantic_action,
+        )
+        trace_payload = dict(trace_payload)
+        params = self._b64_controller_params()
+        profile = str(
+            getattr(self.config, "b_controller_profile", None)
+            or "vagal_recovery_brake"
+        )
+        tick = int(getattr(self, "_direct_policy_event_clock", -1))
+        self._b64_reset_state_if_needed(tick)
+
+        meta = observation.get("meta")
+        meta = meta if isinstance(meta, dict) else {}
+        corridor_map = str(meta.get("map_template", "")) == "corridor_escape"
+        shelter_role = str(meta.get("shelter_role", "outside"))
+        hunger = self._b_series_float(meta, "hunger")
+        health = self._b_series_float(meta, "health")
+        sleep_debt = self._b_series_float(meta, "sleep_debt")
+        shelter_dist = self._b_series_float(meta, "shelter_dist")
+        food_dist = self._b_series_float(meta, "food_dist")
+        near_shelter = 1.0 if shelter_dist <= 1.0 or shelter_role in {"at_shelter", "deep_shelter"} else 0.0
+        current_threat = max(
+            self._b_series_float(meta, "predator_smell_strength"),
+            self._b_series_float(meta, "predator_motion_salience"),
+            self._b_series_float(meta, "recent_pain"),
+            self._b_series_float(meta, "recent_contact"),
+        )
+        b63_decision = str(trace_payload.get("b63_decision", "preserve_b62"))
+        b63_phase = str(trace_payload.get("b63_escape_phase", "preserve"))
+        escape_urgency = float(trace_payload.get("b63_escape_urgency", 0.0) or 0.0)
+        sequence_pressure = float(trace_payload.get("b63_sequence_pressure", 0.0) or 0.0)
+        escape_lock = int(trace_payload.get("b63_escape_lock", 0) or 0)
+        escape_context = 1.0 if (
+            b63_decision
+            in {
+                "pag_escape_to_shelter",
+                "pag_freeze_then_escape",
+                "continue_escape_sequence",
+                "pag_safe_advance",
+            }
+            or b63_phase not in {"", "None", "preserve"}
+            or escape_lock > 0
+        ) else 0.0
+        shelter_advantage = float(np.clip((food_dist - shelter_dist) * 0.05, 0.0, 1.0))
+        body_recovery_need = float(
+            np.clip((1.0 - health) * 0.42 + sleep_debt * 0.34 + (1.0 - hunger) * 0.08, 0.0, 1.0)
+        )
+
+        decay = float(params["b64_recovery_decay"])
+        previous_tone = float(getattr(self, "_b64_recovery_tone", 0.0))
+        previous_brake = float(getattr(self, "_b64_vagal_brake", 0.0))
+        previous_bias = float(getattr(self, "_b64_post_escape_bias", 0.0))
+        post_escape_bias = float(
+            np.clip(
+                previous_bias * decay
+                + (near_shelter * 0.34 + shelter_advantage * 0.18 + escape_context * 0.20)
+                * float(params["b64_post_escape_gain"])
+                + (escape_urgency + sequence_pressure) * 0.04,
+                0.0,
+                1.0,
+            )
+        )
+        recovery_tone = float(
+            np.clip(
+                previous_tone * decay
+                + body_recovery_need * float(params["b64_recovery_tone_gain"])
+                + max(0.0, 1.0 - current_threat) * 0.08
+                + near_shelter * 0.08
+                + post_escape_bias * 0.10,
+                0.0,
+                1.0,
+            )
+        )
+        vagal_brake = float(
+            np.clip(
+                previous_brake * decay
+                + recovery_tone * float(params["b64_vagal_brake_gain"])
+                + post_escape_bias * 0.18
+                + near_shelter * 0.08
+                - current_threat * 0.08,
+                0.0,
+                1.0,
+            )
+        )
+        recovery_lock = int(getattr(self, "_b64_recovery_lock", 0))
+        decision_label = "preserve_b63"
+
+        if corridor_map:
+            if recovery_lock > 0 and near_shelter > 0.0 and hunger < 0.90:
+                semantic_action = "SLEEP"
+                decision_label = "continue_recovery_brake"
+                reason = "b64_continue_recovery_brake"
+            elif (
+                near_shelter > 0.0
+                and post_escape_bias >= float(params["b64_recovery_threshold"])
+                and vagal_brake >= float(params["b64_rest_threshold"])
+                and hunger < 0.88
+            ):
+                semantic_action = "SLEEP"
+                recovery_lock = max(recovery_lock, int(params["b64_recovery_lock_ticks"]))
+                decision_label = "vagal_recovery_hold"
+                reason = "b64_vagal_recovery_hold"
+            elif escape_context > 0.0 and vagal_brake > 0.0:
+                decision_label = "vagal_safe_release"
+
+        trace_payload.update(
+            {
+                "b64_controller_profile": profile,
+                "b64_recovery_tone": round(float(recovery_tone), 6),
+                "b64_vagal_brake": round(float(vagal_brake), 6),
+                "b64_post_escape_bias": round(float(post_escape_bias), 6),
+                "b64_recovery_lock": int(recovery_lock),
+                "b64_decision": decision_label,
+            }
+        )
+        if "ga_generation" in params:
+            trace_payload["b64_genetic_generation"] = int(params["ga_generation"])
+        if "ga_candidate" in params:
+            trace_payload["b64_genetic_candidate"] = int(params["ga_candidate"])
+
+        self._b64_recovery_tone = float(recovery_tone)
+        self._b64_vagal_brake = float(vagal_brake)
+        self._b64_post_escape_bias = float(post_escape_bias)
+        self._b64_recovery_lock = max(0, int(recovery_lock) - 1)
+        self._b64_last_tick = int(tick)
+        return (
+            semantic_action,
+            B64_VAGAL_RECOVERY_BRAKE_SELECTION_SOURCE,
+            reason,
+            int(semantic_action != learned_semantic_action),
+            trace_payload,
+        )
+
     @staticmethod
     def _network_forward_macs(network: object) -> int:
         if isinstance(network, RecurrentProposalNetwork):

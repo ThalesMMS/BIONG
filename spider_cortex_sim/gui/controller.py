@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from ..agent import BrainStep
 from ..metrics import EpisodeMetricAccumulator
@@ -23,11 +23,16 @@ from .constants import (
 )
 from .models import (
     GUI_MODEL_SPECS,
+    GUICheckpointSpec,
     GUIRunConfig,
     GUIRuntimeAdapter,
     adapter_for_existing_simulation,
     build_runtime_adapter,
+    build_runtime_adapter_for_checkpoint,
+    discover_gui_checkpoints,
 )
+
+CheckpointLoadMode = Literal["evaluate", "train"]
 
 
 class GUIController:
@@ -49,6 +54,10 @@ class GUIController:
             else build_runtime_adapter(self.run_config, model_id)
         )
         self.available_model_specs = GUI_MODEL_SPECS
+        self.available_checkpoint_specs: list[GUICheckpointSpec] = discover_gui_checkpoints()
+        self.selected_checkpoint_index = 0 if self.available_checkpoint_specs else -1
+        self.checkpoint_load_mode: CheckpointLoadMode = "evaluate"
+        self.loaded_checkpoint_spec: GUICheckpointSpec | None = None
         self.active_model = self.runtime.spec
         self.sim = self.runtime.sim
         self.world = self.runtime.world
@@ -105,6 +114,7 @@ class GUIController:
         # Window resize (handled by GUI/renderer)
         self.resize_requested = False
         self.requested_win_size: tuple[int, int] | None = None
+        self.sidebar_rebuild_requested = False
 
     def request_resize(self, win_w: int, win_h: int) -> None:
         self.resize_requested = True
@@ -155,6 +165,12 @@ class GUIController:
         self.resize_requested = False
         return self.requested_win_size
 
+    def consume_sidebar_rebuild_request(self) -> bool:
+        if not self.sidebar_rebuild_requested:
+            return False
+        self.sidebar_rebuild_requested = False
+        return True
+
     def _bind_runtime(self, runtime: GUIRuntimeAdapter) -> None:
         self.runtime = runtime
         self.active_model = runtime.spec
@@ -169,6 +185,7 @@ class GUIController:
     def apply_model(self, model_id: str) -> None:
         runtime = build_runtime_adapter(self.run_config, model_id)
         self._bind_runtime(runtime)
+        self.loaded_checkpoint_spec = None
         self.phase = "training"
         self.current_episode = 0
         self.training_rewards.clear()
@@ -185,6 +202,59 @@ class GUIController:
             f"Model reset: {self.active_model.label}",
             is_error=False,
         )
+
+    def refresh_checkpoints(self) -> None:
+        selected_path = self.selected_checkpoint.path if self.selected_checkpoint else None
+        self.available_checkpoint_specs = discover_gui_checkpoints()
+        self.selected_checkpoint_index = -1
+        if self.available_checkpoint_specs:
+            self.selected_checkpoint_index = 0
+            if selected_path is not None:
+                for idx, spec in enumerate(self.available_checkpoint_specs):
+                    if spec.path == selected_path:
+                        self.selected_checkpoint_index = idx
+                        break
+        self._show_toast(
+            f"Checkpoints: {len(self.available_checkpoint_specs)} found",
+            is_error=False,
+        )
+        self.sidebar_rebuild_requested = True
+
+    @property
+    def selected_checkpoint(self) -> GUICheckpointSpec | None:
+        if not self.available_checkpoint_specs:
+            return None
+        if self.selected_checkpoint_index < 0:
+            return None
+        if self.selected_checkpoint_index >= len(self.available_checkpoint_specs):
+            return None
+        return self.available_checkpoint_specs[self.selected_checkpoint_index]
+
+    def select_checkpoint(self, index: int) -> None:
+        if index < 0 or index >= len(self.available_checkpoint_specs):
+            self._show_toast("Checkpoint selection is invalid.", is_error=True)
+            return
+        self.selected_checkpoint_index = int(index)
+        self.sidebar_rebuild_requested = True
+
+    def visible_checkpoint_specs(
+        self,
+        *,
+        limit: int = 4,
+    ) -> tuple[tuple[int, GUICheckpointSpec], ...]:
+        specs = self.available_checkpoint_specs
+        if not specs:
+            return ()
+        selected = max(0, min(self.selected_checkpoint_index, len(specs) - 1))
+        start = max(0, min(selected - limit // 2, len(specs) - limit))
+        end = min(len(specs), start + limit)
+        return tuple((idx, specs[idx]) for idx in range(start, end))
+
+    def set_checkpoint_load_mode(self, mode: CheckpointLoadMode) -> None:
+        if mode not in ("evaluate", "train"):
+            self._show_toast(f"Unknown checkpoint mode: {mode}", is_error=True)
+            return
+        self.checkpoint_load_mode = mode
 
     def model_audit_fields(self) -> dict[str, object]:
         return self.runtime.audit_fields(self.last_decision)
@@ -367,24 +437,19 @@ class GUIController:
         self._show_toast(f"Evolution source saved: {path}", is_error=False)
         return path
 
-    def _load_brain(self, directory: str | Path | None = None, modules: Sequence[str] | None = None) -> None:
-        """
-        Load a saved brain state into the simulation and show a toast reporting the outcome.
-
-        Parameters:
-            directory (str | Path | None): Filesystem path or directory containing the saved brain. If None, uses the default brain directory.
-            modules (Sequence[str] | None): Optional list of module names to load from the saved brain; if None, loads all available modules.
-
-        Notes:
-            On success displays a toast with the list of loaded modules. Expected load failures are displayed via toast; unexpected exceptions are allowed to propagate.
-        """
-        path = Path(directory) if directory else Path(DEFAULT_BRAIN_DIR)
+    def _load_checkpoint_spec(
+        self,
+        checkpoint_spec: GUICheckpointSpec,
+        *,
+        mode: CheckpointLoadMode,
+        modules: Sequence[str] | None = None,
+    ) -> bool:
+        if mode not in ("evaluate", "train"):
+            self._show_toast(f"Load error: unknown mode {mode!r}", is_error=True)
+            return False
         try:
-            if not self.runtime.supports_current_metrics:
-                self._show_toast("Load is not supported for B0 legacy.", is_error=True)
-                return
-            loaded = self.brain.load(path, modules=modules)
-            self._show_toast(f"Loaded: {', '.join(loaded)}", is_error=False)
+            runtime = build_runtime_adapter_for_checkpoint(self.run_config, checkpoint_spec)
+            loaded = runtime.brain.load(checkpoint_spec.path, modules=modules)
         except (
             FileNotFoundError,
             PermissionError,
@@ -395,13 +460,111 @@ class GUIController:
             ValueError,
         ) as exc:
             self._show_toast(f"Load error: {exc}", is_error=True)
+            return False
+        self._bind_runtime(runtime)
+        self.loaded_checkpoint_spec = checkpoint_spec
+        self.checkpoint_load_mode = mode
+        self.phase = "evaluation" if mode == "evaluate" else "training"
+        if self.phase == "evaluation" and self.total_eval_episodes <= 0:
+            self.total_eval_episodes = 1
+        if self.phase == "training" and self.total_train_episodes <= 0:
+            self.total_train_episodes = 1
+        self.current_episode = 0
+        self.training_rewards.clear()
+        self.reward_history.clear()
+        self.last_decision = None
+        self.last_info = None
+        self.last_reward = 0.0
+        self.episode_reward = 0.0
+        self.episode_done = False
+        self.tick_timer = 0.0
+        self.step_requested = False
+        self.paused = True
+        self._start_episode()
+        self._show_toast(
+            f"Loaded {checkpoint_spec.label}: {', '.join(loaded)}",
+            is_error=False,
+        )
+        return True
+
+    def load_selected_checkpoint(
+        self,
+        *,
+        mode: CheckpointLoadMode | None = None,
+        modules: Sequence[str] | None = None,
+    ) -> bool:
+        checkpoint_spec = self.selected_checkpoint
+        if checkpoint_spec is None:
+            self._show_toast("Load error: no checkpoint selected.", is_error=True)
+            return False
+        return self._load_checkpoint_spec(
+            checkpoint_spec,
+            mode=mode or self.checkpoint_load_mode,
+            modules=modules,
+        )
+
+    def _load_brain(
+        self,
+        directory: str | Path | None = None,
+        modules: Sequence[str] | None = None,
+        *,
+        mode: CheckpointLoadMode | None = None,
+    ) -> bool:
+        """
+        Load a saved brain state into the simulation and show a toast reporting the outcome.
+
+        Parameters:
+            directory (str | Path | None): Filesystem path or directory containing the saved brain. If None, uses the default brain directory.
+            modules (Sequence[str] | None): Optional list of module names to load from the saved brain; if None, loads all available modules.
+
+        Notes:
+            On success displays a toast with the list of loaded modules. Expected load failures are displayed via toast; unexpected exceptions are allowed to propagate.
+        """
+        if directory is None and self.selected_checkpoint is not None:
+            return self.load_selected_checkpoint(mode=mode, modules=modules)
+
+        path = Path(directory) if directory else Path(DEFAULT_BRAIN_DIR)
+        checkpoint_specs = discover_gui_checkpoints([path])
+        if checkpoint_specs:
+            checkpoint_spec = checkpoint_specs[0]
+            if path.is_dir():
+                for candidate in checkpoint_specs:
+                    if candidate.path == path:
+                        checkpoint_spec = candidate
+                        break
+            return self._load_checkpoint_spec(
+                checkpoint_spec,
+                mode=mode or self.checkpoint_load_mode,
+                modules=modules,
+            )
+
+        try:
+            if not self.runtime.supports_current_metrics:
+                self._show_toast("Load is not supported for B0 legacy.", is_error=True)
+                return False
+            loaded = self.brain.load(path, modules=modules)
+            self._show_toast(f"Loaded: {', '.join(loaded)}", is_error=False)
+            return True
+        except (
+            FileNotFoundError,
+            PermissionError,
+            OSError,
+            json.JSONDecodeError,
+            zipfile.BadZipFile,
+            KeyError,
+            ValueError,
+        ) as exc:
+            self._show_toast(f"Load error: {exc}", is_error=True)
+            return False
 
     def load_brain(
         self,
         directory: str | Path | None = None,
         modules: Sequence[str] | None = None,
-    ) -> None:
-        self._load_brain(directory, modules=modules)
+        *,
+        mode: CheckpointLoadMode | None = None,
+    ) -> bool:
+        return self._load_brain(directory, modules=modules, mode=mode)
 
     def _show_toast(self, text: str, duration: float = 3.5, *, is_error: bool = False) -> None:
         """
@@ -480,6 +643,13 @@ class GUIController:
 
         Resets phase to "training", sets the current episode index to 0, clears accumulated training rewards, and starts a new episode with the freshly constructed brain.
         """
+        if self.loaded_checkpoint_spec is not None:
+            self._load_checkpoint_spec(
+                self.loaded_checkpoint_spec,
+                mode=self.checkpoint_load_mode,
+            )
+            return
+
         runtime = build_runtime_adapter(self.run_config, self.active_model.id)
         self._bind_runtime(runtime)
         self.phase = "training"

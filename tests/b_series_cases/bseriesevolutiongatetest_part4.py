@@ -613,6 +613,877 @@ class BSeriesEvolutionGateTestPart4(BSeriesEvolutionGateTestHelpers, unittest.Te
         self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
         self.assertIn("base_b61_corridor_diagnostic", gate["aggregate"])
 
+    def test_b63_corridor_gate_accepts_pag_escape_sequence_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b63_periaqueductal_escape_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b63_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["escape_phase_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["escape_pressure_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["shelter_vector_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lock_or_safe_episodes"], 3)
+
+    def test_b63_corridor_gate_rejects_b62_clone_without_escape_sequence(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b63_periaqueductal_escape_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b63_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                escape_phase=None,
+                escape_urgency=None,
+                sequence_pressure=None,
+                shelter_vector_gain=None,
+                freeze_release=None,
+                escape_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b63_aggregate:explicit_b63_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b63_corridor_gate_keeps_b62_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b63_periaqueductal_escape_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b63_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b62_corridor_diagnostic", gate["aggregate"])
+
+    def test_b64_corridor_gate_accepts_vagal_recovery_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b64_vagal_recovery_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b64_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["recovery_tone_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["vagal_brake_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["post_escape_bias_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lock_or_hold_episodes"], 3)
+
+    def test_b64_corridor_gate_rejects_b63_clone_without_recovery_brake(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b64_vagal_recovery_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b64_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                recovery_tone=None,
+                vagal_brake=None,
+                post_escape_bias=None,
+                recovery_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b64_aggregate:explicit_b64_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b64_corridor_gate_keeps_b63_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b64_vagal_recovery_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b64_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b63_corridor_diagnostic", gate["aggregate"])
+
+    def test_b65_corridor_gate_accepts_enteric_assimilation_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b65_enteric_assimilation_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b65_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["enteric_tone_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["assimilation_drive_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["forage_readiness_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lock_or_release_episodes"], 3)
+
+    def test_b65_corridor_gate_rejects_b64_clone_without_enteric_gate(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b65_enteric_assimilation_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b65_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                enteric_tone=None,
+                assimilation_drive=None,
+                forage_readiness=None,
+                digestive_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b65_aggregate:explicit_b65_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b65_corridor_gate_keeps_b64_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b65_enteric_assimilation_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b65_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b64_corridor_diagnostic", gate["aggregate"])
+
+    def test_b66_corridor_gate_accepts_immune_malaise_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b66_immune_malaise_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b66_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["immune_tone_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["malaise_drive_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["recovery_veto_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lock_or_release_episodes"], 3)
+
+    def test_b66_corridor_gate_rejects_b65_clone_without_immune_gate(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b66_immune_malaise_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b66_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                immune_tone=None,
+                malaise_drive=None,
+                recovery_veto=None,
+                inflammation_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b66_aggregate:explicit_b66_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b66_corridor_gate_keeps_b65_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b66_immune_malaise_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b66_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b65_corridor_diagnostic", gate["aggregate"])
+
+    def test_b67_corridor_gate_accepts_glial_energy_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b67_glial_energy_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b67_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["glial_reserve_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lactate_support_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["fatigue_pressure_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lock_or_release_episodes"], 3)
+
+    def test_b67_corridor_gate_rejects_b66_clone_without_glial_gate(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b67_glial_energy_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b67_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                glial_reserve=None,
+                lactate_support=None,
+                fatigue_pressure=None,
+                recovery_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b67_aggregate:explicit_b67_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b67_corridor_gate_keeps_b66_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b67_glial_energy_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b67_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b66_corridor_diagnostic", gate["aggregate"])
+
+    def test_b68_corridor_gate_accepts_motor_pacing_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b68_motor_pacing_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b68_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["motor_reserve_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["stride_pacing_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["overexertion_risk_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lock_or_release_episodes"], 3)
+
+    def test_b68_corridor_gate_rejects_b67_clone_without_motor_gate(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b68_motor_pacing_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b68_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                motor_reserve=None,
+                stride_pacing=None,
+                overexertion_risk=None,
+                pacing_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b68_aggregate:explicit_b68_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b68_corridor_gate_keeps_b67_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b68_motor_pacing_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b68_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b67_corridor_diagnostic", gate["aggregate"])
+
+    def test_b69_corridor_gate_accepts_vestibular_orientation_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b69_vestibular_orientation_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b69_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["heading_confidence_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["turn_error_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["orientation_stability_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lock_or_release_episodes"], 3)
+
+    def test_b69_corridor_gate_rejects_b68_clone_without_orientation_gate(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b69_vestibular_orientation_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b69_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                heading_confidence=None,
+                turn_error=None,
+                orientation_stability=None,
+                orientation_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b69_aggregate:explicit_b69_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b69_corridor_gate_keeps_b68_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b69_vestibular_orientation_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b69_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b68_corridor_diagnostic", gate["aggregate"])
+
+    def test_b70_corridor_gate_accepts_optic_flow_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b70_optic_flow_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b70_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["flow_confidence_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lateral_drift_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["looming_risk_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lock_or_release_episodes"], 3)
+
+    def test_b70_corridor_gate_rejects_b69_clone_without_optic_flow_gate(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b70_optic_flow_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b70_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                flow_confidence=None,
+                lateral_drift=None,
+                looming_risk=None,
+                flow_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b70_aggregate:explicit_b70_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b70_corridor_gate_keeps_b69_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b70_optic_flow_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b70_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b69_corridor_diagnostic", gate["aggregate"])
+
+    def test_b71_corridor_gate_accepts_tectal_orienting_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b71_tectal_orienting_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b71_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["target_salience_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["orienting_gain_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["collision_veto_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["lock_or_release_episodes"], 3)
+
+    def test_b71_corridor_gate_rejects_b70_clone_without_tectal_gate(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b71_tectal_orienting_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b71_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                target_salience=None,
+                orienting_gain=None,
+                collision_veto=None,
+                orienting_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b71_aggregate:explicit_b71_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b71_corridor_gate_keeps_b70_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b71_tectal_orienting_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b71_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b70_corridor_diagnostic", gate["aggregate"])
+
+    def test_b72_corridor_gate_accepts_pulvinar_attention_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b72_pulvinar_attention_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b72_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["focus_signal_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["distractor_load_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["filter_gain_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["attention_lock_or_release_episodes"], 3)
+
+    def test_b72_corridor_gate_rejects_b71_clone_without_attention_filter(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b72_pulvinar_attention_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b72_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                focus_signal=None,
+                distractor_load=None,
+                filter_gain=None,
+                attention_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b72_aggregate:explicit_b72_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b72_corridor_gate_keeps_b71_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b72_pulvinar_attention_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b72_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b71_corridor_diagnostic", gate["aggregate"])
+
+    def test_b73_corridor_gate_accepts_reticular_inhibition_progress(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b73_reticular_inhibition_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b73_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["explicit_decision_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["inhibitory_tone_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["surround_suppression_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["release_drive_episodes"], 3)
+        self.assertEqual(gate["aggregate"]["inhibition_lock_or_release_episodes"], 3)
+
+    def test_b73_corridor_gate_rejects_b72_clone_without_reticular_filter(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b73_reticular_inhibition_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b73_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                decision=None,
+                inhibitory_tone=None,
+                surround_suppression=None,
+                release_drive=None,
+                inhibition_lock=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b73_aggregate:explicit_b73_decision_episodes",
+            gate["failures"],
+        )
+
+    def test_b73_corridor_gate_keeps_b72_base_as_diagnostic(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b73_reticular_inhibition_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b73_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertTrue(gate["passed"], msg=gate["failures"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 3)
+        self.assertIn("base_b72_corridor_diagnostic", gate["aggregate"])
+
     def test_b6_promotion_prefers_passing_fusion_then_best_individual(self) -> None:
         risk = {
             "variant": B6_RISK_FORAGE_ARBITER_H48_POLICY_NAME,

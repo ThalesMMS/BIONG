@@ -10,6 +10,18 @@ from .b_series_evolution_internal import gates_b31_b40 as __b_series_evolution_g
 from .b_series_evolution_internal import gates_b41_b50 as __b_series_evolution_gates_b41_b50
 from .b_series_evolution_internal import gates_b51_b60 as __b_series_evolution_gates_b51_b60
 from .b_series_evolution_internal import gates_b61_requires as __b_series_evolution_gates_b61_requires
+from .b_series_evolution_internal import gates_b66_requires as __b_series_evolution_gates_b66_requires
+from .b_series_evolution_internal import gates_b67_requires as __b_series_evolution_gates_b67_requires
+from .b_series_evolution_internal import gates_b68_requires as __b_series_evolution_gates_b68_requires
+from .b_series_evolution_internal import gates_b69_requires as __b_series_evolution_gates_b69_requires
+from .b_series_evolution_internal import gates_b70_requires as __b_series_evolution_gates_b70_requires
+from .b_series_evolution_internal import gates_b71_requires as __b_series_evolution_gates_b71_requires
+from .b_series_evolution_internal import gates_b72_requires as __b_series_evolution_gates_b72_requires
+from .b_series_evolution_internal import gates_b73_requires as __b_series_evolution_gates_b73_requires
+from .b_series_evolution_internal import gates_b74_requires as __b_series_evolution_gates_b74_requires
+from .b_series_evolution_internal import gates_b75_requires as __b_series_evolution_gates_b75_requires
+from .b_series_evolution_internal import gates_b76_requires as __b_series_evolution_gates_b76_requires
+from .b_series_evolution_internal import gates_b77_requires as __b_series_evolution_gates_b77_requires
 from .b_series_evolution_internal import requires_sequences_b1_b5 as __b_series_evolution_requires_sequences_b1_b5
 from .b_series_evolution_internal import sequences_b5_b7 as __b_series_evolution_sequences_b5_b7
 from .b_series_evolution_internal import sequences_b7_b10 as __b_series_evolution_sequences_b7_b10
@@ -27,6 +39,22 @@ from .b_series_evolution_internal import sequences_b50_b54 as __b_series_evoluti
 from .b_series_evolution_internal import sequences_b54_b58 as __b_series_evolution_sequences_b54_b58
 from .b_series_evolution_internal import sequences_b58_b62 as __b_series_evolution_sequences_b58_b62
 from .b_series_evolution_internal import sequence_b62 as __b_series_evolution_sequence_b62
+from .b_series_evolution_internal import sequence_b63 as __b_series_evolution_sequence_b63
+from .b_series_evolution_internal import sequence_b64 as __b_series_evolution_sequence_b64
+from .b_series_evolution_internal import sequence_b65 as __b_series_evolution_sequence_b65
+from .b_series_evolution_internal import sequence_b66 as __b_series_evolution_sequence_b66
+from .b_series_evolution_internal import sequence_b67 as __b_series_evolution_sequence_b67
+from .b_series_evolution_internal import sequence_b68 as __b_series_evolution_sequence_b68
+from .b_series_evolution_internal import sequence_b69 as __b_series_evolution_sequence_b69
+from .b_series_evolution_internal import sequence_b70 as __b_series_evolution_sequence_b70
+from .b_series_evolution_internal import sequence_b71 as __b_series_evolution_sequence_b71
+from .b_series_evolution_internal import sequence_b72 as __b_series_evolution_sequence_b72
+from .b_series_evolution_internal import sequence_b73 as __b_series_evolution_sequence_b73
+from .b_series_evolution_internal import sequence_b74 as __b_series_evolution_sequence_b74
+from .b_series_evolution_internal import sequence_b75 as __b_series_evolution_sequence_b75
+from .b_series_evolution_internal import sequence_b76 as __b_series_evolution_sequence_b76
+from .b_series_evolution_internal import sequence_b77 as __b_series_evolution_sequence_b77
+from .b_series_evolution_internal import sequence_b78 as __b_series_evolution_sequence_b78
 from .b_series_evolution_internal import cli as __b_series_evolution_cli
 
 _CANONICAL_MODULE = "spider_cortex_sim.b_series_evolution"
@@ -41,6 +69,18 @@ _PART_MODULES = (
     __b_series_evolution_gates_b41_b50,
     __b_series_evolution_gates_b51_b60,
     __b_series_evolution_gates_b61_requires,
+    __b_series_evolution_gates_b66_requires,
+    __b_series_evolution_gates_b67_requires,
+    __b_series_evolution_gates_b68_requires,
+    __b_series_evolution_gates_b69_requires,
+    __b_series_evolution_gates_b70_requires,
+    __b_series_evolution_gates_b71_requires,
+    __b_series_evolution_gates_b72_requires,
+    __b_series_evolution_gates_b73_requires,
+    __b_series_evolution_gates_b74_requires,
+    __b_series_evolution_gates_b75_requires,
+    __b_series_evolution_gates_b76_requires,
+    __b_series_evolution_gates_b77_requires,
     __b_series_evolution_requires_sequences_b1_b5,
     __b_series_evolution_sequences_b5_b7,
     __b_series_evolution_sequences_b7_b10,
@@ -58,6 +98,22 @@ _PART_MODULES = (
     __b_series_evolution_sequences_b54_b58,
     __b_series_evolution_sequences_b58_b62,
     __b_series_evolution_sequence_b62,
+    __b_series_evolution_sequence_b63,
+    __b_series_evolution_sequence_b64,
+    __b_series_evolution_sequence_b65,
+    __b_series_evolution_sequence_b66,
+    __b_series_evolution_sequence_b67,
+    __b_series_evolution_sequence_b68,
+    __b_series_evolution_sequence_b69,
+    __b_series_evolution_sequence_b70,
+    __b_series_evolution_sequence_b71,
+    __b_series_evolution_sequence_b72,
+    __b_series_evolution_sequence_b73,
+    __b_series_evolution_sequence_b74,
+    __b_series_evolution_sequence_b75,
+    __b_series_evolution_sequence_b76,
+    __b_series_evolution_sequence_b77,
+    __b_series_evolution_sequence_b78,
     __b_series_evolution_cli,
 )
 

@@ -1707,3 +1707,284 @@ class BSeriesEvolutionGateTestHelpers:
         if defense_lock is not None:
             item["b62_defense_lock"] = defense_lock
         return result
+
+    def _b63_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "pag_safe_advance",
+        escape_phase: str | None = "safe_advance",
+        escape_urgency: float | None = 0.10,
+        sequence_pressure: float | None = 0.11,
+        shelter_vector_gain: float | None = 0.13,
+        freeze_release: float | None = 0.04,
+        escape_lock: int | None = 1,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b62_corridor_result(episode, **kwargs)
+        item = result["trace"][0]
+        if decision is not None:
+            item["b63_decision"] = decision
+        if escape_phase is not None:
+            item["b63_escape_phase"] = escape_phase
+        if escape_urgency is not None:
+            item["b63_escape_urgency"] = escape_urgency
+        if sequence_pressure is not None:
+            item["b63_sequence_pressure"] = sequence_pressure
+        if shelter_vector_gain is not None:
+            item["b63_shelter_vector_gain"] = shelter_vector_gain
+        if freeze_release is not None:
+            item["b63_freeze_release"] = freeze_release
+        if escape_lock is not None:
+            item["b63_escape_lock"] = escape_lock
+        return result
+
+    def _b64_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "vagal_recovery_hold",
+        recovery_tone: float | None = 0.14,
+        vagal_brake: float | None = 0.16,
+        post_escape_bias: float | None = 0.12,
+        recovery_lock: int | None = 2,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b63_corridor_result(episode, **kwargs)
+        item = result["trace"][0]
+        if decision is not None:
+            item["b64_decision"] = decision
+        if recovery_tone is not None:
+            item["b64_recovery_tone"] = recovery_tone
+        if vagal_brake is not None:
+            item["b64_vagal_brake"] = vagal_brake
+        if post_escape_bias is not None:
+            item["b64_post_escape_bias"] = post_escape_bias
+        if recovery_lock is not None:
+            item["b64_recovery_lock"] = recovery_lock
+        return result
+
+    def _b65_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "enteric_digestive_hold",
+        enteric_tone: float | None = 0.13,
+        assimilation_drive: float | None = 0.15,
+        forage_readiness: float | None = 0.11,
+        digestive_lock: int | None = 2,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b64_corridor_result(episode, **kwargs)
+        item = result["trace"][0]
+        if decision is not None:
+            item["b65_decision"] = decision
+        if enteric_tone is not None:
+            item["b65_enteric_tone"] = enteric_tone
+        if assimilation_drive is not None:
+            item["b65_assimilation_drive"] = assimilation_drive
+        if forage_readiness is not None:
+            item["b65_forage_readiness"] = forage_readiness
+        if digestive_lock is not None:
+            item["b65_digestive_lock"] = digestive_lock
+        return result
+
+    def _b66_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "immune_recovery_hold",
+        immune_tone: float | None = 0.14,
+        malaise_drive: float | None = 0.16,
+        recovery_veto: float | None = 0.12,
+        inflammation_lock: int | None = 2,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b65_corridor_result(episode, **kwargs)
+        item = result["trace"][0]
+        if decision is not None:
+            item["b66_decision"] = decision
+        if immune_tone is not None:
+            item["b66_immune_tone"] = immune_tone
+        if malaise_drive is not None:
+            item["b66_malaise_drive"] = malaise_drive
+        if recovery_veto is not None:
+            item["b66_recovery_veto"] = recovery_veto
+        if inflammation_lock is not None:
+            item["b66_inflammation_lock"] = inflammation_lock
+        return result
+
+    def _b67_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "glial_recovery_support",
+        glial_reserve: float | None = 0.30,
+        lactate_support: float | None = 0.24,
+        fatigue_pressure: float | None = 0.22,
+        recovery_lock: int | None = 4,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b66_corridor_result(episode, **kwargs)
+        item = result["trace"][0]
+        if decision is not None:
+            item["b67_decision"] = decision
+        if glial_reserve is not None:
+            item["b67_glial_reserve"] = glial_reserve
+        if lactate_support is not None:
+            item["b67_lactate_support"] = lactate_support
+        if fatigue_pressure is not None:
+            item["b67_fatigue_pressure"] = fatigue_pressure
+        if recovery_lock is not None:
+            item["b67_recovery_lock"] = recovery_lock
+        return result
+
+    def _b68_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "motor_recovery_pace",
+        motor_reserve: float | None = 0.28,
+        stride_pacing: float | None = 0.24,
+        overexertion_risk: float | None = 0.22,
+        pacing_lock: int | None = 4,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b67_corridor_result(episode, **kwargs)
+        item = result["trace"][0]
+        if decision is not None:
+            item["b68_decision"] = decision
+        if motor_reserve is not None:
+            item["b68_motor_reserve"] = motor_reserve
+        if stride_pacing is not None:
+            item["b68_stride_pacing"] = stride_pacing
+        if overexertion_risk is not None:
+            item["b68_overexertion_risk"] = overexertion_risk
+        if pacing_lock is not None:
+            item["b68_pacing_lock"] = pacing_lock
+        return result
+
+    def _b69_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "vestibular_recenter",
+        heading_confidence: float | None = 0.30,
+        turn_error: float | None = 0.23,
+        orientation_stability: float | None = 0.25,
+        orientation_lock: int | None = 4,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b68_corridor_result(episode, **kwargs)
+        item = result["trace"][0]
+        if decision is not None:
+            item["b69_decision"] = decision
+        if heading_confidence is not None:
+            item["b69_heading_confidence"] = heading_confidence
+        if turn_error is not None:
+            item["b69_turn_error"] = turn_error
+        if orientation_stability is not None:
+            item["b69_orientation_stability"] = orientation_stability
+        if orientation_lock is not None:
+            item["b69_orientation_lock"] = orientation_lock
+        return result
+
+    def _b70_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "optic_flow_recenter",
+        flow_confidence: float | None = 0.31,
+        lateral_drift: float | None = 0.22,
+        looming_risk: float | None = 0.24,
+        flow_lock: int | None = 4,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b69_corridor_result(episode, **kwargs)
+        item = result["trace"][0]
+        if decision is not None:
+            item["b70_decision"] = decision
+        if flow_confidence is not None:
+            item["b70_flow_confidence"] = flow_confidence
+        if lateral_drift is not None:
+            item["b70_lateral_drift"] = lateral_drift
+        if looming_risk is not None:
+            item["b70_looming_risk"] = looming_risk
+        if flow_lock is not None:
+            item["b70_flow_lock"] = flow_lock
+        return result
+
+    def _b71_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "tectal_recenter",
+        target_salience: float | None = 0.32,
+        orienting_gain: float | None = 0.25,
+        collision_veto: float | None = 0.23,
+        orienting_lock: int | None = 4,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b70_corridor_result(episode, **kwargs)
+        item = result["trace"][0]
+        if decision is not None:
+            item["b71_decision"] = decision
+        if target_salience is not None:
+            item["b71_target_salience"] = target_salience
+        if orienting_gain is not None:
+            item["b71_orienting_gain"] = orienting_gain
+        if collision_veto is not None:
+            item["b71_collision_veto"] = collision_veto
+        if orienting_lock is not None:
+            item["b71_orienting_lock"] = orienting_lock
+        return result
+
+    def _b72_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "pulvinar_filter_recenter",
+        focus_signal: float | None = 0.31,
+        distractor_load: float | None = 0.24,
+        filter_gain: float | None = 0.22,
+        attention_lock: int | None = 4,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b71_corridor_result(episode, **kwargs)
+        for item in result["trace"]:
+            if decision is not None:
+                item["b72_decision"] = decision
+            if focus_signal is not None:
+                item["b72_focus_signal"] = focus_signal
+            if distractor_load is not None:
+                item["b72_distractor_load"] = distractor_load
+            if filter_gain is not None:
+                item["b72_filter_gain"] = filter_gain
+            if attention_lock is not None:
+                item["b72_attention_lock"] = attention_lock
+        return result
+
+    def _b73_corridor_result(
+        self,
+        episode: int,
+        *,
+        decision: str | None = "reticular_surround_hold",
+        inhibitory_tone: float | None = 0.30,
+        surround_suppression: float | None = 0.23,
+        release_drive: float | None = 0.21,
+        inhibition_lock: int | None = 4,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        result = self._b72_corridor_result(episode, **kwargs)
+        for item in result["trace"]:
+            if decision is not None:
+                item["b73_decision"] = decision
+            if inhibitory_tone is not None:
+                item["b73_inhibitory_tone"] = inhibitory_tone
+            if surround_suppression is not None:
+                item["b73_surround_suppression"] = surround_suppression
+            if release_drive is not None:
+                item["b73_release_drive"] = release_drive
+            if inhibition_lock is not None:
+                item["b73_inhibition_lock"] = inhibition_lock
+        return result

@@ -1527,6 +1527,396 @@ class BSeriesActionSpaceTest(unittest.TestCase):
         self.assertEqual(shelter.b_controller_profile, "shelter_defense_gate")
         self.assertEqual(genetic.b_controller_profile, "genetic_defensive_mode")
 
+    def test_diagnostic_catalog_registers_b63_periaqueductal_escape_variants(self) -> None:
+        variants = [
+            "b63_periaqueductal_escape_sequence_h48_bridge_policy",
+            "b63_freeze_release_escape_h48_bridge_policy",
+            "b63_shelter_vector_sequence_h48_bridge_policy",
+            "b63_periaqueductal_escape_sequence_h56_bridge_policy",
+            "b63_genetic_escape_sequence_h48_bridge_policy",
+        ]
+        try:
+            h48, release, shelter, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, release, shelter, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 63)
+            self.assertEqual(config.b_parent_level, 62)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b63_escape_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "periaqueductal_escape_sequence")
+        self.assertEqual(release.b_controller_profile, "freeze_release_escape")
+        self.assertEqual(shelter.b_controller_profile, "shelter_vector_sequence")
+        self.assertEqual(genetic.b_controller_profile, "genetic_escape_sequence")
+
+    def test_diagnostic_catalog_registers_b64_vagal_recovery_variants(self) -> None:
+        variants = [
+            "b64_vagal_recovery_brake_h48_bridge_policy",
+            "b64_post_escape_rest_gate_h48_bridge_policy",
+            "b64_shelter_recovery_coupling_h48_bridge_policy",
+            "b64_vagal_recovery_brake_h56_bridge_policy",
+            "b64_genetic_recovery_brake_h48_bridge_policy",
+        ]
+        try:
+            h48, rest, shelter, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, rest, shelter, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 64)
+            self.assertEqual(config.b_parent_level, 63)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b64_recovery_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "vagal_recovery_brake")
+        self.assertEqual(rest.b_controller_profile, "post_escape_rest_gate")
+        self.assertEqual(shelter.b_controller_profile, "shelter_recovery_coupling")
+        self.assertEqual(genetic.b_controller_profile, "genetic_recovery_brake")
+
+    def test_diagnostic_catalog_registers_b65_enteric_assimilation_variants(self) -> None:
+        variants = [
+            "b65_enteric_assimilation_gate_h48_bridge_policy",
+            "b65_post_recovery_forage_release_h48_bridge_policy",
+            "b65_shelter_digestive_coupling_h48_bridge_policy",
+            "b65_enteric_assimilation_gate_h56_bridge_policy",
+            "b65_genetic_enteric_assimilation_h48_bridge_policy",
+        ]
+        try:
+            h48, release, shelter, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, release, shelter, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 65)
+            self.assertEqual(config.b_parent_level, 64)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b65_enteric_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "enteric_assimilation_gate")
+        self.assertEqual(release.b_controller_profile, "post_recovery_forage_release")
+        self.assertEqual(shelter.b_controller_profile, "shelter_digestive_coupling")
+        self.assertEqual(genetic.b_controller_profile, "genetic_enteric_assimilation")
+
+    def test_diagnostic_catalog_registers_b66_immune_malaise_variants(self) -> None:
+        variants = [
+            "b66_immune_malaise_gate_h48_bridge_policy",
+            "b66_inflammatory_recovery_hold_h48_bridge_policy",
+            "b66_damage_aware_forage_release_h48_bridge_policy",
+            "b66_immune_malaise_gate_h56_bridge_policy",
+            "b66_genetic_immune_malaise_h48_bridge_policy",
+        ]
+        try:
+            h48, recovery, release, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, recovery, release, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 66)
+            self.assertEqual(config.b_parent_level, 65)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b66_immune_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "immune_malaise_gate")
+        self.assertEqual(recovery.b_controller_profile, "inflammatory_recovery_hold")
+        self.assertEqual(release.b_controller_profile, "damage_aware_forage_release")
+        self.assertEqual(genetic.b_controller_profile, "genetic_immune_malaise")
+
+    def test_diagnostic_catalog_registers_b67_glial_energy_variants(self) -> None:
+        variants = [
+            "b67_glial_energy_gate_h48_bridge_policy",
+            "b67_lactate_recovery_support_h48_bridge_policy",
+            "b67_fatigue_aware_release_h48_bridge_policy",
+            "b67_glial_energy_gate_h56_bridge_policy",
+            "b67_genetic_glial_energy_h48_bridge_policy",
+        ]
+        try:
+            h48, lactate, fatigue, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, lactate, fatigue, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 67)
+            self.assertEqual(config.b_parent_level, 66)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b67_glial_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "glial_energy_gate")
+        self.assertEqual(lactate.b_controller_profile, "lactate_recovery_support")
+        self.assertEqual(fatigue.b_controller_profile, "fatigue_aware_release")
+        self.assertEqual(genetic.b_controller_profile, "genetic_glial_energy")
+
+    def test_diagnostic_catalog_registers_b68_motor_pacing_variants(self) -> None:
+        variants = [
+            "b68_proprioceptive_pacing_gate_h48_bridge_policy",
+            "b68_stride_recovery_pacing_h48_bridge_policy",
+            "b68_overexertion_aware_release_h48_bridge_policy",
+            "b68_proprioceptive_pacing_gate_h56_bridge_policy",
+            "b68_genetic_motor_pacing_h48_bridge_policy",
+        ]
+        try:
+            h48, stride, release, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, stride, release, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 68)
+            self.assertEqual(config.b_parent_level, 67)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b68_motor_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "proprioceptive_pacing_gate")
+        self.assertEqual(stride.b_controller_profile, "stride_recovery_pacing")
+        self.assertEqual(release.b_controller_profile, "overexertion_aware_release")
+        self.assertEqual(genetic.b_controller_profile, "genetic_motor_pacing")
+
+    def test_diagnostic_catalog_registers_b69_vestibular_orientation_variants(self) -> None:
+        variants = [
+            "b69_vestibular_orientation_gate_h48_bridge_policy",
+            "b69_heading_stability_pacing_h48_bridge_policy",
+            "b69_turn_error_recovery_h48_bridge_policy",
+            "b69_vestibular_orientation_gate_h56_bridge_policy",
+            "b69_genetic_orientation_gate_h48_bridge_policy",
+        ]
+        try:
+            h48, heading, recovery, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, heading, recovery, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 69)
+            self.assertEqual(config.b_parent_level, 68)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b69_orientation_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "vestibular_orientation_gate")
+        self.assertEqual(heading.b_controller_profile, "heading_stability_pacing")
+        self.assertEqual(recovery.b_controller_profile, "turn_error_recovery")
+        self.assertEqual(genetic.b_controller_profile, "genetic_orientation_gate")
+
+    def test_diagnostic_catalog_registers_b70_optic_flow_variants(self) -> None:
+        variants = [
+            "b70_optic_flow_stabilization_gate_h48_bridge_policy",
+            "b70_lateral_flow_pacing_h48_bridge_policy",
+            "b70_looming_risk_recovery_h48_bridge_policy",
+            "b70_optic_flow_stabilization_gate_h56_bridge_policy",
+            "b70_genetic_optic_flow_gate_h48_bridge_policy",
+        ]
+        try:
+            h48, lateral, looming, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, lateral, looming, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 70)
+            self.assertEqual(config.b_parent_level, 69)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b70_flow_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "optic_flow_stabilization_gate")
+        self.assertEqual(lateral.b_controller_profile, "lateral_flow_pacing")
+        self.assertEqual(looming.b_controller_profile, "looming_risk_recovery")
+        self.assertEqual(genetic.b_controller_profile, "genetic_optic_flow_gate")
+
+    def test_diagnostic_catalog_registers_b71_tectal_orienting_variants(self) -> None:
+        variants = [
+            "b71_tectal_orienting_gate_h48_bridge_policy",
+            "b71_salience_map_pacing_h48_bridge_policy",
+            "b71_collision_veto_recovery_h48_bridge_policy",
+            "b71_tectal_orienting_gate_h56_bridge_policy",
+            "b71_genetic_tectal_orienting_h48_bridge_policy",
+        ]
+        try:
+            h48, salience, collision, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, salience, collision, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 71)
+            self.assertEqual(config.b_parent_level, 70)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b71_orienting_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "tectal_orienting_gate")
+        self.assertEqual(salience.b_controller_profile, "salience_map_pacing")
+        self.assertEqual(collision.b_controller_profile, "collision_veto_recovery")
+        self.assertEqual(genetic.b_controller_profile, "genetic_tectal_orienting")
+
+    def test_diagnostic_catalog_registers_b72_pulvinar_attention_variants(self) -> None:
+        variants = [
+            "b72_pulvinar_attention_gate_h48_bridge_policy",
+            "b72_distractor_filter_pacing_h48_bridge_policy",
+            "b72_focus_lock_recovery_h48_bridge_policy",
+            "b72_pulvinar_attention_gate_h56_bridge_policy",
+            "b72_genetic_pulvinar_attention_h48_bridge_policy",
+        ]
+        try:
+            h48, distractor, focus, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, distractor, focus, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 72)
+            self.assertEqual(config.b_parent_level, 71)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b72_attention_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "pulvinar_attention_gate")
+        self.assertEqual(distractor.b_controller_profile, "distractor_filter_pacing")
+        self.assertEqual(focus.b_controller_profile, "focus_lock_recovery")
+        self.assertEqual(genetic.b_controller_profile, "genetic_pulvinar_attention")
+
+    def test_diagnostic_catalog_registers_b73_reticular_inhibition_variants(self) -> None:
+        variants = [
+            "b73_reticular_inhibition_gate_h48_bridge_policy",
+            "b73_surround_suppression_pacing_h48_bridge_policy",
+            "b73_focus_release_recovery_h48_bridge_policy",
+            "b73_reticular_inhibition_gate_h56_bridge_policy",
+            "b73_genetic_reticular_inhibition_h48_bridge_policy",
+        ]
+        try:
+            h48, surround, focus, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, surround, focus, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 73)
+            self.assertEqual(config.b_parent_level, 72)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b73_inhibition_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "reticular_inhibition_gate")
+        self.assertEqual(surround.b_controller_profile, "surround_suppression_pacing")
+        self.assertEqual(focus.b_controller_profile, "focus_release_recovery")
+        self.assertEqual(genetic.b_controller_profile, "genetic_reticular_inhibition")
+
+    def test_diagnostic_catalog_registers_b74_thalamic_rebound_variants(self) -> None:
+        variants = [
+            "b74_thalamic_rebound_gate_h48_bridge_policy",
+            "b74_rebound_release_pacing_h48_bridge_policy",
+            "b74_post_inhibition_recovery_h48_bridge_policy",
+            "b74_thalamic_rebound_gate_h56_bridge_policy",
+            "b74_genetic_thalamic_rebound_h48_bridge_policy",
+        ]
+        try:
+            h48, release, recovery, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, release, recovery, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 74)
+            self.assertEqual(config.b_parent_level, 73)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b74_rebound_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "thalamic_rebound_gate")
+        self.assertEqual(release.b_controller_profile, "rebound_release_pacing")
+        self.assertEqual(recovery.b_controller_profile, "post_inhibition_recovery")
+        self.assertEqual(genetic.b_controller_profile, "genetic_thalamic_rebound")
+
+    def test_diagnostic_catalog_registers_b75_basal_thalamic_release_variants(self) -> None:
+        variants = [
+            "b75_basal_thalamic_release_h48_bridge_policy",
+            "b75_release_burst_pacing_h48_bridge_policy",
+            "b75_go_nogo_rebound_timing_h48_bridge_policy",
+            "b75_basal_thalamic_release_h56_bridge_policy",
+            "b75_genetic_basal_thalamic_release_h48_bridge_policy",
+        ]
+        try:
+            h48, burst, timing, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, burst, timing, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 75)
+            self.assertEqual(config.b_parent_level, 74)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b75_timing_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "basal_thalamic_release")
+        self.assertEqual(burst.b_controller_profile, "release_burst_pacing")
+        self.assertEqual(timing.b_controller_profile, "go_nogo_rebound_timing")
+        self.assertEqual(genetic.b_controller_profile, "genetic_basal_thalamic_release")
+
+    def test_diagnostic_catalog_registers_b76_cerebellar_stride_variants(self) -> None:
+        variants = [
+            "b76_cerebellar_stride_gate_h48_bridge_policy",
+            "b76_stride_error_pacing_h48_bridge_policy",
+            "b76_burst_smoothing_recovery_h48_bridge_policy",
+            "b76_cerebellar_stride_gate_h56_bridge_policy",
+            "b76_genetic_cerebellar_stride_h48_bridge_policy",
+        ]
+        try:
+            h48, pacing, smoothing, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, pacing, smoothing, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 76)
+            self.assertEqual(config.b_parent_level, 75)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b76_timing_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "cerebellar_stride_gate")
+        self.assertEqual(pacing.b_controller_profile, "stride_error_pacing")
+        self.assertEqual(smoothing.b_controller_profile, "burst_smoothing_recovery")
+        self.assertEqual(genetic.b_controller_profile, "genetic_cerebellar_stride")
+
+    def test_diagnostic_catalog_registers_b77_olivary_error_variants(self) -> None:
+        variants = [
+            "b77_olivary_error_correction_h48_bridge_policy",
+            "b77_error_prediction_pacing_h48_bridge_policy",
+            "b77_climbing_fiber_recovery_h48_bridge_policy",
+            "b77_olivary_error_correction_h56_bridge_policy",
+            "b77_genetic_olivary_error_h48_bridge_policy",
+        ]
+        try:
+            h48, pacing, recovery, h56, genetic = resolve_ablation_configs(variants)
+        except KeyError as exc:
+            self.fail(str(exc))
+
+        for config in (h48, pacing, recovery, h56, genetic):
+            self.assertEqual(config.architecture, "b_series")
+            self.assertEqual(config.b_level, 77)
+            self.assertEqual(config.b_parent_level, 76)
+            self.assertFalse(config.b_transfer_allow_low_coverage)
+            self.assertIn("b77_error_decay", config.b_controller_params)
+        self.assertEqual(h48.b_hidden_dim, 48)
+        self.assertEqual(h56.b_hidden_dim, 56)
+        self.assertEqual(h48.b_controller_profile, "olivary_error_correction")
+        self.assertEqual(pacing.b_controller_profile, "error_prediction_pacing")
+        self.assertEqual(recovery.b_controller_profile, "climbing_fiber_recovery")
+        self.assertEqual(genetic.b_controller_profile, "genetic_olivary_error")
+
     def test_legacy_variant_is_not_routed_through_current_world_brain(self) -> None:
         config = _b0_config("b0_legacy_semantic_policy")
         with self.assertRaisesRegex(ValueError, "LegacyB0Simulation"):

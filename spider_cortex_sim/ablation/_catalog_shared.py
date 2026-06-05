@@ -367,6 +367,86 @@ from ..b_series import (
     B62_FREEZE_FLEE_BALANCE_H48_POLICY_NAME,
     B62_GENETIC_DEFENSIVE_MODE_H48_POLICY_NAME,
     B62_SHELTER_DEFENSE_GATE_H48_POLICY_NAME,
+    B63_FREEZE_RELEASE_ESCAPE_H48_POLICY_NAME,
+    B63_GENETIC_ESCAPE_SEQUENCE_H48_POLICY_NAME,
+    B63_PERIAQUEDUCTAL_ESCAPE_SEQUENCE_H48_POLICY_NAME,
+    B63_PERIAQUEDUCTAL_ESCAPE_SEQUENCE_H56_POLICY_NAME,
+    B63_SHELTER_VECTOR_SEQUENCE_H48_POLICY_NAME,
+    B64_GENETIC_RECOVERY_BRAKE_H48_POLICY_NAME,
+    B64_POST_ESCAPE_REST_GATE_H48_POLICY_NAME,
+    B64_SHELTER_RECOVERY_COUPLING_H48_POLICY_NAME,
+    B64_VAGAL_RECOVERY_BRAKE_H48_POLICY_NAME,
+    B64_VAGAL_RECOVERY_BRAKE_H56_POLICY_NAME,
+    B65_ENTERIC_ASSIMILATION_GATE_H48_POLICY_NAME,
+    B65_ENTERIC_ASSIMILATION_GATE_H56_POLICY_NAME,
+    B65_GENETIC_ENTERIC_ASSIMILATION_H48_POLICY_NAME,
+    B65_POST_RECOVERY_FORAGE_RELEASE_H48_POLICY_NAME,
+    B65_SHELTER_DIGESTIVE_COUPLING_H48_POLICY_NAME,
+    B66_DAMAGE_AWARE_FORAGE_RELEASE_H48_POLICY_NAME,
+    B66_GENETIC_IMMUNE_MALAISE_H48_POLICY_NAME,
+    B66_IMMUNE_MALAISE_GATE_H48_POLICY_NAME,
+    B66_IMMUNE_MALAISE_GATE_H56_POLICY_NAME,
+    B66_INFLAMMATORY_RECOVERY_HOLD_H48_POLICY_NAME,
+    B67_FATIGUE_AWARE_RELEASE_H48_POLICY_NAME,
+    B67_GENETIC_GLIAL_ENERGY_H48_POLICY_NAME,
+    B67_GLIAL_ENERGY_GATE_H48_POLICY_NAME,
+    B67_GLIAL_ENERGY_GATE_H56_POLICY_NAME,
+    B67_LACTATE_RECOVERY_SUPPORT_H48_POLICY_NAME,
+    B68_GENETIC_MOTOR_PACING_H48_POLICY_NAME,
+    B68_OVEREXERTION_AWARE_RELEASE_H48_POLICY_NAME,
+    B68_PROPRIOCEPTIVE_PACING_GATE_H48_POLICY_NAME,
+    B68_PROPRIOCEPTIVE_PACING_GATE_H56_POLICY_NAME,
+    B68_STRIDE_RECOVERY_PACING_H48_POLICY_NAME,
+    B69_GENETIC_ORIENTATION_GATE_H48_POLICY_NAME,
+    B69_HEADING_STABILITY_PACING_H48_POLICY_NAME,
+    B69_TURN_ERROR_RECOVERY_H48_POLICY_NAME,
+    B69_VESTIBULAR_ORIENTATION_GATE_H48_POLICY_NAME,
+    B69_VESTIBULAR_ORIENTATION_GATE_H56_POLICY_NAME,
+    B70_GENETIC_OPTIC_FLOW_GATE_H48_POLICY_NAME,
+    B70_LATERAL_FLOW_PACING_H48_POLICY_NAME,
+    B70_LOOMING_RISK_RECOVERY_H48_POLICY_NAME,
+    B70_OPTIC_FLOW_STABILIZATION_GATE_H48_POLICY_NAME,
+    B70_OPTIC_FLOW_STABILIZATION_GATE_H56_POLICY_NAME,
+    B71_COLLISION_VETO_RECOVERY_H48_POLICY_NAME,
+    B71_GENETIC_TECTAL_ORIENTING_H48_POLICY_NAME,
+    B71_SALIENCE_MAP_PACING_H48_POLICY_NAME,
+    B71_TECTAL_ORIENTING_GATE_H48_POLICY_NAME,
+    B71_TECTAL_ORIENTING_GATE_H56_POLICY_NAME,
+    B72_DISTRACTOR_FILTER_PACING_H48_POLICY_NAME,
+    B72_FOCUS_LOCK_RECOVERY_H48_POLICY_NAME,
+    B72_GENETIC_PULVINAR_ATTENTION_H48_POLICY_NAME,
+    B72_PULVINAR_ATTENTION_GATE_H48_POLICY_NAME,
+    B72_PULVINAR_ATTENTION_GATE_H56_POLICY_NAME,
+    B73_FOCUS_RELEASE_RECOVERY_H48_POLICY_NAME,
+    B73_GENETIC_RETICULAR_INHIBITION_H48_POLICY_NAME,
+    B73_RETICULAR_INHIBITION_GATE_H48_POLICY_NAME,
+    B73_RETICULAR_INHIBITION_GATE_H56_POLICY_NAME,
+    B73_SURROUND_SUPPRESSION_PACING_H48_POLICY_NAME,
+    B74_GENETIC_THALAMIC_REBOUND_H48_POLICY_NAME,
+    B74_POST_INHIBITION_RECOVERY_H48_POLICY_NAME,
+    B74_REBOUND_RELEASE_PACING_H48_POLICY_NAME,
+    B74_THALAMIC_REBOUND_GATE_H48_POLICY_NAME,
+    B74_THALAMIC_REBOUND_GATE_H56_POLICY_NAME,
+    B75_BASAL_THALAMIC_RELEASE_H48_POLICY_NAME,
+    B75_BASAL_THALAMIC_RELEASE_H56_POLICY_NAME,
+    B75_GENETIC_BASAL_THALAMIC_RELEASE_H48_POLICY_NAME,
+    B75_GO_NOGO_REBOUND_TIMING_H48_POLICY_NAME,
+    B75_RELEASE_BURST_PACING_H48_POLICY_NAME,
+    B76_BURST_SMOOTHING_RECOVERY_H48_POLICY_NAME,
+    B76_CEREBELLAR_STRIDE_GATE_H48_POLICY_NAME,
+    B76_CEREBELLAR_STRIDE_GATE_H56_POLICY_NAME,
+    B76_GENETIC_CEREBELLAR_STRIDE_H48_POLICY_NAME,
+    B76_STRIDE_ERROR_PACING_H48_POLICY_NAME,
+    B77_CLIMBING_FIBER_RECOVERY_H48_POLICY_NAME,
+    B77_ERROR_PREDICTION_PACING_H48_POLICY_NAME,
+    B77_GENETIC_OLIVARY_ERROR_H48_POLICY_NAME,
+    B77_OLIVARY_ERROR_CORRECTION_H48_POLICY_NAME,
+    B77_OLIVARY_ERROR_CORRECTION_H56_POLICY_NAME,
+    B78_GENETIC_VESTIBULAR_BALANCE_H48_POLICY_NAME,
+    B78_HEAD_STABILIZATION_H48_POLICY_NAME,
+    B78_LOCOMOTOR_CONFIDENCE_H48_POLICY_NAME,
+    B78_VESTIBULAR_BALANCE_H48_POLICY_NAME,
+    B78_VESTIBULAR_BALANCE_H56_POLICY_NAME,
 )
 
 
@@ -1063,6 +1143,201 @@ B62_BASE_DEFENSIVE_MODE_PARAMS: dict[str, float] = (
         "b62_freeze_threshold": 0.30,
         "b62_flee_threshold": 0.23,
         "b62_defense_lock_ticks": 4.0,
+    }
+)
+B63_BASE_PERIAQUEDUCTAL_ESCAPE_PARAMS: dict[str, float] = (
+    B62_BASE_DEFENSIVE_MODE_PARAMS
+    | {
+        "b63_escape_decay": 0.88,
+        "b63_escape_urgency_gain": 0.34,
+        "b63_sequence_gain": 0.30,
+        "b63_shelter_vector_gain": 0.30,
+        "b63_freeze_release_gain": 0.24,
+        "b63_escape_threshold": 0.22,
+        "b63_freeze_release_threshold": 0.20,
+        "b63_escape_lock_ticks": 4.0,
+    }
+)
+B64_BASE_VAGAL_RECOVERY_PARAMS: dict[str, float] = (
+    B63_BASE_PERIAQUEDUCTAL_ESCAPE_PARAMS
+    | {
+        "b64_recovery_decay": 0.90,
+        "b64_recovery_tone_gain": 0.34,
+        "b64_vagal_brake_gain": 0.32,
+        "b64_post_escape_gain": 0.30,
+        "b64_recovery_threshold": 0.18,
+        "b64_rest_threshold": 0.22,
+        "b64_recovery_lock_ticks": 4.0,
+    }
+)
+B65_BASE_ENTERIC_ASSIMILATION_PARAMS: dict[str, float] = (
+    B64_BASE_VAGAL_RECOVERY_PARAMS
+    | {
+        "b65_enteric_decay": 0.90,
+        "b65_assimilation_gain": 0.34,
+        "b65_forage_readiness_gain": 0.30,
+        "b65_recovery_coupling_gain": 0.30,
+        "b65_digestive_threshold": 0.18,
+        "b65_release_threshold": 0.34,
+        "b65_digestive_lock_ticks": 4.0,
+    }
+)
+B66_BASE_IMMUNE_MALAISE_PARAMS: dict[str, float] = (
+    B65_BASE_ENTERIC_ASSIMILATION_PARAMS
+    | {
+        "b66_immune_decay": 0.90,
+        "b66_immune_tone_gain": 0.34,
+        "b66_malaise_gain": 0.32,
+        "b66_recovery_veto_gain": 0.30,
+        "b66_hold_threshold": 0.18,
+        "b66_release_threshold": 0.30,
+        "b66_inflammation_lock_ticks": 4.0,
+    }
+)
+
+B67_BASE_GLIAL_ENERGY_PARAMS: dict[str, float] = (
+    B66_BASE_IMMUNE_MALAISE_PARAMS
+    | {
+        "b67_glial_decay": 0.90,
+        "b67_energy_reserve_gain": 0.32,
+        "b67_lactate_support_gain": 0.30,
+        "b67_fatigue_gain": 0.34,
+        "b67_hold_threshold": 0.18,
+        "b67_release_threshold": 0.30,
+        "b67_recovery_lock_ticks": 4.0,
+    }
+)
+
+B68_BASE_MOTOR_PACING_PARAMS: dict[str, float] = (
+    B67_BASE_GLIAL_ENERGY_PARAMS
+    | {
+        "b68_motor_decay": 0.90,
+        "b68_motor_reserve_gain": 0.32,
+        "b68_stride_pacing_gain": 0.30,
+        "b68_overexertion_gain": 0.34,
+        "b68_hold_threshold": 0.18,
+        "b68_release_threshold": 0.30,
+        "b68_pacing_lock_ticks": 4.0,
+    }
+)
+B69_BASE_VESTIBULAR_ORIENTATION_PARAMS: dict[str, float] = (
+    B68_BASE_MOTOR_PACING_PARAMS
+    | {
+        "b69_orientation_decay": 0.90,
+        "b69_heading_confidence_gain": 0.32,
+        "b69_turn_error_gain": 0.30,
+        "b69_stability_gain": 0.34,
+        "b69_hold_threshold": 0.18,
+        "b69_release_threshold": 0.30,
+        "b69_orientation_lock_ticks": 4.0,
+    }
+)
+B70_BASE_OPTIC_FLOW_PARAMS: dict[str, float] = (
+    B69_BASE_VESTIBULAR_ORIENTATION_PARAMS
+    | {
+        "b70_flow_decay": 0.90,
+        "b70_flow_confidence_gain": 0.32,
+        "b70_lateral_drift_gain": 0.30,
+        "b70_looming_risk_gain": 0.34,
+        "b70_hold_threshold": 0.18,
+        "b70_release_threshold": 0.30,
+        "b70_flow_lock_ticks": 4.0,
+    }
+)
+B71_BASE_TECTAL_ORIENTING_PARAMS: dict[str, float] = (
+    B70_BASE_OPTIC_FLOW_PARAMS
+    | {
+        "b71_orienting_decay": 0.90,
+        "b71_target_salience_gain": 0.32,
+        "b71_orienting_gain": 0.30,
+        "b71_collision_veto_gain": 0.34,
+        "b71_hold_threshold": 0.18,
+        "b71_release_threshold": 0.30,
+        "b71_orienting_lock_ticks": 4.0,
+    }
+)
+B72_BASE_PULVINAR_ATTENTION_PARAMS: dict[str, float] = (
+    B71_BASE_TECTAL_ORIENTING_PARAMS
+    | {
+        "b72_attention_decay": 0.90,
+        "b72_focus_gain": 0.34,
+        "b72_distractor_gain": 0.32,
+        "b72_filter_gain": 0.30,
+        "b72_hold_threshold": 0.18,
+        "b72_release_threshold": 0.30,
+        "b72_attention_lock_ticks": 4.0,
+    }
+)
+B73_BASE_RETICULAR_INHIBITION_PARAMS: dict[str, float] = (
+    B72_BASE_PULVINAR_ATTENTION_PARAMS
+    | {
+        "b73_inhibition_decay": 0.90,
+        "b73_tone_gain": 0.34,
+        "b73_suppression_gain": 0.32,
+        "b73_release_gain": 0.30,
+        "b73_hold_threshold": 0.18,
+        "b73_release_threshold": 0.30,
+        "b73_inhibition_lock_ticks": 4.0,
+    }
+)
+B74_BASE_THALAMIC_REBOUND_PARAMS: dict[str, float] = (
+    B73_BASE_RETICULAR_INHIBITION_PARAMS
+    | {
+        "b74_rebound_decay": 0.90,
+        "b74_rebound_gain": 0.34,
+        "b74_aftereffect_gain": 0.32,
+        "b74_release_gain": 0.30,
+        "b74_hold_threshold": 0.18,
+        "b74_release_threshold": 0.30,
+        "b74_rebound_lock_ticks": 4.0,
+    }
+)
+B75_BASE_BASAL_THALAMIC_RELEASE_PARAMS: dict[str, float] = (
+    B74_BASE_THALAMIC_REBOUND_PARAMS
+    | {
+        "b75_timing_decay": 0.90,
+        "b75_go_gain": 0.34,
+        "b75_nogo_gain": 0.32,
+        "b75_burst_gain": 0.30,
+        "b75_hold_threshold": 0.18,
+        "b75_release_threshold": 0.30,
+        "b75_release_lock_ticks": 4.0,
+    }
+)
+B76_BASE_CEREBELLAR_STRIDE_PARAMS: dict[str, float] = (
+    B75_BASE_BASAL_THALAMIC_RELEASE_PARAMS
+    | {
+        "b76_timing_decay": 0.90,
+        "b76_stride_gain": 0.34,
+        "b76_error_gain": 0.32,
+        "b76_smoothing_gain": 0.30,
+        "b76_hold_threshold": 0.18,
+        "b76_stride_threshold": 0.30,
+        "b76_stride_lock_ticks": 4.0,
+    }
+)
+B77_BASE_OLIVARY_ERROR_PARAMS: dict[str, float] = (
+    B76_BASE_CEREBELLAR_STRIDE_PARAMS
+    | {
+        "b77_error_decay": 0.90,
+        "b77_prediction_gain": 0.34,
+        "b77_climbing_gain": 0.32,
+        "b77_correction_gain": 0.30,
+        "b77_hold_threshold": 0.18,
+        "b77_release_threshold": 0.30,
+        "b77_error_lock_ticks": 4.0,
+    }
+)
+B78_BASE_VESTIBULAR_BALANCE_PARAMS: dict[str, float] = (
+    B77_BASE_OLIVARY_ERROR_PARAMS
+    | {
+        "b78_balance_decay": 0.90,
+        "b78_error_gain": 0.34,
+        "b78_stabilization_gain": 0.32,
+        "b78_confidence_gain": 0.30,
+        "b78_hold_threshold": 0.18,
+        "b78_release_threshold": 0.30,
+        "b78_balance_lock_ticks": 4.0,
     }
 )
 

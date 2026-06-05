@@ -744,3 +744,227 @@ def b61_amygdala_safety_value_checkpoint_path(
         / f"seed_{int(seed)}"
         / "best"
     )
+
+
+def b62_defensive_mode_selector_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B62_DEFENSIVE_MODE_SELECTOR_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b63_periaqueductal_escape_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B63_PERIAQUEDUCTAL_ESCAPE_SEQUENCE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b64_vagal_recovery_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B64_VAGAL_RECOVERY_BRAKE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b65_enteric_assimilation_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B65_ENTERIC_ASSIMILATION_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b66_immune_malaise_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B66_IMMUNE_MALAISE_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b67_glial_energy_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B67_GLIAL_ENERGY_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b68_motor_pacing_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B68_PROPRIOCEPTIVE_PACING_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b69_vestibular_orientation_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B69_VESTIBULAR_ORIENTATION_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b70_optic_flow_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B70_OPTIC_FLOW_STABILIZATION_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b71_tectal_orienting_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B71_TECTAL_ORIENTING_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b72_pulvinar_attention_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B72_PULVINAR_ATTENTION_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b73_reticular_inhibition_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B73_RETICULAR_INHIBITION_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b74_thalamic_rebound_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B74_THALAMIC_REBOUND_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b75_basal_thalamic_release_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B75_BASAL_THALAMIC_RELEASE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b76_cerebellar_stride_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B76_CEREBELLAR_STRIDE_GATE_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )
+
+
+def b77_olivary_error_checkpoint_path(
+    *,
+    root: str | Path = B_SERIES_EVOLUTION_ROOT,
+    seed: int = 7,
+) -> Path:
+    root_path = Path(root)
+    return (
+        root_path
+        / B77_OLIVARY_ERROR_CORRECTION_H48_POLICY_NAME
+        / f"seed_{int(seed)}"
+        / "best"
+    )

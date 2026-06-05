@@ -962,6 +962,531 @@ class BSeriesCheckpointTestPart2(unittest.TestCase):
                 self.assertGreaterEqual(float(report["coverage"]), min_coverage)
                 self.assertFalse(report["allow_low_coverage"])
 
+    def test_b63_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b63 = getattr(
+            b_series_evolution_module,
+            "build_b63_periaqueductal_escape_config",
+            None,
+        )
+        self.assertIsNotNone(build_b63)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b62_defensive_mode_source(tmpdir)
+            variants = (
+                ("b63_periaqueductal_escape_sequence_h48_bridge_policy", 1.0),
+                ("b63_freeze_release_escape_h48_bridge_policy", 1.0),
+                ("b63_shelter_vector_sequence_h48_bridge_policy", 1.0),
+                ("b63_periaqueductal_escape_sequence_h56_bridge_policy", 0.85),
+                ("b63_genetic_escape_sequence_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b63(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=362 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 63)
+                self.assertEqual(report["parent_level"], 62)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b64_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b64 = getattr(
+            b_series_evolution_module,
+            "build_b64_vagal_recovery_config",
+            None,
+        )
+        self.assertIsNotNone(build_b64)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b63_periaqueductal_escape_source(tmpdir)
+            variants = (
+                ("b64_vagal_recovery_brake_h48_bridge_policy", 1.0),
+                ("b64_post_escape_rest_gate_h48_bridge_policy", 1.0),
+                ("b64_shelter_recovery_coupling_h48_bridge_policy", 1.0),
+                ("b64_vagal_recovery_brake_h56_bridge_policy", 0.85),
+                ("b64_genetic_recovery_brake_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b64(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=372 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 64)
+                self.assertEqual(report["parent_level"], 63)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b65_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b65 = getattr(
+            b_series_evolution_module,
+            "build_b65_enteric_assimilation_config",
+            None,
+        )
+        self.assertIsNotNone(build_b65)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b64_vagal_recovery_source(tmpdir)
+            variants = (
+                ("b65_enteric_assimilation_gate_h48_bridge_policy", 1.0),
+                ("b65_post_recovery_forage_release_h48_bridge_policy", 1.0),
+                ("b65_shelter_digestive_coupling_h48_bridge_policy", 1.0),
+                ("b65_enteric_assimilation_gate_h56_bridge_policy", 0.85),
+                ("b65_genetic_enteric_assimilation_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b65(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=382 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 65)
+                self.assertEqual(report["parent_level"], 64)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b66_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b66 = getattr(
+            b_series_evolution_module,
+            "build_b66_immune_malaise_config",
+            None,
+        )
+        self.assertIsNotNone(build_b66)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b65_enteric_assimilation_source(tmpdir)
+            variants = (
+                ("b66_immune_malaise_gate_h48_bridge_policy", 1.0),
+                ("b66_inflammatory_recovery_hold_h48_bridge_policy", 1.0),
+                ("b66_damage_aware_forage_release_h48_bridge_policy", 1.0),
+                ("b66_immune_malaise_gate_h56_bridge_policy", 0.85),
+                ("b66_genetic_immune_malaise_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b66(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=392 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 66)
+                self.assertEqual(report["parent_level"], 65)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b67_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b67 = getattr(
+            b_series_evolution_module,
+            "build_b67_glial_energy_config",
+            None,
+        )
+        self.assertIsNotNone(build_b67)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b66_immune_malaise_source(tmpdir)
+            variants = (
+                ("b67_glial_energy_gate_h48_bridge_policy", 1.0),
+                ("b67_lactate_recovery_support_h48_bridge_policy", 1.0),
+                ("b67_fatigue_aware_release_h48_bridge_policy", 1.0),
+                ("b67_glial_energy_gate_h56_bridge_policy", 0.85),
+                ("b67_genetic_glial_energy_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b67(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=397 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 67)
+                self.assertEqual(report["parent_level"], 66)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b68_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b68 = getattr(
+            b_series_evolution_module,
+            "build_b68_motor_pacing_config",
+            None,
+        )
+        self.assertIsNotNone(build_b68)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b67_glial_energy_source(tmpdir)
+            variants = (
+                ("b68_proprioceptive_pacing_gate_h48_bridge_policy", 1.0),
+                ("b68_stride_recovery_pacing_h48_bridge_policy", 1.0),
+                ("b68_overexertion_aware_release_h48_bridge_policy", 1.0),
+                ("b68_proprioceptive_pacing_gate_h56_bridge_policy", 0.85),
+                ("b68_genetic_motor_pacing_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b68(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=402 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 68)
+                self.assertEqual(report["parent_level"], 67)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b69_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b69 = getattr(
+            b_series_evolution_module,
+            "build_b69_vestibular_orientation_config",
+            None,
+        )
+        self.assertIsNotNone(build_b69)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b68_motor_pacing_source(tmpdir)
+            variants = (
+                ("b69_vestibular_orientation_gate_h48_bridge_policy", 1.0),
+                ("b69_heading_stability_pacing_h48_bridge_policy", 1.0),
+                ("b69_turn_error_recovery_h48_bridge_policy", 1.0),
+                ("b69_vestibular_orientation_gate_h56_bridge_policy", 0.85),
+                ("b69_genetic_orientation_gate_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b69(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=407 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 69)
+                self.assertEqual(report["parent_level"], 68)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b70_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b70 = getattr(
+            b_series_evolution_module,
+            "build_b70_optic_flow_config",
+            None,
+        )
+        self.assertIsNotNone(build_b70)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b69_vestibular_orientation_source(tmpdir)
+            variants = (
+                ("b70_optic_flow_stabilization_gate_h48_bridge_policy", 1.0),
+                ("b70_lateral_flow_pacing_h48_bridge_policy", 1.0),
+                ("b70_looming_risk_recovery_h48_bridge_policy", 1.0),
+                ("b70_optic_flow_stabilization_gate_h56_bridge_policy", 0.85),
+                ("b70_genetic_optic_flow_gate_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b70(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=412 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 70)
+                self.assertEqual(report["parent_level"], 69)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b71_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b71 = getattr(
+            b_series_evolution_module,
+            "build_b71_tectal_orienting_config",
+            None,
+        )
+        self.assertIsNotNone(build_b71)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b70_optic_flow_source(tmpdir)
+            variants = (
+                ("b71_tectal_orienting_gate_h48_bridge_policy", 1.0),
+                ("b71_salience_map_pacing_h48_bridge_policy", 1.0),
+                ("b71_collision_veto_recovery_h48_bridge_policy", 1.0),
+                ("b71_tectal_orienting_gate_h56_bridge_policy", 0.85),
+                ("b71_genetic_tectal_orienting_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b71(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=417 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 71)
+                self.assertEqual(report["parent_level"], 70)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b72_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b72 = getattr(
+            b_series_evolution_module,
+            "build_b72_pulvinar_attention_config",
+            None,
+        )
+        self.assertIsNotNone(build_b72)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b71_tectal_orienting_source(tmpdir)
+            variants = (
+                ("b72_pulvinar_attention_gate_h48_bridge_policy", 1.0),
+                ("b72_distractor_filter_pacing_h48_bridge_policy", 1.0),
+                ("b72_focus_lock_recovery_h48_bridge_policy", 1.0),
+                ("b72_pulvinar_attention_gate_h56_bridge_policy", 0.85),
+                ("b72_genetic_pulvinar_attention_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b72(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=422 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 72)
+                self.assertEqual(report["parent_level"], 71)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b73_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b73 = getattr(
+            b_series_evolution_module,
+            "build_b73_reticular_inhibition_config",
+            None,
+        )
+        self.assertIsNotNone(build_b73)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b72_pulvinar_attention_source(tmpdir)
+            variants = (
+                ("b73_reticular_inhibition_gate_h48_bridge_policy", 1.0),
+                ("b73_surround_suppression_pacing_h48_bridge_policy", 1.0),
+                ("b73_focus_release_recovery_h48_bridge_policy", 1.0),
+                ("b73_reticular_inhibition_gate_h56_bridge_policy", 0.85),
+                ("b73_genetic_reticular_inhibition_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b73(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=427 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 73)
+                self.assertEqual(report["parent_level"], 72)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b74_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b74 = getattr(
+            b_series_evolution_module,
+            "build_b74_thalamic_rebound_config",
+            None,
+        )
+        self.assertIsNotNone(build_b74)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b73_reticular_inhibition_source(tmpdir)
+            variants = (
+                ("b74_thalamic_rebound_gate_h48_bridge_policy", 1.0),
+                ("b74_rebound_release_pacing_h48_bridge_policy", 1.0),
+                ("b74_post_inhibition_recovery_h48_bridge_policy", 1.0),
+                ("b74_thalamic_rebound_gate_h56_bridge_policy", 0.85),
+                ("b74_genetic_thalamic_rebound_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b74(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=432 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 74)
+                self.assertEqual(report["parent_level"], 73)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b75_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b75 = getattr(
+            b_series_evolution_module,
+            "build_b75_basal_thalamic_release_config",
+            None,
+        )
+        self.assertIsNotNone(build_b75)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b74_thalamic_rebound_source(tmpdir)
+            variants = (
+                ("b75_basal_thalamic_release_h48_bridge_policy", 1.0),
+                ("b75_release_burst_pacing_h48_bridge_policy", 1.0),
+                ("b75_go_nogo_rebound_timing_h48_bridge_policy", 1.0),
+                ("b75_basal_thalamic_release_h56_bridge_policy", 0.85),
+                ("b75_genetic_basal_thalamic_release_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b75(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=433 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 75)
+                self.assertEqual(report["parent_level"], 74)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b76_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b76 = getattr(
+            b_series_evolution_module,
+            "build_b76_cerebellar_stride_config",
+            None,
+        )
+        self.assertIsNotNone(build_b76)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b75_basal_thalamic_release_source(tmpdir)
+            variants = (
+                ("b76_cerebellar_stride_gate_h48_bridge_policy", 1.0),
+                ("b76_stride_error_pacing_h48_bridge_policy", 1.0),
+                ("b76_burst_smoothing_recovery_h48_bridge_policy", 1.0),
+                ("b76_cerebellar_stride_gate_h56_bridge_policy", 0.85),
+                ("b76_genetic_cerebellar_stride_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b76(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=434 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 76)
+                self.assertEqual(report["parent_level"], 75)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
+    def test_b77_transfer_reports_source_parent_and_coverage(self) -> None:
+        build_b77 = getattr(
+            b_series_evolution_module,
+            "build_b77_olivary_error_config",
+            None,
+        )
+        self.assertIsNotNone(build_b77)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b76_cerebellar_stride_source(tmpdir)
+            variants = (
+                ("b77_olivary_error_correction_h48_bridge_policy", 1.0),
+                ("b77_error_prediction_pacing_h48_bridge_policy", 1.0),
+                ("b77_climbing_fiber_recovery_h48_bridge_policy", 1.0),
+                ("b77_olivary_error_correction_h56_bridge_policy", 0.85),
+                ("b77_genetic_olivary_error_h48_bridge_policy", 1.0),
+            )
+            for index, (variant_name, min_coverage) in enumerate(variants):
+                config = build_b77(
+                    variant_name,
+                    source_checkpoint=checkpoint,
+                )
+                target = SpiderBrain(
+                    seed=435 + index,
+                    module_dropout=0.0,
+                    config=config,
+                )
+                report = target.b_series_transfer_report
+                self.assertIsNotNone(report)
+                assert report is not None
+                self.assertEqual(report["source_checkpoint"], str(checkpoint))
+                self.assertEqual(report["target_b_level"], 77)
+                self.assertEqual(report["parent_level"], 76)
+                self.assertGreaterEqual(float(report["coverage"]), min_coverage)
+                self.assertFalse(report["allow_low_coverage"])
+
     def test_b1_trace_fields_and_primitive_contract(self) -> None:
         source_config = _b0_config()
         source = SpiderBrain(seed=36, module_dropout=0.0, config=source_config)

@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import spider_cortex_sim.b_series as b_series_constants
+import spider_cortex_sim.b_series_evolution as b_series_evolution_module
 from spider_cortex_sim.ablations import BrainAblationConfig, resolve_ablation_configs
 from spider_cortex_sim.agent import SpiderBrain
 from spider_cortex_sim.b_series import (
@@ -1367,6 +1369,197 @@ def _save_b61_amygdala_safety_source(tmpdir: str | Path) -> Path:
     )
     b61_source = SpiderBrain(seed=162, module_dropout=0.0, config=b61_config)
     return b61_source.save(tmp_path / "b61")
+
+
+def _save_b62_defensive_mode_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b61_checkpoint = _save_b61_amygdala_safety_source(tmp_path)
+    b62_config = build_b62_defensive_mode_selector_config(
+        B62_DEFENSIVE_MODE_SELECTOR_H48_POLICY_NAME,
+        source_checkpoint=b61_checkpoint,
+    )
+    b62_source = SpiderBrain(seed=163, module_dropout=0.0, config=b62_config)
+    return b62_source.save(tmp_path / "b62")
+
+
+def _save_b63_periaqueductal_escape_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b62_checkpoint = _save_b62_defensive_mode_source(tmp_path)
+    build_b63 = b_series_evolution_module.build_b63_periaqueductal_escape_config
+    b63_config = build_b63(
+        "b63_periaqueductal_escape_sequence_h48_bridge_policy",
+        source_checkpoint=b62_checkpoint,
+    )
+    b63_source = SpiderBrain(seed=164, module_dropout=0.0, config=b63_config)
+    return b63_source.save(tmp_path / "b63")
+
+
+def _save_b64_vagal_recovery_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b63_checkpoint = _save_b63_periaqueductal_escape_source(tmp_path)
+    build_b64 = b_series_evolution_module.build_b64_vagal_recovery_config
+    b64_config = build_b64(
+        "b64_vagal_recovery_brake_h48_bridge_policy",
+        source_checkpoint=b63_checkpoint,
+    )
+    b64_source = SpiderBrain(seed=165, module_dropout=0.0, config=b64_config)
+    return b64_source.save(tmp_path / "b64")
+
+
+def _save_b65_enteric_assimilation_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b64_checkpoint = _save_b64_vagal_recovery_source(tmp_path)
+    build_b65 = b_series_evolution_module.build_b65_enteric_assimilation_config
+    b65_config = build_b65(
+        "b65_enteric_assimilation_gate_h48_bridge_policy",
+        source_checkpoint=b64_checkpoint,
+    )
+    b65_source = SpiderBrain(seed=166, module_dropout=0.0, config=b65_config)
+    return b65_source.save(tmp_path / "b65")
+
+
+def _save_b66_immune_malaise_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b65_checkpoint = _save_b65_enteric_assimilation_source(tmp_path)
+    build_b66 = b_series_evolution_module.build_b66_immune_malaise_config
+    b66_config = build_b66(
+        "b66_immune_malaise_gate_h48_bridge_policy",
+        source_checkpoint=b65_checkpoint,
+    )
+    b66_source = SpiderBrain(seed=167, module_dropout=0.0, config=b66_config)
+    return b66_source.save(tmp_path / "b66")
+
+
+def _save_b67_glial_energy_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b66_checkpoint = _save_b66_immune_malaise_source(tmp_path)
+    build_b67 = b_series_evolution_module.build_b67_glial_energy_config
+    b67_config = build_b67(
+        "b67_glial_energy_gate_h48_bridge_policy",
+        source_checkpoint=b66_checkpoint,
+    )
+    b67_source = SpiderBrain(seed=168, module_dropout=0.0, config=b67_config)
+    return b67_source.save(tmp_path / "b67")
+
+
+def _save_b68_motor_pacing_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b67_checkpoint = _save_b67_glial_energy_source(tmp_path)
+    build_b68 = b_series_evolution_module.build_b68_motor_pacing_config
+    b68_config = build_b68(
+        "b68_proprioceptive_pacing_gate_h48_bridge_policy",
+        source_checkpoint=b67_checkpoint,
+    )
+    b68_source = SpiderBrain(seed=169, module_dropout=0.0, config=b68_config)
+    return b68_source.save(tmp_path / "b68")
+
+
+def _save_b69_vestibular_orientation_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b68_checkpoint = _save_b68_motor_pacing_source(tmp_path)
+    build_b69 = b_series_evolution_module.build_b69_vestibular_orientation_config
+    b69_config = build_b69(
+        "b69_vestibular_orientation_gate_h48_bridge_policy",
+        source_checkpoint=b68_checkpoint,
+    )
+    b69_source = SpiderBrain(seed=170, module_dropout=0.0, config=b69_config)
+    return b69_source.save(tmp_path / "b69")
+
+
+def _save_b70_optic_flow_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b69_checkpoint = _save_b69_vestibular_orientation_source(tmp_path)
+    build_b70 = b_series_evolution_module.build_b70_optic_flow_config
+    b70_config = build_b70(
+        "b70_optic_flow_stabilization_gate_h48_bridge_policy",
+        source_checkpoint=b69_checkpoint,
+    )
+    b70_source = SpiderBrain(seed=171, module_dropout=0.0, config=b70_config)
+    return b70_source.save(tmp_path / "b70")
+
+
+def _save_b71_tectal_orienting_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b70_checkpoint = _save_b70_optic_flow_source(tmp_path)
+    build_b71 = b_series_evolution_module.build_b71_tectal_orienting_config
+    b71_config = build_b71(
+        "b71_tectal_orienting_gate_h48_bridge_policy",
+        source_checkpoint=b70_checkpoint,
+    )
+    b71_source = SpiderBrain(seed=172, module_dropout=0.0, config=b71_config)
+    return b71_source.save(tmp_path / "b71")
+
+
+def _save_b72_pulvinar_attention_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b71_checkpoint = _save_b71_tectal_orienting_source(tmp_path)
+    build_b72 = b_series_evolution_module.build_b72_pulvinar_attention_config
+    b72_config = build_b72(
+        "b72_pulvinar_attention_gate_h48_bridge_policy",
+        source_checkpoint=b71_checkpoint,
+    )
+    b72_source = SpiderBrain(seed=173, module_dropout=0.0, config=b72_config)
+    return b72_source.save(tmp_path / "b72")
+
+
+def _save_b73_reticular_inhibition_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b72_checkpoint = _save_b72_pulvinar_attention_source(tmp_path)
+    build_b73 = b_series_evolution_module.build_b73_reticular_inhibition_config
+    b73_config = build_b73(
+        "b73_reticular_inhibition_gate_h48_bridge_policy",
+        source_checkpoint=b72_checkpoint,
+    )
+    b73_source = SpiderBrain(seed=174, module_dropout=0.0, config=b73_config)
+    return b73_source.save(tmp_path / "b73")
+
+
+def _save_b74_thalamic_rebound_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b73_checkpoint = _save_b73_reticular_inhibition_source(tmp_path)
+    build_b74 = b_series_evolution_module.build_b74_thalamic_rebound_config
+    b74_config = build_b74(
+        "b74_thalamic_rebound_gate_h48_bridge_policy",
+        source_checkpoint=b73_checkpoint,
+    )
+    b74_source = SpiderBrain(seed=175, module_dropout=0.0, config=b74_config)
+    return b74_source.save(tmp_path / "b74")
+
+
+def _save_b75_basal_thalamic_release_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b74_checkpoint = _save_b74_thalamic_rebound_source(tmp_path)
+    build_b75 = b_series_evolution_module.build_b75_basal_thalamic_release_config
+    b75_config = build_b75(
+        "b75_basal_thalamic_release_h48_bridge_policy",
+        source_checkpoint=b74_checkpoint,
+    )
+    b75_source = SpiderBrain(seed=176, module_dropout=0.0, config=b75_config)
+    return b75_source.save(tmp_path / "b75")
+
+
+def _save_b76_cerebellar_stride_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b75_checkpoint = _save_b75_basal_thalamic_release_source(tmp_path)
+    build_b76 = b_series_evolution_module.build_b76_cerebellar_stride_config
+    b76_config = build_b76(
+        "b76_cerebellar_stride_gate_h48_bridge_policy",
+        source_checkpoint=b75_checkpoint,
+    )
+    b76_source = SpiderBrain(seed=177, module_dropout=0.0, config=b76_config)
+    return b76_source.save(tmp_path / "b76")
+
+
+def _save_b77_olivary_error_source(tmpdir: str | Path) -> Path:
+    tmp_path = Path(tmpdir)
+    b76_checkpoint = _save_b76_cerebellar_stride_source(tmp_path)
+    build_b77 = b_series_evolution_module.build_b77_olivary_error_config
+    b77_config = build_b77(
+        "b77_olivary_error_correction_h48_bridge_policy",
+        source_checkpoint=b76_checkpoint,
+    )
+    b77_source = SpiderBrain(seed=178, module_dropout=0.0, config=b77_config)
+    return b77_source.save(tmp_path / "b77")
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -8,7 +8,7 @@ from .types import BrainStep
 
 
 _DIRECT_POLICY_FIRST_FIELD = "b_current_threat_pressure"
-_DIRECT_POLICY_LAST_FIELD = "b62_genetic_candidate"
+_DIRECT_POLICY_LAST_FIELD = "b78_genetic_candidate"
 
 _RUNTIME_CONTEXT_FIELD_NAMES = (
     "b_level",

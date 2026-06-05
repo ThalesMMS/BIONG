@@ -14,6 +14,70 @@ from .sequence_b62 import (
     run_b62_defensive_mode_sequence,
 )
 
+from .sequence_b63 import (
+    run_b63_periaqueductal_escape_sequence,
+)
+
+from .sequence_b64 import (
+    run_b64_vagal_recovery_sequence,
+)
+
+from .sequence_b65 import (
+    run_b65_enteric_assimilation_sequence,
+)
+
+from .sequence_b66 import (
+    run_b66_immune_malaise_sequence,
+)
+
+from .sequence_b67 import (
+    run_b67_glial_energy_sequence,
+)
+
+from .sequence_b68 import (
+    run_b68_motor_pacing_sequence,
+)
+
+from .sequence_b69 import (
+    run_b69_vestibular_orientation_sequence,
+)
+
+from .sequence_b70 import (
+    run_b70_optic_flow_sequence,
+)
+
+from .sequence_b71 import (
+    run_b71_tectal_orienting_sequence,
+)
+
+from .sequence_b72 import (
+    run_b72_pulvinar_attention_sequence,
+)
+
+from .sequence_b73 import (
+    run_b73_reticular_inhibition_sequence,
+)
+
+from .sequence_b74 import (
+    run_b74_thalamic_rebound_sequence,
+)
+
+from .sequence_b75 import (
+    run_b75_basal_thalamic_release_sequence,
+)
+
+from .sequence_b76 import (
+    run_b76_cerebellar_stride_sequence,
+)
+
+from .sequence_b77 import (
+    run_b77_olivary_error_sequence,
+)
+
+from .sequence_b78 import (
+    run_b78_vestibular_balance_sequence,
+)
+
 from .sequences_b10_b14 import (
     run_b10_prospective_replay_sequence,
     run_b11_confidence_arbiter_sequence,
@@ -120,7 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run B-series evolution diagnostics from accepted parents."
     )
-    parser.add_argument("--target-level", type=int, choices=(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62), default=1)
+    parser.add_argument("--target-level", type=int, choices=(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78), default=1)
     parser.add_argument("--root", default=str(B_SERIES_EVOLUTION_ROOT))
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--b0-training-episodes", type=int, default=24)
@@ -479,13 +543,333 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--b62-ga-population", type=int, default=24)
     parser.add_argument("--b62-ga-generations", type=int, default=8)
     parser.add_argument("--b62-finalists", type=int, default=6)
+    parser.add_argument("--b63-training-episodes", type=int, default=64)
+    parser.add_argument("--b63-workers", type=int, default=1)
+    parser.add_argument("--b63-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b63-ga-population", type=int, default=24)
+    parser.add_argument("--b63-ga-generations", type=int, default=8)
+    parser.add_argument("--b63-finalists", type=int, default=6)
+    parser.add_argument("--b64-training-episodes", type=int, default=64)
+    parser.add_argument("--b64-workers", type=int, default=1)
+    parser.add_argument("--b64-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b64-ga-population", type=int, default=24)
+    parser.add_argument("--b64-ga-generations", type=int, default=8)
+    parser.add_argument("--b64-finalists", type=int, default=6)
+    parser.add_argument("--b65-training-episodes", type=int, default=64)
+    parser.add_argument("--b65-workers", type=int, default=1)
+    parser.add_argument("--b65-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b65-ga-population", type=int, default=24)
+    parser.add_argument("--b65-ga-generations", type=int, default=8)
+    parser.add_argument("--b65-finalists", type=int, default=6)
+    parser.add_argument("--b66-training-episodes", type=int, default=64)
+    parser.add_argument("--b66-workers", type=int, default=1)
+    parser.add_argument("--b66-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b66-ga-population", type=int, default=24)
+    parser.add_argument("--b66-ga-generations", type=int, default=8)
+    parser.add_argument("--b66-finalists", type=int, default=6)
+    parser.add_argument("--b67-training-episodes", type=int, default=64)
+    parser.add_argument("--b67-workers", type=int, default=1)
+    parser.add_argument("--b67-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b67-ga-population", type=int, default=24)
+    parser.add_argument("--b67-ga-generations", type=int, default=8)
+    parser.add_argument("--b67-finalists", type=int, default=6)
+    parser.add_argument("--b68-training-episodes", type=int, default=64)
+    parser.add_argument("--b68-workers", type=int, default=1)
+    parser.add_argument("--b68-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b68-ga-population", type=int, default=24)
+    parser.add_argument("--b68-ga-generations", type=int, default=8)
+    parser.add_argument("--b68-finalists", type=int, default=6)
+    parser.add_argument("--b69-training-episodes", type=int, default=64)
+    parser.add_argument("--b69-workers", type=int, default=1)
+    parser.add_argument("--b69-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b69-ga-population", type=int, default=24)
+    parser.add_argument("--b69-ga-generations", type=int, default=8)
+    parser.add_argument("--b69-finalists", type=int, default=6)
+    parser.add_argument("--b70-training-episodes", type=int, default=64)
+    parser.add_argument("--b70-workers", type=int, default=1)
+    parser.add_argument("--b70-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b70-ga-population", type=int, default=24)
+    parser.add_argument("--b70-ga-generations", type=int, default=8)
+    parser.add_argument("--b70-finalists", type=int, default=6)
+    parser.add_argument("--b71-training-episodes", type=int, default=64)
+    parser.add_argument("--b71-workers", type=int, default=1)
+    parser.add_argument("--b71-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b71-ga-population", type=int, default=24)
+    parser.add_argument("--b71-ga-generations", type=int, default=8)
+    parser.add_argument("--b71-finalists", type=int, default=6)
+    parser.add_argument("--b72-training-episodes", type=int, default=64)
+    parser.add_argument("--b72-workers", type=int, default=1)
+    parser.add_argument("--b72-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b72-ga-population", type=int, default=24)
+    parser.add_argument("--b72-ga-generations", type=int, default=8)
+    parser.add_argument("--b72-finalists", type=int, default=6)
+    parser.add_argument("--b73-training-episodes", type=int, default=64)
+    parser.add_argument("--b73-workers", type=int, default=1)
+    parser.add_argument("--b73-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b73-ga-population", type=int, default=24)
+    parser.add_argument("--b73-ga-generations", type=int, default=8)
+    parser.add_argument("--b73-finalists", type=int, default=6)
+    parser.add_argument("--b74-training-episodes", type=int, default=64)
+    parser.add_argument("--b74-workers", type=int, default=1)
+    parser.add_argument("--b74-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b74-ga-population", type=int, default=24)
+    parser.add_argument("--b74-ga-generations", type=int, default=8)
+    parser.add_argument("--b74-finalists", type=int, default=6)
+    parser.add_argument("--b75-training-episodes", type=int, default=64)
+    parser.add_argument("--b75-workers", type=int, default=1)
+    parser.add_argument("--b75-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b75-ga-population", type=int, default=24)
+    parser.add_argument("--b75-ga-generations", type=int, default=8)
+    parser.add_argument("--b75-finalists", type=int, default=6)
+    parser.add_argument("--b76-training-episodes", type=int, default=64)
+    parser.add_argument("--b76-workers", type=int, default=1)
+    parser.add_argument("--b76-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b76-ga-population", type=int, default=24)
+    parser.add_argument("--b76-ga-generations", type=int, default=8)
+    parser.add_argument("--b76-finalists", type=int, default=6)
+    parser.add_argument("--b77-training-episodes", type=int, default=64)
+    parser.add_argument("--b77-workers", type=int, default=1)
+    parser.add_argument("--b77-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b77-ga-population", type=int, default=24)
+    parser.add_argument("--b77-ga-generations", type=int, default=8)
+    parser.add_argument("--b77-finalists", type=int, default=6)
+    parser.add_argument("--b78-training-episodes", type=int, default=64)
+    parser.add_argument("--b78-workers", type=int, default=1)
+    parser.add_argument("--b78-search", choices=("fixed", "ga", "hybrid"), default="hybrid")
+    parser.add_argument("--b78-ga-population", type=int, default=24)
+    parser.add_argument("--b78-ga-generations", type=int, default=8)
+    parser.add_argument("--b78-finalists", type=int, default=6)
     parser.add_argument("--reward-profile", default="ecological")
     parser.add_argument("--operational-profile", default="default_v1")
     parser.add_argument("--noise-profile", default="none")
     parser.add_argument("--force-b0", action="store_true")
     parser.add_argument("--skip-canonical", action="store_true")
     args = parser.parse_args(argv)
-    if int(args.target_level) == 62:
+    if int(args.target_level) == 78:
+        summary = run_b78_vestibular_balance_sequence(
+            root=args.root,
+            seed=args.seed,
+            b78_training_episodes=args.b78_training_episodes,
+            b78_workers=args.b78_workers,
+            b78_search=args.b78_search,
+            b78_ga_population=args.b78_ga_population,
+            b78_ga_generations=args.b78_ga_generations,
+            b78_finalists=args.b78_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 77:
+        summary = run_b77_olivary_error_sequence(
+            root=args.root,
+            seed=args.seed,
+            b77_training_episodes=args.b77_training_episodes,
+            b77_workers=args.b77_workers,
+            b77_search=args.b77_search,
+            b77_ga_population=args.b77_ga_population,
+            b77_ga_generations=args.b77_ga_generations,
+            b77_finalists=args.b77_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 76:
+        summary = run_b76_cerebellar_stride_sequence(
+            root=args.root,
+            seed=args.seed,
+            b76_training_episodes=args.b76_training_episodes,
+            b76_workers=args.b76_workers,
+            b76_search=args.b76_search,
+            b76_ga_population=args.b76_ga_population,
+            b76_ga_generations=args.b76_ga_generations,
+            b76_finalists=args.b76_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 75:
+        summary = run_b75_basal_thalamic_release_sequence(
+            root=args.root,
+            seed=args.seed,
+            b75_training_episodes=args.b75_training_episodes,
+            b75_workers=args.b75_workers,
+            b75_search=args.b75_search,
+            b75_ga_population=args.b75_ga_population,
+            b75_ga_generations=args.b75_ga_generations,
+            b75_finalists=args.b75_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 74:
+        summary = run_b74_thalamic_rebound_sequence(
+            root=args.root,
+            seed=args.seed,
+            b74_training_episodes=args.b74_training_episodes,
+            b74_workers=args.b74_workers,
+            b74_search=args.b74_search,
+            b74_ga_population=args.b74_ga_population,
+            b74_ga_generations=args.b74_ga_generations,
+            b74_finalists=args.b74_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 73:
+        summary = run_b73_reticular_inhibition_sequence(
+            root=args.root,
+            seed=args.seed,
+            b73_training_episodes=args.b73_training_episodes,
+            b73_workers=args.b73_workers,
+            b73_search=args.b73_search,
+            b73_ga_population=args.b73_ga_population,
+            b73_ga_generations=args.b73_ga_generations,
+            b73_finalists=args.b73_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 72:
+        summary = run_b72_pulvinar_attention_sequence(
+            root=args.root,
+            seed=args.seed,
+            b72_training_episodes=args.b72_training_episodes,
+            b72_workers=args.b72_workers,
+            b72_search=args.b72_search,
+            b72_ga_population=args.b72_ga_population,
+            b72_ga_generations=args.b72_ga_generations,
+            b72_finalists=args.b72_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 71:
+        summary = run_b71_tectal_orienting_sequence(
+            root=args.root,
+            seed=args.seed,
+            b71_training_episodes=args.b71_training_episodes,
+            b71_workers=args.b71_workers,
+            b71_search=args.b71_search,
+            b71_ga_population=args.b71_ga_population,
+            b71_ga_generations=args.b71_ga_generations,
+            b71_finalists=args.b71_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 70:
+        summary = run_b70_optic_flow_sequence(
+            root=args.root,
+            seed=args.seed,
+            b70_training_episodes=args.b70_training_episodes,
+            b70_workers=args.b70_workers,
+            b70_search=args.b70_search,
+            b70_ga_population=args.b70_ga_population,
+            b70_ga_generations=args.b70_ga_generations,
+            b70_finalists=args.b70_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 69:
+        summary = run_b69_vestibular_orientation_sequence(
+            root=args.root,
+            seed=args.seed,
+            b69_training_episodes=args.b69_training_episodes,
+            b69_workers=args.b69_workers,
+            b69_search=args.b69_search,
+            b69_ga_population=args.b69_ga_population,
+            b69_ga_generations=args.b69_ga_generations,
+            b69_finalists=args.b69_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 68:
+        summary = run_b68_motor_pacing_sequence(
+            root=args.root,
+            seed=args.seed,
+            b68_training_episodes=args.b68_training_episodes,
+            b68_workers=args.b68_workers,
+            b68_search=args.b68_search,
+            b68_ga_population=args.b68_ga_population,
+            b68_ga_generations=args.b68_ga_generations,
+            b68_finalists=args.b68_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 67:
+        summary = run_b67_glial_energy_sequence(
+            root=args.root,
+            seed=args.seed,
+            b67_training_episodes=args.b67_training_episodes,
+            b67_workers=args.b67_workers,
+            b67_search=args.b67_search,
+            b67_ga_population=args.b67_ga_population,
+            b67_ga_generations=args.b67_ga_generations,
+            b67_finalists=args.b67_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 66:
+        summary = run_b66_immune_malaise_sequence(
+            root=args.root,
+            seed=args.seed,
+            b66_training_episodes=args.b66_training_episodes,
+            b66_workers=args.b66_workers,
+            b66_search=args.b66_search,
+            b66_ga_population=args.b66_ga_population,
+            b66_ga_generations=args.b66_ga_generations,
+            b66_finalists=args.b66_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 65:
+        summary = run_b65_enteric_assimilation_sequence(
+            root=args.root,
+            seed=args.seed,
+            b65_training_episodes=args.b65_training_episodes,
+            b65_workers=args.b65_workers,
+            b65_search=args.b65_search,
+            b65_ga_population=args.b65_ga_population,
+            b65_ga_generations=args.b65_ga_generations,
+            b65_finalists=args.b65_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 64:
+        summary = run_b64_vagal_recovery_sequence(
+            root=args.root,
+            seed=args.seed,
+            b64_training_episodes=args.b64_training_episodes,
+            b64_workers=args.b64_workers,
+            b64_search=args.b64_search,
+            b64_ga_population=args.b64_ga_population,
+            b64_ga_generations=args.b64_ga_generations,
+            b64_finalists=args.b64_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 63:
+        summary = run_b63_periaqueductal_escape_sequence(
+            root=args.root,
+            seed=args.seed,
+            b63_training_episodes=args.b63_training_episodes,
+            b63_workers=args.b63_workers,
+            b63_search=args.b63_search,
+            b63_ga_population=args.b63_ga_population,
+            b63_ga_generations=args.b63_ga_generations,
+            b63_finalists=args.b63_finalists,
+            reward_profile=args.reward_profile,
+            operational_profile=args.operational_profile,
+            noise_profile=args.noise_profile,
+        )
+    elif int(args.target_level) == 62:
         summary = run_b62_defensive_mode_sequence(
             root=args.root,
             seed=args.seed,

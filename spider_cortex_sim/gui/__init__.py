@@ -128,10 +128,32 @@ class SpiderGUI:
         for spec in self.controller.available_model_specs:
             buttons[f"model:{spec.id}"] = Button(spec.label, x, y, width, height)
             y += height + 6
+        y += 44
+        for index, spec in self.controller.visible_checkpoint_specs(limit=4):
+            buttons[f"checkpoint:{index}"] = Button(spec.label, x, y, width, height)
+            y += height + 6
+        half_width = (width - 6) // 2
+        buttons["checkpoint_mode:evaluate"] = Button(
+            "Evaluate",
+            x,
+            y,
+            half_width,
+            height,
+        )
+        buttons["checkpoint_mode:train"] = Button(
+            "Train",
+            x + half_width + 6,
+            y,
+            width - half_width - 6,
+            height,
+        )
+        y += height + 6
+        buttons["checkpoint_refresh"] = Button("Refresh Checkpoints", x, y, width, height)
+        y += height + 14
         buttons["evolution:save"] = Button(
             "Save Evolution Source",
             x,
-            y + 128,
+            y,
             width,
             height,
         )
@@ -160,6 +182,9 @@ class SpiderGUI:
 
                 self.fonts = self._create_fonts()
                 self.renderer.set_fonts(self.fonts)
+                self._rebuild_buttons()
+
+            if self.controller.consume_sidebar_rebuild_request():
                 self._rebuild_buttons()
 
             self.controller.tick(dt)
@@ -231,9 +256,14 @@ def run_gui(
         noise_profile=noise_profile,
     )
     gui = SpiderGUI(run_config=run_config)
+    gui.controller.configure_run(train_episodes=episodes, eval_episodes=eval_episodes)
     if load_brain is not None:
-        gui.controller.load_brain(load_brain, modules=load_modules)
-    gui.launch(train_episodes=episodes, eval_episodes=eval_episodes)
+        gui.controller.load_brain(
+            load_brain,
+            modules=load_modules,
+            mode="evaluate",
+        )
+    gui._main_loop()
 
 
 __all__ = ["Button", "GUIController", "Renderer", "SpiderGUI", "run_gui"]

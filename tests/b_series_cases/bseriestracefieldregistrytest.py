@@ -22,7 +22,7 @@ class BSeriesTraceFieldRegistryTest(unittest.TestCase):
     def test_registry_covers_brain_step_direct_policy_trace_fields(self) -> None:
         step_field_names = tuple(field.name for field in fields(BrainStep))
         start = step_field_names.index("b_current_threat_pressure")
-        end = step_field_names.index("b62_genetic_candidate") + 1
+        end = step_field_names.index("b78_genetic_candidate") + 1
 
         self.assertEqual(
             B_SERIES_DIRECT_POLICY_PAYLOAD_FIELD_NAMES,

@@ -8,6 +8,22 @@ from ._catalog_diagnostic_b19_b30 import diagnostic_b19_b30_configs
 from ._catalog_diagnostic_b31_b38 import diagnostic_b31_b38_configs
 from ._catalog_diagnostic_b39_b51 import diagnostic_b39_b51_configs
 from ._catalog_diagnostic_b52_b62 import diagnostic_b52_b62_configs
+from ._catalog_diagnostic_b63 import diagnostic_b63_configs
+from ._catalog_diagnostic_b64 import diagnostic_b64_configs
+from ._catalog_diagnostic_b65 import diagnostic_b65_configs
+from ._catalog_diagnostic_b66 import diagnostic_b66_configs
+from ._catalog_diagnostic_b67 import diagnostic_b67_configs
+from ._catalog_diagnostic_b68 import diagnostic_b68_configs
+from ._catalog_diagnostic_b69 import diagnostic_b69_configs
+from ._catalog_diagnostic_b70 import diagnostic_b70_configs
+from ._catalog_diagnostic_b71 import diagnostic_b71_configs
+from ._catalog_diagnostic_b72 import diagnostic_b72_configs
+from ._catalog_diagnostic_b73 import diagnostic_b73_configs
+from ._catalog_diagnostic_b74 import diagnostic_b74_configs
+from ._catalog_diagnostic_b75 import diagnostic_b75_configs
+from ._catalog_diagnostic_b76 import diagnostic_b76_configs
+from ._catalog_diagnostic_b77 import diagnostic_b77_configs
+from ._catalog_diagnostic_b78 import diagnostic_b78_configs
 from ._catalog_diagnostic_direct_core import diagnostic_direct_core_configs
 from ._catalog_diagnostic_direct_teacher_replay import diagnostic_direct_teacher_replay_configs
 from ._catalog_diagnostic_direct_local_branches import diagnostic_direct_local_branches_configs
@@ -27,6 +43,22 @@ def diagnostic_ablation_configs(
     configs.update(diagnostic_b31_b38_configs(profile_fields))
     configs.update(diagnostic_b39_b51_configs(profile_fields))
     configs.update(diagnostic_b52_b62_configs(profile_fields))
+    configs.update(diagnostic_b63_configs(profile_fields))
+    configs.update(diagnostic_b64_configs(profile_fields))
+    configs.update(diagnostic_b65_configs(profile_fields))
+    configs.update(diagnostic_b66_configs(profile_fields))
+    configs.update(diagnostic_b67_configs(profile_fields))
+    configs.update(diagnostic_b68_configs(profile_fields))
+    configs.update(diagnostic_b69_configs(profile_fields))
+    configs.update(diagnostic_b70_configs(profile_fields))
+    configs.update(diagnostic_b71_configs(profile_fields))
+    configs.update(diagnostic_b72_configs(profile_fields))
+    configs.update(diagnostic_b73_configs(profile_fields))
+    configs.update(diagnostic_b74_configs(profile_fields))
+    configs.update(diagnostic_b75_configs(profile_fields))
+    configs.update(diagnostic_b76_configs(profile_fields))
+    configs.update(diagnostic_b77_configs(profile_fields))
+    configs.update(diagnostic_b78_configs(profile_fields))
     configs.update(diagnostic_direct_core_configs(profile_fields))
     configs.update(diagnostic_direct_teacher_replay_configs(profile_fields))
     configs.update(diagnostic_direct_local_branches_configs(profile_fields))

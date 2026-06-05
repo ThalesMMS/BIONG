@@ -214,6 +214,53 @@ class Renderer:
             )
             y = max(y, button.rect.bottom + 6)
 
+        y += 6
+        y = self._draw_sidebar_title("CHECKPOINTS", x0, y)
+        checkpoint_count = len(self.controller.available_checkpoint_specs)
+        if checkpoint_count == 0:
+            y = self._draw_sidebar_text("None found", x0, y, COLOR_TEXT_DIM)
+        else:
+            selected_idx = self.controller.selected_checkpoint_index
+            y = self._draw_sidebar_text(
+                f"Selected: {selected_idx + 1}/{checkpoint_count}",
+                x0,
+                y,
+                COLOR_TEXT_DIM,
+            )
+            for index, spec in self.controller.visible_checkpoint_specs(limit=4):
+                button = self.sidebar_buttons.get(f"checkpoint:{index}")
+                if button is None:
+                    continue
+                selected = index == self.controller.selected_checkpoint_index
+                fill = (58, 76, 66) if selected else (
+                    COLOR_BUTTON_HOVER if button.hovered else COLOR_BUTTON
+                )
+                pygame.draw.rect(self.screen, fill, button.rect, border_radius=6)
+                border = COLOR_ACTION_ACTIVE if selected else COLOR_PANEL_BORDER
+                pygame.draw.rect(self.screen, border, button.rect, width=1, border_radius=6)
+                self._draw_sidebar_button_label(button, spec.label, COLOR_BUTTON_TEXT)
+                y = max(y, button.rect.bottom + 6)
+        for mode, button_id in (
+            ("evaluate", "checkpoint_mode:evaluate"),
+            ("train", "checkpoint_mode:train"),
+        ):
+            button = self.sidebar_buttons.get(button_id)
+            if button is None:
+                continue
+            selected = self.controller.checkpoint_load_mode == mode
+            fill = (58, 76, 66) if selected else (
+                COLOR_BUTTON_HOVER if button.hovered else COLOR_BUTTON
+            )
+            pygame.draw.rect(self.screen, fill, button.rect, border_radius=6)
+            border = COLOR_ACTION_ACTIVE if selected else COLOR_PANEL_BORDER
+            pygame.draw.rect(self.screen, border, button.rect, width=1, border_radius=6)
+            self._draw_sidebar_button_label(button, button.text, COLOR_BUTTON_TEXT)
+            y = max(y, button.rect.bottom + 6)
+        button = self.sidebar_buttons.get("checkpoint_refresh")
+        if button is not None:
+            button.draw(self.screen, self.font_sm)
+            y = max(y, button.rect.bottom + 6)
+
         audit = self.controller.model_audit_fields()
         y += 6
         y = self._draw_sidebar_title("ARCHITECTURE", x0, y)
@@ -885,14 +932,37 @@ class Renderer:
         label = self.font_sm.render(str(text), True, color)
         max_width = max(1, self.left_sidebar_width - x - 10)
         if label.get_width() > max_width:
-            clipped = str(text)
-            while clipped and label.get_width() > max_width:
-                clipped = clipped[:-1]
-                label = self.font_sm.render(clipped + "...", True, color)
-            text = clipped + "..."
+            text = self._ellipsize_text(str(text), self.font_sm, max_width)
             label = self.font_sm.render(text, True, color)
         self.screen.blit(label, (x, y))
         return y + label.get_height() + 1
+
+    def _draw_sidebar_button_label(
+        self,
+        button,
+        text: str,
+        color: Tuple[int, ...],
+    ) -> None:
+        max_width = max(1, button.rect.width - 16)
+        label_text = self._ellipsize_text(str(text), self.font_sm, max_width)
+        label = self.font_sm.render(label_text, True, color)
+        self.screen.blit(
+            label,
+            (
+                button.rect.x + 8,
+                button.rect.y + (button.rect.height - label.get_height()) // 2,
+            ),
+        )
+
+    def _ellipsize_text(self, text: str, font, max_width: int) -> str:
+        label = font.render(text, True, COLOR_TEXT)
+        if label.get_width() <= max_width:
+            return text
+        clipped = text
+        while clipped and label.get_width() > max_width:
+            clipped = clipped[:-1]
+            label = font.render(clipped + "...", True, COLOR_TEXT)
+        return clipped + "..."
 
     def _compact_path(self, value: str) -> str:
         parts = value.split("/")

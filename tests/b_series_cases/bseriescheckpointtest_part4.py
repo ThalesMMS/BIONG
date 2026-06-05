@@ -1381,3 +1381,585 @@ class BSeriesCheckpointTestPart4(unittest.TestCase):
         self.assertEqual(first["b62_controller_profile"], "defensive_mode_selector")
         ok, violations = trace_uses_only_primitive_actions(trace)
         self.assertTrue(ok, msg=violations)
+
+    def test_b63_trace_fields_and_primitive_contract(self) -> None:
+        build_b63 = getattr(
+            b_series_evolution_module,
+            "build_b63_periaqueductal_escape_config",
+            None,
+        )
+        self.assertIsNotNone(build_b63)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b62_defensive_mode_source(tmpdir)
+            config = build_b63(
+                "b63_periaqueductal_escape_sequence_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=105,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b62_controller_profile",
+            "b63_controller_profile",
+            "b63_escape_phase",
+            "b63_escape_urgency",
+            "b63_sequence_pressure",
+            "b63_shelter_vector_gain",
+            "b63_freeze_release",
+            "b63_escape_lock",
+            "b63_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 63)
+        self.assertEqual(first["b_parent_level"], 62)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b63_periaqueductal_escape_controller",
+        )
+        self.assertEqual(first["b63_controller_profile"], "periaqueductal_escape_sequence")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)
+
+    def test_b64_trace_fields_and_primitive_contract(self) -> None:
+        build_b64 = getattr(
+            b_series_evolution_module,
+            "build_b64_vagal_recovery_config",
+            None,
+        )
+        self.assertIsNotNone(build_b64)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b63_periaqueductal_escape_source(tmpdir)
+            config = build_b64(
+                "b64_vagal_recovery_brake_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=106,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b63_controller_profile",
+            "b64_controller_profile",
+            "b64_recovery_tone",
+            "b64_vagal_brake",
+            "b64_post_escape_bias",
+            "b64_recovery_lock",
+            "b64_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 64)
+        self.assertEqual(first["b_parent_level"], 63)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b64_vagal_recovery_brake_controller",
+        )
+        self.assertEqual(first["b64_controller_profile"], "vagal_recovery_brake")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)
+
+    def test_b65_trace_fields_and_primitive_contract(self) -> None:
+        build_b65 = getattr(
+            b_series_evolution_module,
+            "build_b65_enteric_assimilation_config",
+            None,
+        )
+        self.assertIsNotNone(build_b65)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b64_vagal_recovery_source(tmpdir)
+            config = build_b65(
+                "b65_enteric_assimilation_gate_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=107,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b64_controller_profile",
+            "b65_controller_profile",
+            "b65_enteric_tone",
+            "b65_assimilation_drive",
+            "b65_forage_readiness",
+            "b65_digestive_lock",
+            "b65_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 65)
+        self.assertEqual(first["b_parent_level"], 64)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b65_enteric_assimilation_controller",
+        )
+        self.assertEqual(first["b65_controller_profile"], "enteric_assimilation_gate")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)
+
+    def test_b66_trace_fields_and_primitive_contract(self) -> None:
+        build_b66 = getattr(
+            b_series_evolution_module,
+            "build_b66_immune_malaise_config",
+            None,
+        )
+        self.assertIsNotNone(build_b66)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b65_enteric_assimilation_source(tmpdir)
+            config = build_b66(
+                "b66_immune_malaise_gate_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=108,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b65_controller_profile",
+            "b66_controller_profile",
+            "b66_immune_tone",
+            "b66_malaise_drive",
+            "b66_recovery_veto",
+            "b66_inflammation_lock",
+            "b66_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 66)
+        self.assertEqual(first["b_parent_level"], 65)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b66_immune_malaise_controller",
+        )
+        self.assertEqual(first["b66_controller_profile"], "immune_malaise_gate")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)
+
+    def test_b67_trace_fields_and_primitive_contract(self) -> None:
+        build_b67 = getattr(
+            b_series_evolution_module,
+            "build_b67_glial_energy_config",
+            None,
+        )
+        self.assertIsNotNone(build_b67)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b66_immune_malaise_source(tmpdir)
+            config = build_b67(
+                "b67_glial_energy_gate_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=109,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b66_controller_profile",
+            "b67_controller_profile",
+            "b67_glial_reserve",
+            "b67_lactate_support",
+            "b67_fatigue_pressure",
+            "b67_recovery_lock",
+            "b67_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 67)
+        self.assertEqual(first["b_parent_level"], 66)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b67_glial_homeostasis_controller",
+        )
+        self.assertEqual(first["b67_controller_profile"], "glial_energy_gate")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)
+
+    def test_b68_trace_fields_and_primitive_contract(self) -> None:
+        build_b68 = getattr(
+            b_series_evolution_module,
+            "build_b68_motor_pacing_config",
+            None,
+        )
+        self.assertIsNotNone(build_b68)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b67_glial_energy_source(tmpdir)
+            config = build_b68(
+                "b68_proprioceptive_pacing_gate_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=110,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b67_controller_profile",
+            "b68_controller_profile",
+            "b68_motor_reserve",
+            "b68_stride_pacing",
+            "b68_overexertion_risk",
+            "b68_pacing_lock",
+            "b68_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 68)
+        self.assertEqual(first["b_parent_level"], 67)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b68_proprioceptive_pacing_controller",
+        )
+        self.assertEqual(first["b68_controller_profile"], "proprioceptive_pacing_gate")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)
+
+    def test_b69_trace_fields_and_primitive_contract(self) -> None:
+        build_b69 = getattr(
+            b_series_evolution_module,
+            "build_b69_vestibular_orientation_config",
+            None,
+        )
+        self.assertIsNotNone(build_b69)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b68_motor_pacing_source(tmpdir)
+            config = build_b69(
+                "b69_vestibular_orientation_gate_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=111,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b68_controller_profile",
+            "b69_controller_profile",
+            "b69_heading_confidence",
+            "b69_turn_error",
+            "b69_orientation_stability",
+            "b69_orientation_lock",
+            "b69_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 69)
+        self.assertEqual(first["b_parent_level"], 68)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b69_vestibular_orientation_controller",
+        )
+        self.assertEqual(first["b69_controller_profile"], "vestibular_orientation_gate")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)
+
+    def test_b70_trace_fields_and_primitive_contract(self) -> None:
+        build_b70 = getattr(
+            b_series_evolution_module,
+            "build_b70_optic_flow_config",
+            None,
+        )
+        self.assertIsNotNone(build_b70)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b69_vestibular_orientation_source(tmpdir)
+            config = build_b70(
+                "b70_optic_flow_stabilization_gate_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=112,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b69_controller_profile",
+            "b70_controller_profile",
+            "b70_flow_confidence",
+            "b70_lateral_drift",
+            "b70_looming_risk",
+            "b70_flow_lock",
+            "b70_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 70)
+        self.assertEqual(first["b_parent_level"], 69)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b70_optic_flow_controller",
+        )
+        self.assertEqual(first["b70_controller_profile"], "optic_flow_stabilization_gate")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)
+
+    def test_b71_trace_fields_and_primitive_contract(self) -> None:
+        build_b71 = getattr(
+            b_series_evolution_module,
+            "build_b71_tectal_orienting_config",
+            None,
+        )
+        self.assertIsNotNone(build_b71)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b70_optic_flow_source(tmpdir)
+            config = build_b71(
+                "b71_tectal_orienting_gate_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=113,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b70_controller_profile",
+            "b71_controller_profile",
+            "b71_target_salience",
+            "b71_orienting_gain",
+            "b71_collision_veto",
+            "b71_orienting_lock",
+            "b71_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 71)
+        self.assertEqual(first["b_parent_level"], 70)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b71_tectal_orienting_controller",
+        )
+        self.assertEqual(first["b71_controller_profile"], "tectal_orienting_gate")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)
+
+    def test_b72_trace_fields_and_primitive_contract(self) -> None:
+        build_b72 = getattr(
+            b_series_evolution_module,
+            "build_b72_pulvinar_attention_config",
+            None,
+        )
+        self.assertIsNotNone(build_b72)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b71_tectal_orienting_source(tmpdir)
+            config = build_b72(
+                "b72_pulvinar_attention_gate_h48_bridge_policy",
+                source_checkpoint=checkpoint,
+            )
+            sim = SpiderSimulation(
+                seed=114,
+                max_steps=3,
+                module_dropout=0.0,
+                brain_config=config,
+            )
+            _, trace = sim.run_episode(
+                0,
+                training=False,
+                sample=False,
+                capture_trace=True,
+            )
+
+        self.assertGreater(len(trace), 0)
+        first = trace[0]
+        for field in (
+            "b_level",
+            "b_parent_level",
+            "b_transfer_source_checkpoint",
+            "b_transfer_coverage",
+            "b71_controller_profile",
+            "b72_controller_profile",
+            "b72_focus_signal",
+            "b72_distractor_load",
+            "b72_filter_gain",
+            "b72_attention_lock",
+            "b72_decision",
+            "semantic_action",
+            "learned_semantic_action",
+            "semantic_action_source",
+            "bridge_primitive_action",
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first["b_level"], 72)
+        self.assertEqual(first["b_parent_level"], 71)
+        self.assertEqual(first["b_transfer_source_checkpoint"], str(checkpoint))
+        self.assertGreaterEqual(float(first["b_transfer_coverage"]), 0.50)
+        self.assertEqual(
+            first["semantic_action_source"],
+            "b72_pulvinar_attention_controller",
+        )
+        self.assertEqual(first["b72_controller_profile"], "pulvinar_attention_gate")
+        ok, violations = trace_uses_only_primitive_actions(trace)
+        self.assertTrue(ok, msg=violations)

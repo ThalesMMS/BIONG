@@ -1376,3 +1376,403 @@ def build_b62_defensive_mode_selector_config(
         merged.update(dict(controller_params))
         replacements["b_controller_params"] = merged
     return replace(config, **replacements) if replacements else config
+
+
+def build_b63_periaqueductal_escape_config(
+    variant_name: str = B63_PERIAQUEDUCTAL_ESCAPE_SEQUENCE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b62_defensive_mode_selector_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=63,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b64_vagal_recovery_config(
+    variant_name: str = B64_VAGAL_RECOVERY_BRAKE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b63_periaqueductal_escape_sequence_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=64,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b65_enteric_assimilation_config(
+    variant_name: str = B65_ENTERIC_ASSIMILATION_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b64_vagal_recovery_brake_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=65,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b66_immune_malaise_config(
+    variant_name: str = B66_IMMUNE_MALAISE_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b65_enteric_assimilation_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=66,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b67_glial_energy_config(
+    variant_name: str = B67_GLIAL_ENERGY_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b66_immune_malaise_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=67,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b68_motor_pacing_config(
+    variant_name: str = B68_PROPRIOCEPTIVE_PACING_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b67_glial_energy_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=68,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b69_vestibular_orientation_config(
+    variant_name: str = B69_VESTIBULAR_ORIENTATION_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b68_proprioceptive_pacing_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=69,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b70_optic_flow_config(
+    variant_name: str = B70_OPTIC_FLOW_STABILIZATION_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b69_vestibular_orientation_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=70,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b71_tectal_orienting_config(
+    variant_name: str = B71_TECTAL_ORIENTING_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b70_optic_flow_stabilization_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=71,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b72_pulvinar_attention_config(
+    variant_name: str = B72_PULVINAR_ATTENTION_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b71_tectal_orienting_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=72,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b73_reticular_inhibition_config(
+    variant_name: str = B73_RETICULAR_INHIBITION_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b72_pulvinar_attention_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=73,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b74_thalamic_rebound_config(
+    variant_name: str = B74_THALAMIC_REBOUND_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b73_reticular_inhibition_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=74,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b75_basal_thalamic_release_config(
+    variant_name: str = B75_BASAL_THALAMIC_RELEASE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b74_thalamic_rebound_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=75,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b76_cerebellar_stride_config(
+    variant_name: str = B76_CEREBELLAR_STRIDE_GATE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b75_basal_thalamic_release_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=76,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b77_olivary_error_config(
+    variant_name: str = B77_OLIVARY_ERROR_CORRECTION_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b76_cerebellar_stride_gate_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=77,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
+
+
+def build_b78_vestibular_balance_config(
+    variant_name: str = B78_VESTIBULAR_BALANCE_H48_POLICY_NAME,
+    *,
+    source_checkpoint: str | Path = (
+        "artifacts/b_series/evolution/"
+        "b77_olivary_error_correction_h48_bridge_policy/seed_7/best"
+    ),
+    controller_profile: str | None = None,
+    controller_params: dict[str, float] | None = None,
+) -> BrainAblationConfig:
+    config = build_b_evolution_config(
+        variant_name,
+        source_checkpoint=source_checkpoint,
+        expected_level=78,
+    )
+    replacements: dict[str, object] = {}
+    if controller_profile is not None:
+        replacements["b_controller_profile"] = str(controller_profile)
+    if controller_params is not None:
+        merged = dict(config.b_controller_params)
+        merged.update(dict(controller_params))
+        replacements["b_controller_params"] = merged
+    return replace(config, **replacements) if replacements else config
