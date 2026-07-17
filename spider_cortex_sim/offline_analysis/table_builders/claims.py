@@ -132,14 +132,40 @@ def build_claim_test_tables(summary: Mapping[str, object]) -> dict[str, object]:
             effect_uncertainty = _mapping_or_empty(
                 result.get("effect_size_uncertainty")
             )
-            cohens_d_values = _mapping_or_empty(result.get("cohens_d"))
-            magnitude_values = _mapping_or_empty(result.get("effect_magnitude"))
+            cohens_d_payload = result.get("cohens_d")
+            magnitude_payload = result.get("effect_magnitude")
             if isinstance(effect_values, Mapping):
                 effect_items = sorted(effect_values.items())
             else:
-                effect_items = [("effect_size", effect_values)]
+                companion_conditions = {
+                    str(condition)
+                    for payload in (
+                        effect_uncertainty,
+                        cohens_d_payload,
+                        magnitude_payload,
+                    )
+                    if isinstance(payload, Mapping)
+                    for condition, condition_payload in payload.items()
+                    if isinstance(condition_payload, Mapping)
+                }
+                scalar_condition = (
+                    next(iter(companion_conditions))
+                    if len(companion_conditions) == 1
+                    else "effect_size"
+                )
+                effect_items = [(scalar_condition, effect_values)]
             for condition, value in effect_items:
                 condition_name = str(condition)
+                cohens_d_value = (
+                    cohens_d_payload.get(condition_name)
+                    if isinstance(cohens_d_payload, Mapping)
+                    else cohens_d_payload
+                )
+                magnitude_value = (
+                    magnitude_payload.get(condition_name)
+                    if isinstance(magnitude_payload, Mapping)
+                    else magnitude_payload
+                )
                 row = {
                     "claim": str(claim_name),
                     "status": status,
@@ -147,10 +173,8 @@ def build_claim_test_tables(summary: Mapping[str, object]) -> dict[str, object]:
                     "role": "effect_size",
                     "condition": condition_name,
                     "metric": "effect_size",
-                    "cohens_d": _coerce_optional_float(
-                        cohens_d_values.get(condition_name)
-                    ),
-                    "effect_magnitude": str(magnitude_values.get(condition_name) or ""),
+                    "cohens_d": _coerce_optional_float(cohens_d_value),
+                    "effect_magnitude": str(magnitude_value or ""),
                 }
                 row.update(
                     _ci_row_fields(

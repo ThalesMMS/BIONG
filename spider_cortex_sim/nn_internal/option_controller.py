@@ -157,7 +157,6 @@ class OwnedOptionControllerTrueMonolithicNetwork(RecurrentOptionTrueMonolithicNe
         return np.clip(np.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0), -20.0, 20.0)
 
     @staticmethod
-    @staticmethod
     def _add_direction_bias(bias: Array, dx: float, dy: float, strength: float) -> None:
         strength = float(max(0.0, strength))
         if strength <= 0.0:

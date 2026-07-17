@@ -731,10 +731,13 @@ class _RecurrentOptionAffordancePositionBackwardMixin:
             ] = grad_action_controller_pre
             grad_decoder_hidden_pre = (
                 grad_decoder_hidden_pre
-                + self.W_option_action_controller_decoder[
-                    self.cache.selected_option_idx
-                ].T
-                @ grad_action_controller_pre
+                + (
+                    self.W_option_action_controller_decoder[
+                        self.cache.selected_option_idx
+                    ].T
+                    @ grad_action_controller_pre
+                )
+                * (1.0 - decoder_hidden**2)
             )
         grad_W_option_decoder_recurrent_state = (
             np.zeros_like(self.W_option_decoder_recurrent_state)
@@ -797,7 +800,7 @@ class _RecurrentOptionAffordancePositionBackwardMixin:
                 dtype=float,
             )
             grad_b_option_decoder_state = np.zeros((0, self.hidden_dim), dtype=float)
-            dh = grad_decoder_hidden
+            dh = grad_decoder_hidden_pre
         dh = (
             dh
             + self.W2_value.T[:, 0] * grad_value

@@ -414,6 +414,31 @@ class TrainingRegimeSimulationTest(unittest.TestCase):
         )
         self.assertTrue(any(row["competence_type"] == "scaffolded" for row in rows))
 
+    def test_regime_comparison_base_index_uses_evaluation_cell_size(self) -> None:
+        original_execute = SpiderSimulation._execute_behavior_suite
+        base_indices: list[int] = []
+
+        def wrapped_execute(self, **kwargs):
+            base_indices.append(int(kwargs["base_index"]))
+            return original_execute(self, **kwargs)
+
+        with patch.object(
+            SpiderSimulation,
+            "_execute_behavior_suite",
+            wrapped_execute,
+        ):
+            compare_training_regimes(
+                regime_names=["reflex_annealed"],
+                episodes=0,
+                evaluation_episodes=0,
+                max_steps=1,
+                names=("night_rest", "open_field_foraging"),
+                seeds=(7,),
+                episodes_per_scenario=1,
+            )
+
+        self.assertEqual(base_indices, [600_000, 600_000, 600_002, 600_002])
+
     def test_regime_comparison_scaffolded_scale_uses_trained_runtime_scale(self) -> None:
         """
         Verify that scaffolded evaluations record the trained runtime reflex scale for the "reflex_annealed" regime.

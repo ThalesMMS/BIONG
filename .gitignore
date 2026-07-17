@@ -183,3 +183,6 @@ cython_debug/
 AGENTS.md
 /spider_brain
 /artifacts
+goal.txt
+/backups
+ISSUE-ORDER.txt

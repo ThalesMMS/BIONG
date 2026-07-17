@@ -38,6 +38,7 @@ from .scoring_checks import (
     SLEEP_VS_EXPLORATION_CONFLICT_CHECKS,
 )
 from .scoring_behaviors import (
+    _score_continuous_survival_bootstrap,
     _score_night_rest,
     _score_predator_edge,
     _score_entrance_ambush,
@@ -93,6 +94,7 @@ __all__ = [
     '_module_share_for_type',
     '_progress_band',
     '_score_corridor_gauntlet',
+    '_score_continuous_survival_bootstrap',
     '_score_continuous_survival_canonical',
     '_score_continuous_survival_post_rest_continuation',
     '_score_continuous_survival_re_rest_after_return',

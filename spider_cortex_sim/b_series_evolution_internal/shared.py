@@ -456,3 +456,15 @@ from ..metrics import EpisodeStats
 from ..scenarios import get_scenario
 from ..simulation import SpiderSimulation
 from ..world import ACTIONS
+
+
+def result_predator_contacts(result: dict[str, object]) -> int:
+    stats = result.get("stats")
+    if isinstance(stats, dict) and "predator_contacts" in stats:
+        return int(stats["predator_contacts"] or 0)
+    if stats is not None and hasattr(stats, "predator_contacts"):
+        return int(stats.predator_contacts or 0)
+    metrics = result.get("metrics")
+    if isinstance(metrics, dict) and "predator_contacts" in metrics:
+        return int(metrics["predator_contacts"] or 0)
+    return int(result.get("predator_contacts", 0) or 0)

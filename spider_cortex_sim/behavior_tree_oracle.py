@@ -47,12 +47,12 @@ class BehaviorTreeOraclePolicy:
     def __init__(self, world: SpiderWorld) -> None:
         self.world = world
         self.current_phase = "INITIAL_FORAGE"
-        self.phase_food_start = 0
+        self.phase_food_start = int(world.state.food_eaten)
         self.phase_sleep_start = 0
 
     def reset(self) -> None:
         self.current_phase = "INITIAL_FORAGE"
-        self.phase_food_start = 0
+        self.phase_food_start = int(self.world.state.food_eaten)
         self.phase_sleep_start = 0
 
     def act(
@@ -179,6 +179,8 @@ class BehaviorTreeOraclePolicy:
             self.current_phase = (
                 "REST" if deep_shelter and rest_target_ready else "DEEPEN_IN_SHELTER"
             )
+            if self.current_phase == "REST":
+                self.phase_sleep_start = int(state.sleep_events)
         if on_shelter and recovered and self.current_phase in {
             "INITIAL_FORAGE",
             "RETURN_TO_SHELTER",
@@ -188,6 +190,8 @@ class BehaviorTreeOraclePolicy:
             self.current_phase = (
                 "POST_REST_REACTIVATE" if needs_food else "RECOVERED_IN_SHELTER"
             )
+            if needs_food:
+                self.phase_food_start = int(state.food_eaten)
 
         if acute_threat and not deep_shelter:
             self.current_phase = "ESCAPE_OR_ACUTE_THREAT"
@@ -228,9 +232,6 @@ class BehaviorTreeOraclePolicy:
                 self.current_phase = (
                     "REST" if can_rest else "RECOVERED_IN_SHELTER"
                 )
-
-        if self.current_phase == "INITIAL_FORAGE" and self.phase_food_start == 0:
-            self.phase_food_start = int(state.food_eaten)
 
         elevated_food_approach = self._post_rest_elevated_food_approach()
         if elevated_food_approach is not None:
@@ -395,7 +396,6 @@ class BehaviorTreeOraclePolicy:
         if self.world.on_shelter() and self.world.shelter_role_at(self.world.spider_pos()) != "outside":
             return predator_dist > 3
         return predator_dist >= 5
-        return True
 
     def _food_target(self) -> tuple[int, int] | None:
         candidates = [
@@ -446,12 +446,14 @@ class BehaviorTreeOraclePolicy:
                 reason="post_rest_elevated_food_approach",
                 target=(target[0], 6),
             )
-        return OracleDecision(
-            phase="LATE_FORAGE",
-            action="MOVE_DOWN",
-            reason="post_rest_elevated_food_approach",
-            target=target,
-        )
+        if pos[0] == target[0]:
+            return OracleDecision(
+                phase="LATE_FORAGE",
+                action="MOVE_DOWN",
+                reason="post_rest_elevated_food_approach",
+                target=target,
+            )
+        return None
 
     def _post_rest_food_commitment_target(self) -> tuple[int, int] | None:
         if self.current_phase not in {"LATE_FORAGE", "ESCAPE_OR_ACUTE_THREAT"}:

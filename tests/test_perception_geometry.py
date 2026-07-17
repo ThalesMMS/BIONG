@@ -496,6 +496,81 @@ class MultiPredatorPerceptionTest(unittest.TestCase):
             DOMINANT_PREDATOR_TYPE_OLFACTORY,
         )
 
+    def test_occluded_visual_predator_keeps_decayed_confidence(self) -> None:
+        world = SpiderWorld(seed=44, vision_range=6, lizard_move_interval=999999)
+        world.reset(seed=44)
+        world.state.x, world.state.y = 3, 3
+        world.lizard.x, world.lizard.y = 6, 3
+        occluded_view = PerceivedTarget(
+            visible=0.0,
+            certainty=0.2,
+            occluded=1.0,
+            dx=0.0,
+            dy=0.0,
+            dist=3,
+            position=(6, 3),
+        )
+
+        threats = compute_per_type_threats(
+            world,
+            sampled_predator_views={id(world.lizard): occluded_view},
+            predator_views_by_type={"visual": occluded_view},
+        )
+
+        self.assertGreater(threats["visual_predator_threat"], 0.0)
+        self.assertLess(threats["visual_predator_threat"], 0.5)
+
+    def test_unperceived_visual_predator_does_not_leak_true_proximity(self) -> None:
+        world = SpiderWorld(seed=45, vision_range=6, lizard_move_interval=999999)
+        world.reset(seed=45)
+        world.state.x, world.state.y = 3, 3
+        world.lizard.x, world.lizard.y = 5, 3
+        no_view = PerceivedTarget(
+            visible=0.0,
+            certainty=0.0,
+            occluded=0.0,
+            dx=0.0,
+            dy=0.0,
+            dist=99,
+            position=None,
+        )
+
+        threats = compute_per_type_threats(
+            world,
+            sampled_predator_views={id(world.lizard): no_view},
+            predator_views_by_type={"visual": no_view},
+        )
+
+        self.assertEqual(threats["visual_predator_threat"], 0.0)
+
+    def test_unsmelled_olfactory_predator_does_not_leak_true_proximity(self) -> None:
+        world = SpiderWorld(seed=46, vision_range=6, lizard_move_interval=999999)
+        world.reset(seed=46, predator_profiles=[OLFACTORY_HUNTER_PROFILE])
+        predator = world.get_predator(0)
+        world.state.x, world.state.y = 3, 3
+        predator.x, predator.y = 5, 3
+        no_view = PerceivedTarget(
+            visible=0.0,
+            certainty=0.0,
+            occluded=0.0,
+            dx=0.0,
+            dy=0.0,
+            dist=99,
+            position=None,
+        )
+
+        with patch(
+            "spider_cortex_sim.perception_predators.smell_gradient",
+            return_value=(0.0, 0.0, 0.0, 99),
+        ):
+            threats = compute_per_type_threats(
+                world,
+                sampled_predator_views={id(predator): no_view},
+                predator_views_by_type={"olfactory": no_view},
+            )
+
+        self.assertEqual(threats["olfactory_predator_threat"], 0.0)
+
     def test_predator_visible_to_spider_picks_most_threatening_visible_predator(self) -> None:
         world = SpiderWorld(seed=47, vision_range=6, lizard_move_interval=999999)
         world.reset(

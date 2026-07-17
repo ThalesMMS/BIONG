@@ -127,6 +127,28 @@ class ComparisonWorkflowTest(unittest.TestCase):
                 "modular_distilled_plus_rl_finetuning",
             )
 
+    def test_distillation_report_rejects_zero_success_against_zero_baseline(self) -> None:
+            report = build_distillation_comparison_report(
+                teacher={
+                    "scenario_success_rate": 0.8,
+                    "episode_success_rate": 0.8,
+                    "mean_reward": 8.0,
+                },
+                modular_rl_from_scratch={
+                    "scenario_success_rate": 0.0,
+                    "episode_success_rate": 0.0,
+                    "mean_reward": 0.0,
+                },
+                modular_distilled={
+                    "scenario_success_rate": 0.0,
+                    "episode_success_rate": 0.0,
+                    "mean_reward": 0.0,
+                },
+            )
+
+            self.assertEqual(report["answer"], "no")
+            self.assertNotIn("non-zero", report["rationale"])
+
     def test_behavior_comparison_reports_profiles_maps_and_matrix(self) -> None:
             comparisons, rows = compare_behavior_suite(
                 episodes=0,

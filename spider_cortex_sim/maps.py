@@ -332,11 +332,11 @@ def _build_corridor_escape(*, width: int, height: int) -> MapTemplate:
     deep = (_clamp_cell(width, height, (1, cy)),)
 
     blocked = set()
-    for x in range(4, max(4, width - 3)):
+    for x in range(4, max(4, width - 2)):
         for y in range(height):
             if y == cy:
                 continue
-            if y in {cy - 1, cy + 1} and x < width - 4:
+            if y in {cy - 1, cy + 1}:
                 blocked.add((x, y))
     blocked.update(
         _valid_cells(

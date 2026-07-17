@@ -384,9 +384,14 @@ class CapacityConfigIntegrationTest(unittest.TestCase):
             sum(CAPACITY_PROFILES["small"].module_hidden_dims.values()),
         )
 
-    def test_capacity_axis_profile_keeps_base_scale_for_mixed_axes(self) -> None:
+    def test_capacity_axis_profile_reports_module_scale(self) -> None:
         profile = capacity_profile_for_axis(
             axis="action_center",
+            target_profile="small",
+            base_profile="current",
+        )
+        proposer_profile = capacity_profile_for_axis(
+            axis="proposers",
             target_profile="small",
             base_profile="current",
         )
@@ -397,6 +402,10 @@ class CapacityConfigIntegrationTest(unittest.TestCase):
         )
 
         self.assertEqual(profile.scale_factor, CAPACITY_PROFILES["current"].scale_factor)
+        self.assertEqual(
+            proposer_profile.scale_factor,
+            CAPACITY_PROFILES["small"].scale_factor,
+        )
         self.assertEqual(all_profile.scale_factor, CAPACITY_PROFILES["small"].scale_factor)
 
     def test_from_summary_defaults_capacity_profile_name_to_current(self) -> None:

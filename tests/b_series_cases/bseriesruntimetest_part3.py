@@ -24,7 +24,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.06
         meta["recent_contact"] = 0.04
         for tick in range(77, 101):
@@ -79,7 +79,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.07
         meta["recent_contact"] = 0.04
         for tick in range(76, 100):
@@ -134,7 +134,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.08
         meta["recent_contact"] = 0.04
         for tick in range(75, 99):
@@ -189,7 +189,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.10
         meta["recent_contact"] = 0.05
         for tick in range(74, 97):
@@ -243,7 +243,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.10
         meta["recent_contact"] = 0.05
         for tick in range(73, 96):
@@ -297,7 +297,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.10
         meta["recent_contact"] = 0.05
         for tick in range(72, 95):
@@ -351,7 +351,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.12
         meta["recent_contact"] = 0.05
         for tick in range(71, 93):
@@ -405,7 +405,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.12
         meta["recent_contact"] = 0.05
         for tick in range(70, 91):
@@ -459,7 +459,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.13
         meta["recent_contact"] = 0.05
         for tick in range(69, 89):
@@ -513,7 +513,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.14
         meta["recent_contact"] = 0.06
         for tick in range(68, 87):
@@ -567,7 +567,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.16
         meta["recent_contact"] = 0.08
         for tick in range(67, 85):
@@ -621,7 +621,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.18
         meta["recent_contact"] = 0.10
         for tick in range(66, 83):
@@ -675,7 +675,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 7.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         for tick in range(65, 82):
             brain.set_direct_policy_event_clock(tick)
             decision = brain.act_inference(
@@ -727,7 +727,7 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         for tick in range(64, 80):
             brain.set_direct_policy_event_clock(tick)
             decision = brain.act_inference(
@@ -907,6 +907,114 @@ class BSeriesRuntimeTestPart3(unittest.TestCase):
         self.assertGreaterEqual(float(decision.b_temporal_threat_pressure), 0.70)
         self.assertEqual(decision.semantic_override_count, 1)
         self.assertIn(decision.bridge_primitive_action, ACTIONS)
+
+    def test_b2_predator_trace_vetoes_hunger_release_from_shelter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b1_threat_guard_source(tmpdir)
+            config = build_b2_temporal_threat_config(
+                B2_TEMPORAL_THREAT_H48_POLICY_NAME,
+                source_checkpoint=checkpoint,
+            )
+            brain = SpiderBrain(seed=18, module_dropout=0.0, config=config)
+
+        meta = dict(_bridge_observation()["meta"])
+        meta.update(
+            {
+                "on_shelter": True,
+                "shelter_role": "deep",
+                "shelter_role_level": 1.0,
+                "percept_traces": {
+                    "predator": {
+                        "strength": 0.95,
+                        "freshness": 0.95,
+                        "certainty": 0.95,
+                    }
+                },
+            }
+        )
+
+        decision = brain.act_inference(
+            _brain_observation(
+                meta,
+                hunger={"hunger": 0.65},
+                sleep={
+                    "health": 1.0,
+                    "on_shelter": 1.0,
+                    "shelter_role_level": 1.0,
+                },
+            ),
+            sample=False,
+        )
+
+        self.assertEqual(float(decision.b_predator_trace_pressure), 0.95)
+        self.assertEqual(decision.semantic_action, "STAY")
+        self.assertEqual(decision.semantic_action_reason, "b2_temporal_threat_hold_deep")
+
+    def test_b2_safe_hunger_release_requires_safe_current_threat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = _save_b1_threat_guard_source(tmpdir)
+            config = build_b2_temporal_threat_config(
+                B2_TEMPORAL_THREAT_H48_POLICY_NAME,
+                source_checkpoint=checkpoint,
+            )
+            brain = SpiderBrain(seed=18, module_dropout=0.0, config=config)
+
+        meta = dict(_bridge_observation()["meta"])
+        meta.update(
+            {
+                "on_shelter": True,
+                "shelter_role": "deep",
+                "shelter_role_level": 1.0,
+                "percept_traces": {
+                    "predator": {
+                        "strength": 0.50,
+                        "freshness": 0.50,
+                        "certainty": 0.50,
+                    }
+                },
+            }
+        )
+
+        decision = brain.act_inference(
+            _brain_observation(
+                meta,
+                hunger={"hunger": 0.65},
+                sleep={
+                    "health": 1.0,
+                    "on_shelter": 1.0,
+                    "shelter_role_level": 1.0,
+                },
+            ),
+            sample=False,
+        )
+
+        self.assertEqual(float(decision.b_predator_trace_pressure), 0.50)
+        self.assertEqual(decision.semantic_action, "MOVE_TO_FOOD")
+        self.assertEqual(
+            decision.semantic_action_reason,
+            "b2_temporal_threat_safe_hunger_release",
+        )
+
+        threatened_decision = brain.act_inference(
+            _brain_observation(
+                meta,
+                hunger={"hunger": 0.65},
+                sleep={
+                    "health": 1.0,
+                    "on_shelter": 1.0,
+                    "shelter_role_level": 1.0,
+                },
+                threat={"predator_visible": 0.95},
+            ),
+            sample=False,
+        )
+
+        self.assertEqual(float(threatened_decision.b_current_threat_pressure), 0.95)
+        self.assertEqual(threatened_decision.semantic_action, "STAY")
+        self.assertEqual(
+            threatened_decision.semantic_action_reason,
+            "b2_temporal_threat_hold_deep",
+        )
 
     def test_b3_contact_memory_uses_transfer_memory_and_primitive_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

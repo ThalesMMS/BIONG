@@ -55,6 +55,7 @@ from spider_cortex_sim.perception import (
     build_action_context_observation,
     build_motor_context_observation,
 )
+from spider_cortex_sim.simulation import SpiderSimulation
 from spider_cortex_sim.world import SpiderWorld
 
 
@@ -102,6 +103,27 @@ class SpiderBrainArchitectureTest(unittest.TestCase):
 
         self.assertEqual(self.brain.act_train(obs, sample=False), "legacy-step")
         self.assertFalse(calls[-1]["sample"])
+
+    def test_act_training_does_not_retry_internal_type_error(self) -> None:
+        call_count = 0
+
+        def failing_act(
+            observation,
+            bus=None,
+            *,
+            sample=False,
+            policy_mode="normal",
+            training=None,
+        ):
+            nonlocal call_count
+            call_count += 1
+            raise TypeError("unexpected keyword argument 'training' from inner call")
+
+        self.brain.act = failing_act
+
+        with self.assertRaisesRegex(TypeError, "from inner call"):
+            self.brain.act_train(_blank_obs())
+        self.assertEqual(call_count, 1)
 
     def test_action_center_is_motor_network(self) -> None:
         """action_center must be a MotorNetwork (has value head)."""
@@ -340,6 +362,24 @@ class BrainStepNewFieldsTest(unittest.TestCase):
         self.assertIsInstance(step.motor_noise_applied, bool)
         self.assertIsInstance(step.motor_slip_occurred, bool)
         self.assertEqual(step.slip_reason, "none")
+
+    def test_motor_execution_info_falls_back_to_nested_components(self) -> None:
+        step = self.brain.act(self.obs, bus=None, sample=False)
+
+        SpiderSimulation._attach_motor_execution_info(
+            step,
+            {
+                "motor_slip": {
+                    "components": {
+                        "orientation_alignment": 0.25,
+                        "terrain_difficulty": 0.75,
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(step.orientation_alignment, 0.25)
+        self.assertEqual(step.terrain_difficulty, 0.75)
 
     def test_brainstep_includes_momentum_field(self) -> None:
         step = self.brain.act(self.obs, bus=None, sample=False)

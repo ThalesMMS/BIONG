@@ -864,14 +864,18 @@ class _BrainLearningDistillationMixin:
             and self.arbitration_network.cache is not None
         ):
             teacher_valence_logits = np.asarray(teacher_valence_logits, dtype=float)
-            student_valence_probs = np.array(
+            student_valence_logits = np.array(
                 [
                     float(
-                        decision.arbitration_decision.valence_scores.get(name, 0.0)
+                        decision.arbitration_decision.valence_logits.get(name, 0.0)
                     )
                     for name in self.VALENCE_ORDER
                 ],
                 dtype=float,
+            )
+            student_valence_probs = softmax(
+                student_valence_logits,
+                temperature=temperature,
             )
             teacher_valence_probs = softmax(
                 teacher_valence_logits,
@@ -888,18 +892,7 @@ class _BrainLearningDistillationMixin:
                 valence_loss = (
                     resolved_loss_weights.valence_weight
                     * cross_entropy_loss(
-                        np.array(
-                            [
-                                float(
-                                    decision.arbitration_decision.valence_logits.get(
-                                        name,
-                                        0.0,
-                                    )
-                                )
-                                for name in self.VALENCE_ORDER
-                            ],
-                            dtype=float,
-                        ),
+                        student_valence_logits,
                         teacher_valence_probs,
                         temperature=temperature,
                     )

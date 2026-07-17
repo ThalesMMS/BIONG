@@ -1759,10 +1759,16 @@ class RecurrentOptionAffordancePositionFeedbackTrueMonolithicNetwork(
             self.b2_geometry,
             self.W2_shelter_position,
             self.b2_shelter_position,
+            self.W2_shelter_column,
+            self.b2_shelter_column,
             self.W2_transition_prediction,
             self.b2_transition_prediction,
             self.W_transition_prediction_feedback,
             self.b_transition_prediction_feedback,
+            self.W2_transition_rollout_prediction,
+            self.b2_transition_rollout_prediction,
+            self.W_transition_rollout_prediction_feedback,
+            self.b_transition_rollout_prediction_feedback,
             self.W_affordance_feedback,
             self.b_affordance_feedback,
             self.W2_policy_feedback,
@@ -1831,6 +1837,10 @@ class RecurrentOptionAffordancePositionFeedbackTrueMonolithicNetwork(
             + self.b2_transition_prediction.size
             + self.W_transition_prediction_feedback.size
             + self.b_transition_prediction_feedback.size
+            + self.W2_transition_rollout_prediction.size
+            + self.b2_transition_rollout_prediction.size
+            + self.W_transition_rollout_prediction_feedback.size
+            + self.b_transition_rollout_prediction_feedback.size
             + self.W2_phase.size
             + self.b2_phase.size
             + self.W2_phase_option_feedback.size

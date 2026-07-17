@@ -641,28 +641,44 @@ def module_response_by_predator_type_from_payload(
     """
     if not isinstance(payload, dict):
         return {}
-    sources: list[object] = []
+
+    def _response_mapping(candidate: dict[str, object]) -> dict[str, object] | None:
+        for key in (
+            "mean_module_response_by_predator_type",
+            "module_response_by_predator_type",
+        ):
+            response = candidate.get(key)
+            if isinstance(response, dict):
+                return response
+        return None
+
+    sources: list[dict[str, object]] = []
     legacy_scenarios = payload.get("legacy_scenarios", {})
-    if isinstance(legacy_scenarios, dict):
-        sources.extend(legacy_scenarios.values())
+    if not isinstance(legacy_scenarios, dict):
+        legacy_scenarios = {}
     suite = payload.get("suite", {})
-    if isinstance(suite, dict):
-        for scenario_payload in suite.values():
-            if isinstance(scenario_payload, dict):
-                legacy_metrics = scenario_payload.get("legacy_metrics")
-                if isinstance(legacy_metrics, dict):
-                    sources.append(legacy_metrics)
-                sources.append(scenario_payload)
-    grouped: Dict[str, Dict[str, list[float]]] = {}
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        response = (
-            source.get("mean_module_response_by_predator_type")
-            or source.get("module_response_by_predator_type")
+    if not isinstance(suite, dict):
+        suite = {}
+    scenario_names = dict.fromkeys((*legacy_scenarios, *suite))
+    for scenario_name in scenario_names:
+        scenario_payload = suite.get(scenario_name)
+        legacy_metrics = (
+            scenario_payload.get("legacy_metrics")
+            if isinstance(scenario_payload, dict)
+            else None
         )
-        if not isinstance(response, dict):
-            continue
+        for candidate in (
+            legacy_scenarios.get(scenario_name),
+            legacy_metrics,
+            scenario_payload,
+        ):
+            if not isinstance(candidate, dict):
+                continue
+            response = _response_mapping(candidate)
+            if response is not None:
+                sources.append(response)
+    grouped: Dict[str, Dict[str, list[float]]] = {}
+    for response in sources:
         for predator_type, module_values in response.items():
             if not isinstance(module_values, dict):
                 continue

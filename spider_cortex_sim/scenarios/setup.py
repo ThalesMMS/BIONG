@@ -12,6 +12,7 @@ from ..predator import (
 from ..world_types import MemorySlot
 from ..world import SpiderWorld
 from .specs import (
+    CONTINUOUS_SURVIVAL_BOOTSTRAP_INITIAL_SLEEP_DEBT,
     FAST_VISUAL_HUNTER_PROFILE,
     FOOD_DEPRIVATION_INITIAL_HUNGER,
     NIGHT_REST_HUNGER_BASELINE,
@@ -375,7 +376,7 @@ def _continuous_survival_bootstrap(world: SpiderWorld) -> None:
     world.food_positions = [world.spider_pos()]
     world.state.hunger = 0.52
     world.state.fatigue = 0.22
-    world.state.sleep_debt = 0.20
+    world.state.sleep_debt = CONTINUOUS_SURVIVAL_BOOTSTRAP_INITIAL_SLEEP_DEBT
 
 
 def _continuous_survival_canonical(world: SpiderWorld) -> None:

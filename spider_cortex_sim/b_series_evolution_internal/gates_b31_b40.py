@@ -27,11 +27,8 @@ def b31_dopamine_prediction_error_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b31_decision"))
             for item in trace
@@ -149,11 +146,8 @@ def b32_actor_critic_value_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b32_decision"))
             for item in trace
@@ -267,11 +261,8 @@ def b33_td_error_decomposition_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b33_decision"))
             for item in trace
@@ -385,11 +376,8 @@ def b34_eligibility_credit_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b34_decision"))
             for item in trace
@@ -504,11 +492,8 @@ def b35_forward_model_value_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b35_decision"))
             for item in trace
@@ -635,11 +620,8 @@ def b36_latent_belief_state_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b36_decision"))
             for item in trace
@@ -766,11 +748,8 @@ def b37_state_factor_gate_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b37_decision"))
             for item in trace
@@ -897,11 +876,8 @@ def b38_factor_attention_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b38_decision"))
             for item in trace
@@ -1028,11 +1004,8 @@ def b39_attention_binding_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b39_decision"))
             for item in trace
@@ -1159,11 +1132,8 @@ def b40_global_workspace_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b40_decision"))
             for item in trace

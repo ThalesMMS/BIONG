@@ -212,6 +212,32 @@ class DiagnosticsReviewRegressionTest(unittest.TestCase):
             0.25,
         )
 
+    def test_reflex_warning_flags_do_not_become_thresholds(self) -> None:
+        reflex_data = {
+            "available": True,
+            "source": "summary.evaluation",
+            "override_rate": 0.2,
+            "override_warning": True,
+            "dominance_rate": 0.05,
+            "dominance_warning": False,
+        }
+        original = diagnostics_builder.build_reflex_dependence_indicators
+        diagnostics_builder.build_reflex_dependence_indicators = (
+            lambda _summary, _reflex_frequency: reflex_data
+        )
+        try:
+            rows = build_diagnostics({}, {"scenarios": []}, {"variants": {}}, {})
+        finally:
+            diagnostics_builder.build_reflex_dependence_indicators = original
+
+        diagnostics = {row["label"]: row for row in rows}
+        override = diagnostics["Reflex Dependence: override rate"]
+        dominance = diagnostics["Reflex Dependence: dominance"]
+        self.assertEqual(override["warning_threshold"], 0.1)
+        self.assertEqual(override["status"], "warning")
+        self.assertEqual(dominance["warning_threshold"], 0.25)
+        self.assertEqual(dominance["status"], "ok")
+
     def test_capacity_diagnostic_uses_capacity_summary_keys(self) -> None:
         rows = build_diagnostics(
             {},

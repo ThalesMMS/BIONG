@@ -203,9 +203,21 @@ class _BrainLearningContinuationMixin:
             }
 
         return {
-            "action": self._weighted_distribution(self.action_dim, action_weights),
-            "option": self._weighted_distribution(len(OPTION_NAMES), option_weights),
-            "phase": self._weighted_distribution(len(PHASE_LABELS), phase_weights),
+            "action": (
+                self._weighted_distribution(self.action_dim, action_weights)
+                if action_weights
+                else np.zeros(0, dtype=float)
+            ),
+            "option": (
+                self._weighted_distribution(len(OPTION_NAMES), option_weights)
+                if option_weights
+                else np.zeros(0, dtype=float)
+            ),
+            "phase": (
+                self._weighted_distribution(len(PHASE_LABELS), phase_weights)
+                if phase_weights
+                else np.zeros(0, dtype=float)
+            ),
         }
 
     @staticmethod

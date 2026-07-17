@@ -23,7 +23,7 @@ class BSeriesRuntimeTestPart4(unittest.TestCase):
         meta["map_template"] = "corridor_escape"
         meta["food_dist"] = 8.0
         meta["shelter_dist"] = 0.0
-        meta["shelter_role"] = "at_shelter"
+        meta["shelter_role"] = "inside"
         meta["recent_pain"] = 0.05
         meta["recent_contact"] = 0.05
         for tick in range(78, 104):

@@ -1,10 +1,128 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from .shared import *
 
 
 
 class BSeriesRuntimeTestPart2(unittest.TestCase):
+    def test_b27_through_b30_use_aggregate_threat_pressure(self) -> None:
+        brain = SpiderBrain(seed=53, module_dropout=0.0, config=_b0_config())
+        brain.set_direct_policy_event_clock(1)
+        observation = _brain_observation(
+            {"map_template": "open_field"},
+            sleep={"health": 1.0},
+        )
+        inherited = (
+            "STAY",
+            "inherited",
+            "inherited",
+            0,
+            {"b_current_threat_pressure": 0.9},
+        )
+        cases = (
+            (
+                "_b27_arousal_gain_semantic_action",
+                "_b26_allostatic_prediction_semantic_action",
+                "b27_stress_pressure",
+                0.315,
+            ),
+            (
+                "_b28_interoceptive_attention_semantic_action",
+                "_b27_arousal_gain_semantic_action",
+                "b28_distractor_pressure",
+                0.306,
+            ),
+            (
+                "_b29_salience_competition_semantic_action",
+                "_b28_interoceptive_attention_semantic_action",
+                "b29_threat_salience",
+                0.468,
+            ),
+            (
+                "_b30_basal_ganglia_gate_semantic_action",
+                "_b29_salience_competition_semantic_action",
+                "b30_no_go_signal",
+                0.306,
+            ),
+        )
+
+        for method_name, inherited_name, trace_field, expected in cases:
+            with self.subTest(method=method_name), patch.object(
+                brain,
+                inherited_name,
+                return_value=inherited,
+            ):
+                *_, trace = getattr(brain, method_name)(
+                    observation,
+                    learned_semantic_action="STAY",
+                )
+                self.assertAlmostEqual(float(trace[trace_field]), expected)
+
+    def test_b29_persists_salience_memory_before_corridor_derivation(self) -> None:
+        brain = SpiderBrain(seed=55, module_dropout=0.0, config=_b0_config())
+        brain.set_direct_policy_event_clock(1)
+        observation = _brain_observation(
+            {"map_template": "open_field"},
+            sleep={"health": 1.0},
+        )
+        inherited = (
+            "STAY",
+            "inherited",
+            "inherited",
+            0,
+            {
+                "b_current_threat_pressure": 0.0,
+                "b28_attention_gain": 0.8,
+                "b28_distractor_pressure": 0.0,
+                "b28_interoceptive_focus": 0.0,
+            },
+        )
+
+        with patch.object(
+            brain,
+            "_b28_interoceptive_attention_semantic_action",
+            return_value=inherited,
+        ):
+            brain._b29_salience_competition_semantic_action(
+                observation,
+                learned_semantic_action="STAY",
+            )
+
+        self.assertAlmostEqual(float(brain._b29_salience_memory), 0.8)
+
+    def test_b30_persists_gate_memory_not_derived_go_signal(self) -> None:
+        brain = SpiderBrain(seed=56, module_dropout=0.0, config=_b0_config())
+        brain.set_direct_policy_event_clock(1)
+        observation = _brain_observation({"map_template": "open_field"})
+        inherited = (
+            "STAY",
+            "inherited",
+            "inherited",
+            0,
+            {
+                "b_current_threat_pressure": 0.0,
+                "b28_attention_gain": 0.5,
+                "b28_distractor_pressure": 0.0,
+                "b29_corridor_salience": 0.0,
+                "b29_homeostatic_salience": 0.8,
+                "b29_threat_salience": 0.0,
+            },
+        )
+
+        with patch.object(
+            brain,
+            "_b29_salience_competition_semantic_action",
+            return_value=inherited,
+        ):
+            brain._b30_basal_ganglia_gate_semantic_action(
+                observation,
+                learned_semantic_action="STAY",
+            )
+
+        self.assertEqual(float(brain._b30_gate_memory), 0.0)
+
     def test_b29_salience_competition_uses_b28_transfer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             checkpoint = _save_b28_interoceptive_attention_source(tmpdir)
@@ -312,7 +430,7 @@ class BSeriesRuntimeTestPart2(unittest.TestCase):
             _brain_observation(
                 meta,
                 hunger={"hunger": 0.90},
-                sleep={"health": 0.80, "on_shelter": 0.0},
+                sleep={"health": 0.80, "sleep_debt": 0.96, "on_shelter": 0.0},
                 threat={"predator_smell_strength": 0.0},
             ),
             sample=False,
@@ -353,7 +471,7 @@ class BSeriesRuntimeTestPart2(unittest.TestCase):
                 _brain_observation(
                     meta,
                     hunger={"hunger": 0.90},
-                    sleep={"health": 0.80, "on_shelter": 0.0},
+                    sleep={"health": 0.80, "sleep_debt": 0.96, "on_shelter": 0.0},
                     threat={"predator_smell_strength": 0.0},
                 ),
                 sample=False,
@@ -689,7 +807,7 @@ class BSeriesRuntimeTestPart2(unittest.TestCase):
                 _brain_observation(
                     meta,
                     hunger={"hunger": 0.90},
-                    sleep={"health": 0.80, "on_shelter": 0.0},
+                    sleep={"health": 0.80, "sleep_debt": 0.96, "on_shelter": 0.0},
                     threat={"predator_smell_strength": 0.0},
                 ),
                 sample=False,
@@ -732,7 +850,7 @@ class BSeriesRuntimeTestPart2(unittest.TestCase):
                 _brain_observation(
                     meta,
                     hunger={"hunger": 0.90},
-                    sleep={"health": 0.80, "on_shelter": 0.0},
+                    sleep={"health": 0.80, "sleep_debt": 0.96, "on_shelter": 0.0},
                     threat={"predator_smell_strength": 0.0},
                 ),
                 sample=False,

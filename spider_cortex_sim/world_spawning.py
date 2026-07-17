@@ -99,6 +99,7 @@ class WorldSpawningMixin:
                 if self.is_walkable((x, y))
                 and (x, y) not in self.shelter_cells
                 and (x, y) != spider_pos
+                and (x, y) not in self.food_positions
                 and (x, y) not in occupied_positions
                 and self.manhattan((x, y), spider_pos) >= min_spider_distance
                 and all(
@@ -208,5 +209,8 @@ class WorldSpawningMixin:
         Parameters:
             eaten_position (Tuple[int, int]): Grid coordinates (x, y) of the consumed food item.
         """
-        self.food_positions = [p for p in self.food_positions if p != eaten_position]
+        remaining_food = list(self.food_positions)
+        if eaten_position in remaining_food:
+            remaining_food.remove(eaten_position)
+        self.food_positions = remaining_food
         self.food_positions.append(self._random_food_cell())

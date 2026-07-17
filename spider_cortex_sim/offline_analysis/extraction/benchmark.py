@@ -175,7 +175,7 @@ def build_primary_benchmark(
     scenarios = scenario_success.get("scenarios", [])
     if isinstance(scenarios, list) and scenarios:
         values = [
-            _coerce_float(item.get("success_rate"))
+            1.0 if _coerce_float(item.get("success_rate")) >= 1.0 else 0.0
             for item in scenarios
             if isinstance(item, Mapping)
         ]
@@ -992,8 +992,8 @@ def _fallback_group_summary(
     Aggregate per-group success statistics and counts from behavior CSV rows.
     
     Groups input rows by the string value of the given key name (skipping rows with no key or empty string). For each group computes:
-    - `scenario_success_rate`: mean of per-row `success` (coerced to boolean then 1.0/0.0)
-    - `episode_success_rate`: same mean computed over episodes
+    - `scenario_success_rate`: fraction of scenarios whose episodes all succeeded
+    - `episode_success_rate`: mean success computed over episodes
     - `scenario_count`: number of distinct non-empty `scenario` values in the group
     - `episode_count`: total number of rows in the group
     
@@ -1024,7 +1024,10 @@ def _fallback_group_summary(
         success_values = [1.0 if _coerce_bool(row.get("success")) else 0.0 for row in items]
         summary[key] = {
             "summary": {
-                "scenario_success_rate": _mean(per_scenario_success_rates),
+                "scenario_success_rate": _mean(
+                    1.0 if rate >= 1.0 else 0.0
+                    for rate in per_scenario_success_rates
+                ),
                 "episode_success_rate": _mean(success_values),
                 "scenario_count": len(scenario_names),
                 "episode_count": len(items),

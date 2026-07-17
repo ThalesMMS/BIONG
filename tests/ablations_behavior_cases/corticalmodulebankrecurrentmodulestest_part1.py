@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from spider_cortex_sim.bus import MessageBus
+
 from .shared import *
 from .corticalmodulebankrecurrentmodulestest_helpers import CorticalModuleBankRecurrentModulesTestHelpers
 
@@ -255,6 +257,35 @@ class CorticalModuleBankRecurrentModulesTestPart1(CorticalModuleBankRecurrentMod
             recurrent.hidden_state,
             np.zeros(recurrent.hidden_dim, dtype=float),
         )
+
+    def test_true_monolithic_hidden_reset_event_is_consumed_without_bus(self) -> None:
+        brain = SpiderBrain(
+            seed=24,
+            module_dropout=0.0,
+            config=BrainAblationConfig(
+                name="true_monolithic_recurrent_policy",
+                architecture="true_monolithic",
+                module_dropout=0.0,
+                enable_reflexes=False,
+                enable_auxiliary_targets=False,
+                enable_food_direction_bias=True,
+                use_learned_arbitration=False,
+                warm_start_scale=0.0,
+                direct_policy_hidden_dims=(32,),
+                direct_policy_recurrent=True,
+            ),
+        )
+        observation = _build_observation()
+        brain.reset_hidden_states()
+        self.assertTrue(brain._direct_policy_hidden_reset_pending)
+
+        brain.act_inference(observation, sample=False, bus=None)
+
+        self.assertFalse(brain._direct_policy_hidden_reset_pending)
+        bus = MessageBus()
+        brain.act_inference(observation, sample=False, bus=bus)
+        message = bus.topic_messages("action.selection")[0]
+        self.assertFalse(message.payload["hidden_reset_event"])
 
     def test_true_monolithic_recurrent_estimate_value_does_not_commit_hidden_state(self) -> None:
         brain = SpiderBrain(

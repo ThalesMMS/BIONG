@@ -547,7 +547,7 @@ class CorticalModuleBankRecurrentModulesTestPart5(CorticalModuleBankRecurrentMod
             "sleep_phase": "RESTING",
             "rest_streak": 3,
             "hunger": 0.18,
-            "food_memory": {"target": [center_x + 4, 7], "age": 1, "ttl": 12},
+            "food_memory": {"target": (center_x + 4, 7), "age": 1, "ttl": 12},
             "predator_positions": [[0, 0]],
             "recent_contact": 0.0,
             "recent_pain": 0.0,
@@ -864,12 +864,19 @@ class CorticalModuleBankRecurrentModulesTestPart5(CorticalModuleBankRecurrentMod
                 module_dropout=0.0,
             )[0],
         )
-        dataset = sim.collect_direct_policy_probe_trajectory_distillation_rollout(
-            episodes=1,
-            episode_start=9,
-        )
+        sim._direct_policy_handoff_teacher_state = {"stage": "await_hold"}
+        with mock.patch.object(
+            sim,
+            "_reset_direct_policy_handoff_teacher_state",
+            wraps=sim._reset_direct_policy_handoff_teacher_state,
+        ) as reset_handoff:
+            dataset = sim.collect_direct_policy_probe_trajectory_distillation_rollout(
+                episodes=1,
+                episode_start=9,
+            )
         self.assertGreater(len(dataset), 40)
         self.assertEqual(dataset.to_summary()["episode_ids"], [9, 10])
+        self.assertEqual(reset_handoff.call_count, 2)
         self.assertEqual(
             dataset.teacher_metadata["source"],
             "redirected_direct_policy_post_rest_probe_trajectory",
@@ -934,9 +941,16 @@ class CorticalModuleBankRecurrentModulesTestPart5(CorticalModuleBankRecurrentMod
             "rollout_release",
             set(dataset.teacher_metadata.get("action_stages", [])),
         )
-        self.assertIn(
-            "rollout_live",
-            set(dataset.teacher_metadata.get("action_stages", [])),
+        action_stages = dataset.teacher_metadata.get("action_stages", [])
+        self.assertIn("frontier_live", set(action_stages))
+        frontier_policies = [
+            sample.teacher_policy
+            for sample, stage in zip(dataset, action_stages, strict=True)
+            if stage == "frontier_live"
+        ]
+        self.assertTrue(frontier_policies)
+        self.assertTrue(
+            all(np.count_nonzero(policy) > 1 for policy in frontier_policies)
         )
 
     def test_collect_direct_policy_probe_replayable_teacher_distillation_rollout_collects_probe_samples(self) -> None:

@@ -694,6 +694,7 @@ DIRECT_TEACHER_REPLAY_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_trace_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,
@@ -728,6 +729,7 @@ DIRECT_TEACHER_REPLAY_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_rollout_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,
@@ -763,6 +765,7 @@ DIRECT_TEACHER_REPLAY_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_frontier_teacher_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,
@@ -799,6 +802,7 @@ DIRECT_TEACHER_REPLAY_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_post_rest_probe_replayable_teacher_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,

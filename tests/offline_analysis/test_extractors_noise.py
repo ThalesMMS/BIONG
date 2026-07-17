@@ -129,6 +129,130 @@ class ExtractNoiseRobustnessTest(unittest.TestCase):
         self.assertAlmostEqual(result["train_marginals"]["none"], 0.5)
         self.assertAlmostEqual(result["eval_marginals"]["high"], 0.0)
 
+    def test_behavior_rows_use_fully_successful_scenario_semantics(self) -> None:
+        rows = [
+            {
+                "scenario": "scenario_a",
+                "success": True,
+                "train_noise_profile": "none",
+                "eval_noise_profile": "none",
+            }
+            for _ in range(10)
+        ]
+        rows.append(
+            {
+                "scenario": "scenario_b",
+                "success": False,
+                "train_noise_profile": "none",
+                "eval_noise_profile": "none",
+            }
+        )
+
+        result = extract_noise_robustness({}, normalize_behavior_rows(rows))
+        cell = result["matrix"]["none"]["none"]
+
+        self.assertEqual(cell["scenario_success_rate"], 0.5)
+        self.assertAlmostEqual(cell["episode_success_rate"], 10.0 / 11.0)
+        self.assertEqual(cell["mean_reward"], 0.0)
+
+    def test_behavior_rows_preserve_rewards_in_reconstructed_cells(self) -> None:
+        rows = normalize_behavior_rows(
+            [
+                {
+                    "scenario": "night_rest",
+                    "success": True,
+                    "reward": 2.0,
+                    "train_noise_profile": "none",
+                    "eval_noise_profile": "none",
+                },
+                {
+                    "scenario": "night_rest",
+                    "success": True,
+                    "mean_reward": 4.0,
+                    "train_noise_profile": "none",
+                    "eval_noise_profile": "none",
+                },
+            ]
+        )
+
+        cell = extract_noise_robustness({}, rows)["matrix"]["none"]["none"]
+
+        self.assertEqual(cell["mean_reward"], 3.0)
+
+    def test_behavior_rows_exclude_unnamed_scenarios_from_scenario_rate(self) -> None:
+        rows = normalize_behavior_rows(
+            [
+                {
+                    "scenario": "night_rest",
+                    "success": True,
+                    "train_noise_profile": "none",
+                    "eval_noise_profile": "none",
+                },
+                {
+                    "scenario": "",
+                    "success": False,
+                    "train_noise_profile": "none",
+                    "eval_noise_profile": "none",
+                },
+            ]
+        )
+
+        cell = extract_noise_robustness({}, rows)["matrix"]["none"]["none"]
+
+        self.assertEqual(cell["scenario_count"], 1)
+        self.assertEqual(cell["scenario_success_rate"], 1.0)
+        self.assertEqual(cell["episode_success_rate"], 0.5)
+
+    def test_behavior_rows_only_fill_missing_partial_summary_cells(self) -> None:
+        summary = {
+            "behavior_evaluation": {
+                "robustness_matrix": {
+                    "matrix_spec": {
+                        "train_conditions": ["none"],
+                        "eval_conditions": ["none", "high"],
+                        "cell_count": 2,
+                    },
+                    "matrix": {
+                        "none": {
+                            "none": {
+                                "summary": {
+                                    "scenario_success_rate": 0.25,
+                                    "episode_success_rate": 0.5,
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+        rows = normalize_behavior_rows(
+            [
+                {
+                    "scenario": "duplicate",
+                    "success": True,
+                    "train_noise_profile": "none",
+                    "eval_noise_profile": "none",
+                },
+                {
+                    "scenario": "missing",
+                    "success": False,
+                    "train_noise_profile": "none",
+                    "eval_noise_profile": "high",
+                },
+            ]
+        )
+
+        result = extract_noise_robustness(summary, rows)
+
+        self.assertEqual(
+            result["matrix"]["none"]["none"]["scenario_success_rate"],
+            0.25,
+        )
+        self.assertEqual(
+            result["matrix"]["none"]["high"]["scenario_success_rate"],
+            0.0,
+        )
+
     def test_extract_noise_robustness_missing_data_returns_unavailable_structure(self) -> None:
         result = extract_noise_robustness({}, [])
 
@@ -403,7 +527,11 @@ class ExtractNoiseRobustnessEdgeCasesTest(unittest.TestCase):
         ])
         result = extract_noise_robustness({}, rows)
         self.assertEqual(result["matrix"]["none"]["none"]["episode_count"], 3)
-        self.assertAlmostEqual(result["matrix"]["none"]["none"]["scenario_success_rate"], 2 / 3)
+        self.assertEqual(result["matrix"]["none"]["none"]["scenario_success_rate"], 0.0)
+        self.assertAlmostEqual(
+            result["matrix"]["none"]["none"]["episode_success_rate"],
+            2 / 3,
+        )
 
     def test_metadata_complete_true_when_all_cells_present(self) -> None:
         summary = {

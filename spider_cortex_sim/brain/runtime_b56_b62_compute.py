@@ -1126,7 +1126,7 @@ class _BrainRuntimePart8Mixin:
         sleep_debt = self._b_series_float(meta, "sleep_debt")
         shelter_dist = self._b_series_float(meta, "shelter_dist")
         food_dist = self._b_series_float(meta, "food_dist")
-        near_shelter = 1.0 if shelter_dist <= 2.0 or shelter_role in {"at_shelter", "deep_shelter"} else 0.0
+        near_shelter = 1.0 if shelter_dist <= 2.0 or shelter_role in {"inside", "deep"} else 0.0
         homeostatic_vulnerability = float(
             np.clip((1.0 - health) * 0.45 + sleep_debt * 0.25 + hunger * 0.20, 0.0, 1.0)
         )
@@ -1334,7 +1334,7 @@ class _BrainRuntimePart8Mixin:
         sleep_debt = self._b_series_float(meta, "sleep_debt")
         shelter_dist = self._b_series_float(meta, "shelter_dist")
         food_dist = self._b_series_float(meta, "food_dist")
-        near_shelter = 1.0 if shelter_dist <= 2.0 or shelter_role in {"at_shelter", "deep_shelter"} else 0.0
+        near_shelter = 1.0 if shelter_dist <= 2.0 or shelter_role in {"inside", "deep"} else 0.0
         homeostatic_vulnerability = float(
             np.clip((1.0 - health) * 0.45 + sleep_debt * 0.25 + hunger * 0.18, 0.0, 1.0)
         )
@@ -1529,7 +1529,7 @@ class _BrainRuntimePart8Mixin:
         sleep_debt = self._b_series_float(meta, "sleep_debt")
         shelter_dist = self._b_series_float(meta, "shelter_dist")
         food_dist = self._b_series_float(meta, "food_dist")
-        near_shelter = 1.0 if shelter_dist <= 1.0 or shelter_role in {"at_shelter", "deep_shelter"} else 0.0
+        near_shelter = 1.0 if shelter_dist <= 1.0 or shelter_role in {"inside", "deep"} else 0.0
         current_threat = max(
             self._b_series_float(meta, "predator_smell_strength"),
             self._b_series_float(meta, "predator_motion_salience"),

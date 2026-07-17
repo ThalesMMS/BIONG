@@ -107,10 +107,16 @@ def build_effect_size_tables(
                 uncertainty_block = _mapping_or_empty(delta_payload.get("uncertainty"))
             raw_delta: object = scalar_block.get("scenario_success_rate_delta")
             if raw_delta is None:
-                raw_delta = round(
-                    _coerce_float(comparison_summary.get("scenario_success_rate"))
-                    - _coerce_float(baseline_summary.get("scenario_success_rate")),
-                    6,
+                baseline_rate = _coerce_optional_float(
+                    baseline_summary.get("scenario_success_rate")
+                )
+                comparison_rate = _coerce_optional_float(
+                    comparison_summary.get("scenario_success_rate")
+                )
+                raw_delta = (
+                    round(comparison_rate - baseline_rate, 6)
+                    if baseline_rate is not None and comparison_rate is not None
+                    else None
                 )
             row = _cohens_d_row(
                 domain="ablation",
@@ -144,10 +150,16 @@ def build_effect_size_tables(
             continue
         baseline_summary = _mapping_or_empty(baseline_payload.get("summary"))
         comparison_summary = _mapping_or_empty(comparison_payload.get("summary"))
-        raw_delta = round(
-            _coerce_float(comparison_summary.get("scenario_success_rate"))
-            - _coerce_float(baseline_summary.get("scenario_success_rate")),
-            6,
+        baseline_rate = _coerce_optional_float(
+            baseline_summary.get("scenario_success_rate")
+        )
+        comparison_rate = _coerce_optional_float(
+            comparison_summary.get("scenario_success_rate")
+        )
+        raw_delta = (
+            round(comparison_rate - baseline_rate, 6)
+            if baseline_rate is not None and comparison_rate is not None
+            else None
         )
         row = _cohens_d_row(
             domain="ladder",

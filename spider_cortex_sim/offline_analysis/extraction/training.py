@@ -195,12 +195,14 @@ def _scenario_suite_from_rows(rows: Sequence[Mapping[str, object]]) -> dict[str,
                 for row in items
                 for key in row
                 if key.startswith("check_") and key.endswith("_passed")
+                and row.get(key) not in {"", None}
             }
         )
         for check_name in check_names:
             passed_values = [
                 1.0 if _coerce_bool(row.get(f"check_{check_name}_passed")) else 0.0
                 for row in items
+                if row.get(f"check_{check_name}_passed") not in {"", None}
             ]
             value_samples = [
                 _coerce_float(row.get(f"check_{check_name}_value"))
@@ -226,7 +228,9 @@ def _scenario_suite_from_rows(rows: Sequence[Mapping[str, object]]) -> dict[str,
             {
                 failure.strip()
                 for row in items
-                for failure in str(row.get("failures") or "").split(";")
+                for failure in str(row.get("failures") or "")
+                .replace(";", ",")
+                .split(",")
                 if failure.strip()
             }
         )

@@ -9,6 +9,10 @@ from spider_cortex_sim.claim_tests import canonical_claim_tests
 from spider_cortex_sim.maps import NARROW
 from spider_cortex_sim.noise import NoiseConfig
 from spider_cortex_sim.operational_profiles import DEFAULT_OPERATIONAL_PROFILE, OperationalProfile
+from spider_cortex_sim.predator import (
+    OLFACTORY_HUNTER_PROFILE,
+    VISUAL_HUNTER_PROFILE,
+)
 from spider_cortex_sim.reward.audit import (
     REWARD_COMPONENT_AUDIT,
     _roadmap_status_for_profile,
@@ -191,6 +195,26 @@ class RewardComputationCoreTest(RewardComputationModuleTestBase):
             prev_predator_visible=False,
             prev_predator_dist=10,
         )
+        self.assertTrue(result)
+
+    def test_compute_predator_threat_smells_all_predators(self) -> None:
+        world = SpiderWorld(seed=2, lizard_move_interval=999999)
+        world.reset(
+            seed=2,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+        world.state.x, world.state.y = 3, 3
+        world.get_predator(0).x, world.get_predator(0).y = 11, 11
+        world.get_predator(1).x, world.get_predator(1).y = 7, 3
+        world.state.recent_contact = 0.0
+        world.state.recent_pain = 0.0
+
+        result = compute_predator_threat(
+            world,
+            prev_predator_visible=False,
+            prev_predator_dist=4,
+        )
+
         self.assertTrue(result)
 
     def test_compute_predator_threat_ignores_smell_only_inside_shelter(self) -> None:
@@ -424,6 +448,36 @@ class RewardComputationCoreTest(RewardComputationModuleTestBase):
         apply_progress_and_event_rewards(world, tick_context=context)
         self.assertGreater(context.reward_components["predator_escape"], 0.0)
         self.assertTrue(context.predator_escape)
+
+    def test_predator_distance_gain_uses_nearest_predator_on_both_sides(self) -> None:
+        world = SpiderWorld(seed=2, lizard_move_interval=999999)
+        world.reset(
+            seed=2,
+            predator_profiles=[VISUAL_HUNTER_PROFILE, OLFACTORY_HUNTER_PROFILE],
+        )
+        world.state.x, world.state.y = 3, 3
+        world.get_predator(0).x, world.get_predator(0).y = 0, 3
+        world.get_predator(1).x, world.get_predator(1).y = 5, 3
+        context = self._tick_context(
+            world,
+            action_name="ORIENT_UP",
+            moved=False,
+            night=False,
+            terrain_now="open",
+            was_on_shelter=False,
+            prev_food_dist=5,
+            prev_shelter_dist=5,
+            prev_predator_dist=2,
+            prev_predator_visible=True,
+            prev_spider_pos=world.spider_pos(),
+            prev_lizard_pos=world.lizard_pos(),
+        )
+
+        apply_progress_and_event_rewards(world, tick_context=context)
+
+        self.assertEqual(context.info["distance_deltas"]["predator"], 0)
+        self.assertEqual(context.reward_components["predator_escape"], 0.0)
+        self.assertFalse(context.predator_escape)
 
     def test_apply_progress_and_event_rewards_updates_predator_visible_now(self) -> None:
         """

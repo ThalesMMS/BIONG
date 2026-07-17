@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .interfaces import ACTION_DELTAS
 from .simulation_episode_shared import *
 
 
@@ -156,7 +157,7 @@ class _SimulationEpisodeTeacherTargetsMixin:
         food_memory_target = food_memory.get("target")
         food_memory_age = int(food_memory.get("age", 999))
         has_rightward_food_memory = bool(
-            isinstance(food_memory_target, list)
+            isinstance(food_memory_target, (list, tuple))
             and len(food_memory_target) >= 2
             and food_memory_target[0] is not None
             and int(food_memory_target[0]) > current_x
@@ -286,7 +287,7 @@ class _SimulationEpisodeTeacherTargetsMixin:
         food_memory_target = food_memory.get("target")
         food_memory_age = int(food_memory.get("age", 999))
         has_rightward_food_memory = bool(
-            isinstance(food_memory_target, list)
+            isinstance(food_memory_target, (list, tuple))
             and len(food_memory_target) >= 2
             and food_memory_target[0] is not None
             and int(food_memory_target[0]) > current_x
@@ -368,7 +369,7 @@ class _SimulationEpisodeTeacherTargetsMixin:
         food_memory_target = food_memory.get("target")
         food_memory_age = int(food_memory.get("age", 999))
         has_rightward_food_memory = bool(
-            isinstance(food_memory_target, list)
+            isinstance(food_memory_target, (list, tuple))
             and len(food_memory_target) >= 2
             and food_memory_target[0] is not None
             and int(food_memory_target[0]) > current_x
@@ -661,7 +662,7 @@ class _SimulationEpisodeTeacherTargetsMixin:
         dy = int(target[1]) - int(self.world.spider_pos()[1])
         action_name = direction_action(dx, dy)
         if action_name == "STAY":
-            return int(ACTION_TO_INDEX["STAY"]), "trace_rerest"
+            return None
         return int(ACTION_TO_INDEX[action_name]), "trace_return"
 
     def _direct_policy_probe_cycle_redirect_action(
@@ -762,10 +763,12 @@ class _SimulationEpisodeTeacherTargetsMixin:
             else:
                 teacher_state["stage"] = "return_window"
                 teacher_state["return_tick"] = int(tick)
+            stage = "return_window"
 
         if stage == "return_window":
             if current_role in {"inside", "deep"}:
                 teacher_state["stage"] = "rerest_window"
+                stage = "rerest_window"
             else:
                 shelter_return = self._teacher_shelter_return_action(
                     observation=observation,
@@ -888,11 +891,12 @@ class _SimulationEpisodeTeacherTargetsMixin:
                 teacher_state["stage"] = "rerest_window"
                 stage = "rerest_window"
             else:
+                if int(tick) - int(teacher_state.get("return_tick", tick)) > 18:
+                    teacher_state["stage"] = "done"
+                    return -1, None
                 return_action = self._teacher_deep_shelter_action()
                 if return_action is not None:
                     return return_action
-                if int(tick) - int(teacher_state.get("return_tick", tick)) > 18:
-                    teacher_state["stage"] = "done"
                 return -1, None
 
         if stage == "rerest_window":
@@ -1048,10 +1052,10 @@ class _SimulationEpisodeTeacherTargetsMixin:
         role_targets = np.zeros(len(ACTIONS), dtype=int)
         current_role_idx = int(AFFORDANCE_SHELTER_ROLE_TO_INDEX[current_role])
         for action_idx, action_name in enumerate(ACTIONS):
-            if action_name not in self.world.move_deltas:
+            if action_name not in ACTION_DELTAS:
                 role_targets[action_idx] = current_role_idx
                 continue
-            dx, dy = self.world.move_deltas[action_name]
+            dx, dy = ACTION_DELTAS[action_name]
             next_pos = (current_pos[0] + int(dx), current_pos[1] + int(dy))
             if not self.world.is_walkable(next_pos):
                 blocked_targets[action_idx] = 1.0
@@ -1078,9 +1082,9 @@ class _SimulationEpisodeTeacherTargetsMixin:
         )
         for action_idx, action_name in enumerate(ACTIONS):
             offset = action_idx * len(AFFORDANCE_GEOMETRY_TARGET_NAMES)
-            if action_name not in self.world.move_deltas:
+            if action_name not in ACTION_DELTAS:
                 continue
-            dx, dy = self.world.move_deltas[action_name]
+            dx, dy = ACTION_DELTAS[action_name]
             next_pos = (current_pos[0] + int(dx), current_pos[1] + int(dy))
             if not self.world.is_walkable(next_pos):
                 continue
@@ -1121,9 +1125,9 @@ class _SimulationEpisodeTeacherTargetsMixin:
         )
         column_targets = np.full(len(ACTIONS), current_column_idx, dtype=int)
         for action_idx, action_name in enumerate(ACTIONS):
-            if action_name not in self.world.move_deltas:
+            if action_name not in ACTION_DELTAS:
                 continue
-            dx, dy = self.world.move_deltas[action_name]
+            dx, dy = ACTION_DELTAS[action_name]
             next_pos = (current_pos[0] + int(dx), current_pos[1] + int(dy))
             if not self.world.is_walkable(next_pos):
                 continue
@@ -1154,9 +1158,9 @@ class _SimulationEpisodeTeacherTargetsMixin:
         )
         position_targets = np.full(len(ACTIONS), current_position_idx, dtype=int)
         for action_idx, action_name in enumerate(ACTIONS):
-            if action_name not in self.world.move_deltas:
+            if action_name not in ACTION_DELTAS:
                 continue
-            dx, dy = self.world.move_deltas[action_name]
+            dx, dy = ACTION_DELTAS[action_name]
             next_pos = (current_pos[0] + int(dx), current_pos[1] + int(dy))
             if not self.world.is_walkable(next_pos):
                 continue

@@ -82,6 +82,20 @@ class ModuleLocalSufficiencyTest(unittest.TestCase):
 
 
 class DirectionCompatibilityTest(unittest.TestCase):
+    def test_predator_food_conflict_targets_escape_from_smell_source(self) -> None:
+        task = next(
+            task
+            for task in SENSORY_CORTEX_TASKS
+            if task.name == "low_light_predator_food_conflict"
+        )
+        predator_dx = float(task.signal_values["predator_smell_dx"])
+        escape_direction = "RIGHT" if predator_dx < 0.0 else "LEFT"
+
+        self.assertEqual(
+            task.expected_favored_actions,
+            (f"MOVE_{escape_direction}", f"ORIENT_{escape_direction}"),
+        )
+
     def test_logits_are_finite_for_all_tasks(self) -> None:
         for module_name, tasks in ALL_LOCAL_TASKS.items():
             interface = _get_interface_for_module(module_name)

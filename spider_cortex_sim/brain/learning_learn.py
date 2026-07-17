@@ -76,7 +76,11 @@ class _BrainLearningLearnMixin:
                 "entropy": entropy,
                 "credit_strategy": "b_series_semantic_policy",
                 "module_gradient_norms": {
-                    B_SERIES_POLICY_NAME: float(np.linalg.norm(grad_policy_logits))
+                    B_SERIES_POLICY_NAME: float(
+                        0.0
+                        if B_SERIES_POLICY_NAME in self._frozen_modules
+                        else np.linalg.norm(grad_policy_logits)
+                    )
                 },
                 "b_level": int(self.config.b_level),
                 "b_mode": str(self.config.b_mode),
@@ -227,6 +231,15 @@ class _BrainLearningLearnMixin:
             )
             continuation_margin_loss = 0.0
             continuation_margin_grad_norm = 0.0
+            continuation_margin_action_grad = np.zeros(self.action_dim, dtype=float)
+            continuation_margin_option_grad = np.zeros_like(
+                decision.option_logits,
+                dtype=float,
+            )
+            continuation_margin_phase_grad = np.zeros_like(
+                decision.phase_logits,
+                dtype=float,
+            )
             stay_action_idx = int(ACTION_TO_INDEX["STAY"])
             return_option_idx = int(OPTION_NAMES.index("RETURN_TO_SHELTER"))
             initial_forage_phase_idx = int(PHASE_LABELS.index("INITIAL_FORAGE"))
@@ -256,6 +269,7 @@ class _BrainLearningLearnMixin:
                         scale=continuation_margin_weight * handoff_teacher_weight,
                     )
                     continuation_margin_loss += float(margin_loss)
+                    continuation_margin_action_grad += margin_grad
                     handoff_teacher_grad_logits += margin_grad
             if (
                 post_rest_sequence_distill_active
@@ -280,9 +294,9 @@ class _BrainLearningLearnMixin:
                         post_rest_sequence_distill_action_weight
                         * (softmax(decision.total_logits) - action_distill_target)
                     )
-                handoff_teacher_grad_norm = float(
-                    np.linalg.norm(handoff_teacher_grad_logits)
-                )
+            handoff_teacher_grad_norm = float(
+                np.linalg.norm(handoff_teacher_grad_logits)
+            )
             if (
                 self.config.direct_policy_handoff_option_teacher
                 and 0 <= int(decision.teacher_option_target_idx) < len(OPTION_NAMES)
@@ -316,6 +330,7 @@ class _BrainLearningLearnMixin:
                         * handoff_option_teacher_weight,
                     )
                     continuation_margin_loss += float(margin_loss)
+                    continuation_margin_option_grad += margin_grad
                     handoff_option_teacher_grad_logits += margin_grad
             if (
                 post_rest_sequence_distill_active
@@ -340,9 +355,9 @@ class _BrainLearningLearnMixin:
                         post_rest_sequence_distill_option_weight
                         * (softmax(decision.option_logits) - option_distill_target)
                     )
-                handoff_option_teacher_grad_norm = float(
-                    np.linalg.norm(handoff_option_teacher_grad_logits)
-                )
+            handoff_option_teacher_grad_norm = float(
+                np.linalg.norm(handoff_option_teacher_grad_logits)
+            )
             phase_loss = 0.0
             phase_grad_norm = 0.0
             phase_grad_logits = np.zeros_like(decision.phase_logits, dtype=float)
@@ -369,6 +384,7 @@ class _BrainLearningLearnMixin:
                         scale=continuation_margin_weight * phase_weight,
                     )
                     continuation_margin_loss += float(margin_loss)
+                    continuation_margin_phase_grad += margin_grad
                     phase_grad_logits += margin_grad
             if (
                 post_rest_sequence_distill_active
@@ -393,14 +409,14 @@ class _BrainLearningLearnMixin:
                         post_rest_sequence_distill_phase_weight
                         * (softmax(decision.phase_logits) - phase_distill_target)
                     )
-                phase_grad_norm = float(np.linalg.norm(phase_grad_logits))
+            phase_grad_norm = float(np.linalg.norm(phase_grad_logits))
             continuation_margin_grad_norm = float(
                 np.linalg.norm(
                     np.concatenate(
                         [
-                            np.asarray(handoff_teacher_grad_logits, dtype=float),
-                            np.asarray(handoff_option_teacher_grad_logits, dtype=float),
-                            np.asarray(phase_grad_logits, dtype=float),
+                            continuation_margin_action_grad,
+                            continuation_margin_option_grad,
+                            continuation_margin_phase_grad,
                         ]
                     )
                 )
@@ -830,10 +846,14 @@ class _BrainLearningLearnMixin:
                 and self._continuation_replay_focus_active(decision)
             ):
                 for _ in range(continuation_replay_passes):
-                    replay_stats = self._true_monolithic_continuation_replay_step(
-                        decision,
-                        lr_scale=continuation_replay_lr_scale,
-                    )
+                    runtime_state_snapshot = self.snapshot_direct_policy_runtime_state()
+                    try:
+                        replay_stats = self._true_monolithic_continuation_replay_step(
+                            decision,
+                            lr_scale=continuation_replay_lr_scale,
+                        )
+                    finally:
+                        self.restore_direct_policy_runtime_state(runtime_state_snapshot)
                     if not bool(replay_stats.get("active", False)):
                         continue
                     continuation_replay_passes_applied += 1

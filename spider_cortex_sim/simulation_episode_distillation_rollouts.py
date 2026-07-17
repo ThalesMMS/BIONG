@@ -524,6 +524,7 @@ class _SimulationEpisodeDistillationRolloutsMixin:
                 scenario.setup(self.world)
                 observation = self.world.observe()
                 self.brain.reset_hidden_states()
+                self._reset_direct_policy_handoff_teacher_state()
                 self._reset_direct_policy_probe_trajectory_teacher_state()
                 for step in range(int(scenario.max_steps)):
                     observation_adapters = adapt_observation_contracts(
@@ -642,6 +643,7 @@ class _SimulationEpisodeDistillationRolloutsMixin:
                 scenario.setup(self.world)
                 observation = self.world.observe()
                 self.brain.reset_hidden_states()
+                self._reset_direct_policy_handoff_teacher_state()
                 self._reset_direct_policy_probe_cycle_teacher_state()
                 for step in range(int(scenario.max_steps)):
                     observation_adapters = adapt_observation_contracts(
@@ -760,6 +762,7 @@ class _SimulationEpisodeDistillationRolloutsMixin:
                 scenario.setup(self.world)
                 observation = self.world.observe()
                 self.brain.reset_hidden_states()
+                self._reset_direct_policy_handoff_teacher_state()
                 self._reset_direct_policy_probe_trace_teacher_state()
                 if scenario_name == "continuous_survival_return_after_late_forage_v1":
                     self._direct_policy_probe_trace_teacher_state["stage"] = "return_window"
@@ -884,6 +887,7 @@ class _SimulationEpisodeDistillationRolloutsMixin:
                 scenario.setup(self.world)
                 observation = self.world.observe()
                 self.brain.reset_hidden_states()
+                self._reset_direct_policy_handoff_teacher_state()
                 self._reset_direct_policy_probe_rollout_teacher_state()
                 triggered = False
                 for step in range(int(scenario.max_steps)):
@@ -1023,6 +1027,7 @@ class _SimulationEpisodeDistillationRolloutsMixin:
                 scenario.setup(self.world)
                 observation = self.world.observe()
                 teacher_brain.reset_hidden_states()
+                self._reset_direct_policy_handoff_teacher_state()
                 self._reset_direct_policy_probe_rollout_teacher_state()
                 triggered = False
                 for step in range(int(scenario.max_steps)):
@@ -1062,7 +1067,7 @@ class _SimulationEpisodeDistillationRolloutsMixin:
                     )
                     if teacher_action_idx < 0:
                         teacher_action_idx = int(teacher_decision.action_idx)
-                    if teacher_action_stage is None and active:
+                    if active and teacher_action_stage in {None, "rollout_live"}:
                         teacher_action_stage = "frontier_live"
                     _, teacher_option_stage = (
                         self._direct_policy_handoff_option_teacher_target(
@@ -1158,6 +1163,7 @@ class _SimulationEpisodeDistillationRolloutsMixin:
                 scenario.setup(self.world)
                 observation = self.world.observe()
                 self.brain.reset_hidden_states()
+                self._reset_direct_policy_handoff_teacher_state()
                 self._reset_direct_policy_probe_replayable_teacher_state()
                 triggered = False
                 for step in range(int(scenario.max_steps)):

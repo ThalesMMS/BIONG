@@ -299,6 +299,32 @@ class WarmStartArbitrationNetworkTest(unittest.TestCase):
 
         self.assertTrue(np.all(nonzero_columns))
 
+    def test_warm_start_custom_hidden_layer_does_not_mix_valences(self) -> None:
+        brain = SpiderBrain(
+            seed=42,
+            config=BrainAblationConfig(arbitration_hidden_dim=10),
+        )
+        baseline = np.zeros(ArbitrationNetwork.INPUT_DIM)
+        hunger_only = baseline.copy()
+        hunger_only[6] = 1.0
+
+        baseline_logits, _, _ = brain.arbitration_network.forward(
+            baseline, store_cache=False
+        )
+        hunger_logits, _, _ = brain.arbitration_network.forward(
+            hunger_only, store_cache=False
+        )
+
+        threat_idx = VALENCE_ORDER.index("threat")
+        self.assertEqual(hunger_logits[threat_idx], baseline_logits[threat_idx])
+
+    def test_warm_start_requires_one_hidden_unit_per_valence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "one warm-start unit per valence"):
+            SpiderBrain(
+                seed=42,
+                config=BrainAblationConfig(arbitration_hidden_dim=3),
+            )
+
     def test_minimal_arbitration_random_weights_follow_brain_seed(self) -> None:
         config = BrainAblationConfig(
             name="minimal_seed_test",

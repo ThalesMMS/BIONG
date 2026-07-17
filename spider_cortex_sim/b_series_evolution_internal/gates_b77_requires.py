@@ -24,11 +24,8 @@ def b78_vestibular_balance_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b78_decision"))
             for item in trace

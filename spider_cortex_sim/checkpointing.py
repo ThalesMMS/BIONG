@@ -273,6 +273,7 @@ def checkpoint_preload_fingerprint(
         return {
             "load_brain": None,
             "metadata_sha256": None,
+            "artifact_sha256": None,
             "load_modules": None,
             "module_sha256": None,
         }
@@ -286,6 +287,7 @@ def checkpoint_preload_fingerprint(
         )
         return {
             "load_brain": str(root),
+            "metadata_sha256": None,
             "artifact_sha256": file_sha256(root),
             "load_modules": normalized_modules,
             "module_sha256": None,
@@ -308,6 +310,7 @@ def checkpoint_preload_fingerprint(
     return {
         "load_brain": str(root),
         "metadata_sha256": file_sha256(metadata_path),
+        "artifact_sha256": None,
         "load_modules": normalized_modules,
         "module_sha256": module_sha256,
     }

@@ -374,7 +374,7 @@ def arbitration_evidence_vector(
 
 
 def warm_start_arbitration_network(
-    arbitration_network: ArbitrationNetwork,
+    arbitration_network: ArbitrationNetwork | None,
     *,
     ablation_config: BrainAblationConfig,
     warm_start_scale: float | None = None,
@@ -406,6 +406,8 @@ def warm_start_arbitration_network(
         raise ValueError("warm_start_scale must be in [0.0, 1.0].")
     if scale == 0.0:
         return
+    if net is None:
+        return
     signal_names = arbitration_evidence_signal_names(
         valence_order=valence_order,
         arbitration_evidence_fields=arbitration_evidence_fields,
@@ -413,6 +415,10 @@ def warm_start_arbitration_network(
     if signal_names != ArbitrationNetwork.EVIDENCE_SIGNAL_NAMES:
         raise RuntimeError("Arbitration evidence order does not match ArbitrationNetwork input order.")
     source_hidden_dim = net.hidden_dim
+    if source_hidden_dim < len(valence_order):
+        raise ValueError(
+            "arbitration hidden_dim must provide at least one warm-start unit per valence."
+        )
     source_W1 = np.zeros((source_hidden_dim, net.input_dim), dtype=float)
     source_b1 = np.zeros(source_hidden_dim, dtype=float)
     source_W2_valence = np.zeros((net.valence_dim, source_hidden_dim), dtype=float)
@@ -426,12 +432,18 @@ def warm_start_arbitration_network(
     valence_logit_scale = 6.0
     per_side_scale = math.sqrt(scale)
     input_index = 0
-    for evidence_valence in valence_order:
+    for output_index, evidence_valence in enumerate(valence_order):
         weights = valence_evidence_weights[evidence_valence]
-        for evidence_field in arbitration_evidence_fields[evidence_valence]:
-            hidden_index = min(
-                source_hidden_dim - 1,
-                math.floor(input_index * source_hidden_dim / net.input_dim),
+        evidence_fields = arbitration_evidence_fields[evidence_valence]
+        hidden_start = math.floor(output_index * source_hidden_dim / len(valence_order))
+        hidden_end = math.floor(
+            (output_index + 1) * source_hidden_dim / len(valence_order)
+        )
+        valence_hidden_dim = hidden_end - hidden_start
+        for field_index, evidence_field in enumerate(evidence_fields):
+            hidden_index = hidden_start + min(
+                valence_hidden_dim - 1,
+                math.floor(field_index * valence_hidden_dim / len(evidence_fields)),
             )
             feature_coef = weights.get(evidence_field, 0.0)
             source_W1[hidden_index, input_index] = (
@@ -439,14 +451,11 @@ def warm_start_arbitration_network(
                 * per_side_scale
                 * feature_coef
             )
-            for output_index, output_valence in enumerate(valence_order):
-                if output_valence != evidence_valence:
-                    continue
-                source_W2_valence[output_index, hidden_index] = (
-                    per_side_scale
-                    * valence_logit_scale
-                    / copy_scale
-                )
+            source_W2_valence[output_index, hidden_index] = (
+                per_side_scale
+                * valence_logit_scale
+                / copy_scale
+            )
             input_index += 1
     net.W1 = _resize_into(source_W1, net.W1.shape)
     net.b1 = _resize_into(source_b1, net.b1.shape)
@@ -580,7 +589,7 @@ def compute_arbitration(
     Parameters:
         observations (Mapping[str, np.ndarray]): Raw observation arrays keyed by interface name; bound/sanitized inside the function.
         module_results (list[ModuleResult]): Candidate proposals from proposer modules; used to compute pre- and post-gating intents and contribution shares.
-        arbitration_network (ArbitrationNetwork): Learned arbitration network used when `ablation_config.use_learned_arbitration` is enabled.
+        arbitration_network (ArbitrationNetwork | None): Learned arbitration network required when `ablation_config.use_learned_arbitration` is enabled; may be None for fixed-formula arbitration.
         ablation_config (BrainAblationConfig): Controls whether learned arbitration, deterministic guards, and warm-start behaviors are used.
         arbitration_rng (np.random.Generator): RNG used for sampling valence during training when learned arbitration is enabled.
         operational_profile (OperationalProfile | None): Optional runtime profile (passed through; not required for basic arbitration).
@@ -689,6 +698,10 @@ def compute_arbitration(
         "exploration": exploration_evidence,
     }
     if ablation_config.use_learned_arbitration:
+        if arbitration_network is None:
+            raise ValueError(
+                "arbitration_network is required when use_learned_arbitration=True."
+            )
         evidence_vector = arbitration_evidence_vector(
             evidence,
             valence_order=valence_order,
@@ -721,7 +734,8 @@ def compute_arbitration(
             for index, name in enumerate(arbitration_gate_module_order)
         }
     else:
-        arbitration_network.cache = None
+        if arbitration_network is not None and store_cache:
+            arbitration_network.cache = None
         valence_probs = fixed_formula_valence_scores_from_evidence(
             evidence,
             valence_order=valence_order,

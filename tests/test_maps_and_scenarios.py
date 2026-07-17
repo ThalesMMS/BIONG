@@ -358,6 +358,23 @@ class EntranceFunnelMapTest(unittest.TestCase):
             build_map_template("entrance_funnel", width=7, height=12)
 
 
+class CorridorEscapeMapTest(unittest.TestCase):
+    def test_narrow_terrain_is_walled_for_its_full_length(self) -> None:
+        template = build_map_template("corridor_escape", width=14, height=12)
+        blocked = set(template.blocked_cells)
+        cy = template.height // 2
+        narrow_x = {
+            x
+            for (x, y), terrain in template.terrain.items()
+            if y == cy and terrain == NARROW
+        }
+
+        self.assertEqual(narrow_x, set(range(4, 12)))
+        for x in narrow_x:
+            self.assertIn((x, cy - 1), blocked)
+            self.assertIn((x, cy + 1), blocked)
+
+
 class BuildMapTemplateRegistryTest(unittest.TestCase):
     """Tests for build_map_template and MAP_TEMPLATE_NAMES registry."""
 

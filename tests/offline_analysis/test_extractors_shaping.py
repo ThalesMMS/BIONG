@@ -158,6 +158,27 @@ class OfflineAnalysisReflexFrequencyTest(unittest.TestCase):
         self.assertAlmostEqual(summary["scenario_success_rate"], 0.5)
         self.assertAlmostEqual(summary["episode_success_rate"], 2.0 / 3.0)
 
+    def test_extract_ablations_requires_full_scenario_success(self) -> None:
+        rows = normalize_behavior_rows(
+            [
+                {
+                    "scenario": scenario,
+                    "success": success,
+                    "ablation_variant": "modular_full",
+                    "ablation_architecture": "modular",
+                    "eval_reflex_scale": 0.0,
+                }
+                for scenario in ("a", "b")
+                for success in (True, False)
+            ]
+        )
+
+        ablations = extract_ablations({}, rows)
+        summary = ablations["variants"]["modular_full"]["summary"]
+
+        self.assertEqual(summary["scenario_success_rate"], 0.0)
+        self.assertEqual(summary["episode_success_rate"], 0.5)
+
 class ExtractShapingAuditEdgeCasesTest(unittest.TestCase):
     """Edge-case and boundary tests for extract_shaping_audit."""
 

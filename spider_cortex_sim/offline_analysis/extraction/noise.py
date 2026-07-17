@@ -562,18 +562,34 @@ def extract_noise_robustness(
             if partial_cell:
                 matrix[train_condition][eval_condition] = dict(partial_cell)
     for (train_condition, eval_condition), items in sorted(by_cell.items()):
+        if eval_condition in matrix.get(train_condition, {}):
+            continue
         success_values = [
             1.0 if _coerce_bool(row.get("success")) else 0.0 for row in items
         ]
-        scenario_names = {
-            str(row.get("scenario") or "")
+        success_values_by_scenario: dict[str, list[float]] = defaultdict(list)
+        for row, success in zip(items, success_values, strict=True):
+            scenario_name = str(row.get("scenario") or "")
+            if not scenario_name:
+                continue
+            success_values_by_scenario[scenario_name].append(success)
+        scenario_names = set(success_values_by_scenario)
+        reward_values = [
+            _coerce_float(
+                row.get("reward"),
+                _coerce_float(row.get("mean_reward"), 0.0),
+            )
             for row in items
-            if row.get("scenario")
-        }
+        ]
         matrix[train_condition][eval_condition] = {
-            "scenario_success_rate": _mean(success_values),
+            "scenario_success_rate": _mean(
+                [
+                    1.0 if _mean(values) >= 1.0 else 0.0
+                    for values in success_values_by_scenario.values()
+                ]
+            ),
             "episode_success_rate": _mean(success_values),
-            "mean_reward": 0.0,
+            "mean_reward": _mean(reward_values),
             "scenario_count": len(scenario_names),
             "episode_count": len(items),
         }

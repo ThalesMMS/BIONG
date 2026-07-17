@@ -921,6 +921,49 @@ class PredatorTypeSpecializationUncertaintyTest(unittest.TestCase):
         self.assertNotIn("visual_cortex", result["visual"])
         self.assertAlmostEqual(result["visual"]["sensory_cortex"], 0.5)
 
+    def test_module_response_uses_valid_fallback_after_truthy_malformed_mean(self) -> None:
+        result = module_response_by_predator_type_from_payload(
+            {
+                "legacy_scenarios": {
+                    "scenario": {
+                        "mean_module_response_by_predator_type": "malformed",
+                        "module_response_by_predator_type": {
+                            "visual": {"visual_cortex": 0.75}
+                        },
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(result, {"visual": {"visual_cortex": 0.75}})
+
+    def test_module_response_aggregates_all_available_sources_per_scenario(self) -> None:
+        result = module_response_by_predator_type_from_payload(
+            {
+                "legacy_scenarios": {
+                    "scenario": {
+                        "mean_module_response_by_predator_type": {
+                            "visual": {"visual_cortex": 0.9}
+                        }
+                    }
+                },
+                "suite": {
+                    "scenario": {
+                        "legacy_metrics": {
+                            "mean_module_response_by_predator_type": {
+                                "visual": {"visual_cortex": 0.5}
+                            }
+                        },
+                        "mean_module_response_by_predator_type": {
+                            "visual": {"visual_cortex": 0.1}
+                        },
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(result["visual"]["visual_cortex"], 0.5)
+
     def test_predator_type_specialization_summary_reports_uncertainty(self) -> None:
         variants = {
             "modular_full": self._variant(

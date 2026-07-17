@@ -144,7 +144,7 @@ def _credit_assignment_interpretations(
                         "finding": "Failure by local credit insufficiency",
                         "evidence": round(local_delta, 6),
                         "interpretation": (
-                            f"`local_only` trails broadcast by {local_delta:.2f} on {rung}, "
+                            f"`local_only` trails broadcast by {abs(local_delta):.2f} on {rung}, "
                             "so purely local gradients look insufficient at this rung."
                         ),
                     }

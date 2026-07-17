@@ -146,7 +146,7 @@ def build_reward_profile_ladder_tables(
                     "variant": str(variant_name),
                     "protocol_name": protocol_name,
                     "profile": str(profile_name),
-                    "scenario_success_rate": _coerce_float(
+                    "scenario_success_rate": _coerce_optional_float(
                         summary_payload.get("scenario_success_rate"),
                     ),
                     "scenario_success_rate_ci_lower": _coerce_optional_float(
@@ -155,7 +155,7 @@ def build_reward_profile_ladder_tables(
                     "scenario_success_rate_ci_upper": _coerce_optional_float(
                         scenario_uncertainty.get("ci_upper")
                     ),
-                    "episode_success_rate": _coerce_float(
+                    "episode_success_rate": _coerce_optional_float(
                         summary_payload.get("episode_success_rate"),
                     ),
                     "episode_success_rate_ci_lower": _coerce_optional_float(

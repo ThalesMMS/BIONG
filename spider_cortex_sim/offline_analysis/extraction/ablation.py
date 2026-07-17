@@ -307,11 +307,13 @@ def extract_ablations(
                 ),
                 None,
             )
-        reference_variant = (
-            "modular_full"
-            if "modular_full" in variants
-            else str(ablations.get("reference_variant") or "")
-        )
+        declared_reference = str(ablations.get("reference_variant") or "")
+        if declared_reference in variants:
+            reference_variant = declared_reference
+        elif "modular_full" in variants:
+            reference_variant = "modular_full"
+        else:
+            reference_variant = declared_reference
         if reference_variant and reference_variant in variants:
             reference_payload = variants[reference_variant]
             if not isinstance(reference_payload.get("without_reflex_support"), Mapping):
@@ -420,7 +422,9 @@ def extract_ablations(
             },
             "summary": {
                 "scenario_success_rate": _mean(
-                    scenario_payload["success_rate"]
+                    1.0
+                    if _coerce_float(scenario_payload["success_rate"]) >= 1.0
+                    else 0.0
                     for scenario_payload in suite.values()
                     if isinstance(scenario_payload, Mapping)
                 ),

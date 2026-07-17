@@ -1,11 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from spider_cortex_sim.ablations import BrainAblationConfig
-from spider_cortex_sim.distillation import DistillationConfig
+from spider_cortex_sim.distillation import DistillationConfig, DistillationLossConfig
 from spider_cortex_sim.distillation.teacher import load_teacher_checkpoint
 from spider_cortex_sim.nn import softmax
 from spider_cortex_sim.nn_utils import kl_divergence
@@ -13,6 +14,69 @@ from spider_cortex_sim.simulation import SpiderSimulation
 
 
 class DistillationEndToEndTest(unittest.TestCase):
+    def test_valence_gradient_uses_distillation_temperature(self) -> None:
+        sim = SpiderSimulation(seed=17, max_steps=2)
+        brain = sim.brain
+        arbitration_network = brain.arbitration_network
+        self.assertIsNotNone(arbitration_network)
+        assert arbitration_network is not None
+        observation = sim.world.reset(seed=17)
+        teacher_logits = np.array([1.5, -0.5, 0.25, 0.75], dtype=float)
+        temperature = 2.0
+        loss_weights = DistillationLossConfig(
+            final_policy_weight=0.0,
+            action_center_weight=0.0,
+            valence_weight=0.25,
+            proposal_weight=0.0,
+        )
+        captured: dict[str, object] = {}
+        original_act = brain.act
+
+        def capture_act(*args, **kwargs):
+            decision = original_act(*args, **kwargs)
+            captured["decision"] = decision
+            return decision
+
+        def capture_backward(**kwargs):
+            captured["grad_valence_logits"] = np.asarray(
+                kwargs["grad_valence_logits"],
+                dtype=float,
+            ).copy()
+            return np.zeros(arbitration_network.input_dim, dtype=float)
+
+        with (
+            patch.object(brain, "act", side_effect=capture_act),
+            patch.object(arbitration_network, "backward", side_effect=capture_backward),
+        ):
+            brain.distill_step(
+                observation,
+                teacher_policy=np.zeros(0, dtype=float),
+                teacher_valence_logits=teacher_logits,
+                temperature=temperature,
+                loss_weights=loss_weights,
+            )
+
+        decision = captured["decision"]
+        student_logits = np.array(
+            [
+                decision.arbitration_decision.valence_logits[name]
+                for name in brain.VALENCE_ORDER
+            ],
+            dtype=float,
+        )
+        teacher_probs = softmax(teacher_logits, temperature=temperature)
+        expected = loss_weights.valence_weight * (
+            softmax(student_logits, temperature=temperature) - teacher_probs
+        )
+        temperature_one = loss_weights.valence_weight * (
+            softmax(student_logits) - teacher_probs
+        )
+
+        np.testing.assert_allclose(captured["grad_valence_logits"], expected)
+        self.assertFalse(
+            np.allclose(captured["grad_valence_logits"], temperature_one)
+        )
+
     def _teacher_checkpoint_path(self, architecture: str) -> str:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)

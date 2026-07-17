@@ -9,7 +9,10 @@ from spider_cortex_sim.offline_analysis.report import build_report_data, write_r
 
 from spider_cortex_sim.comparison_capacity import compare_capacity_sweep
 from spider_cortex_sim.export import save_behavior_csv
-from spider_cortex_sim.offline_analysis.combined import build_combined_ladder_report
+from spider_cortex_sim.offline_analysis.combined import (
+    _module_local_sufficiency_summary,
+    build_combined_ladder_report,
+)
 from spider_cortex_sim.offline_analysis.cli import run_offline_analysis
 from spider_cortex_sim.offline_analysis.extractors import extract_shaping_audit
 from spider_cortex_sim.simulation import SpiderSimulation
@@ -738,6 +741,48 @@ class OfflineAnalysisCreditFallbackTest(unittest.TestCase):
 
 
 class CombinedLadderReportTest(unittest.TestCase):
+    def test_module_local_canonical_gate_requires_a_valid_run(self) -> None:
+        summary = _module_local_sufficiency_summary(
+            {
+                "variant_modules": {
+                    "visual_cortex": [],
+                    "sensory_cortex": [None, "invalid"],
+                }
+            }
+        )
+
+        self.assertTrue(summary["available"])
+        self.assertEqual(len(summary["rows"]), 2)
+        for row in summary["rows"]:
+            self.assertEqual(row["seed_count"], 0)
+            self.assertFalse(row["canonical_v4_pass"])
+
+    def test_module_local_minimal_level_covers_every_seed(self) -> None:
+        summary = _module_local_sufficiency_summary(
+            {
+                "variant_modules": {
+                    "visual_cortex": [
+                        {
+                            "seed": 1,
+                            "report": {
+                                "minimal_sufficient_level": 2,
+                                "levels": [{"level": 4, "all_tasks_passed": True}],
+                            },
+                        },
+                        {
+                            "seed": 2,
+                            "report": {
+                                "minimal_sufficient_level": 3,
+                                "levels": [{"level": 4, "all_tasks_passed": True}],
+                            },
+                        },
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(summary["rows"][0]["minimal_sufficient_level"], 3)
+
     def test_build_combined_ladder_report_merges_local_tasks_and_distillation(self) -> None:
         capacity_payload, _ = compare_capacity_sweep(
             episodes=0,

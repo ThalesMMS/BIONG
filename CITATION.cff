@@ -7,8 +7,8 @@ authors:
     family-names: Matheus
 version: "research-prerelease"
 license: MIT
-repository-code: "https://github.com/ThalesMMS/BIONG"
-url: "https://github.com/ThalesMMS/BIONG"
+repository-code: "https://github.com/ThalesMMS/BIONG-dev"
+url: "https://github.com/ThalesMMS/BIONG-dev"
 keywords:
   - biologically inspired simulation
   - modular reinforcement learning

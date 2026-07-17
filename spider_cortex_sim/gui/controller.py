@@ -262,9 +262,18 @@ class GUIController:
     def configure_run(self, train_episodes: int, eval_episodes: int) -> None:
         self.total_train_episodes = train_episodes
         self.total_eval_episodes = eval_episodes
-        self.phase = "training"
         self.current_episode = 0
-        self._start_episode()
+        if self.total_train_episodes > 0:
+            self.phase = "training"
+            self._start_episode()
+        elif self.total_eval_episodes > 0:
+            self.phase = "evaluation"
+            self._start_episode()
+        else:
+            self.phase = "done"
+            self.paused = True
+            self.observation = None
+            self.episode_done = True
 
     def _start_episode(self) -> None:
         is_training = self.phase == "training"
@@ -349,9 +358,15 @@ class GUIController:
             self.training_rewards.append(self.episode_reward)
             self.current_episode += 1
             if self.current_episode >= self.total_train_episodes:
-                self.phase = "evaluation"
                 self.current_episode = 0
-            self._start_episode()
+                if self.total_eval_episodes <= 0:
+                    self.phase = "done"
+                    self.paused = True
+                else:
+                    self.phase = "evaluation"
+                    self._start_episode()
+            else:
+                self._start_episode()
         elif self.phase == "evaluation":
             self.current_episode += 1
             if self.current_episode >= self.total_eval_episodes:
@@ -437,6 +452,26 @@ class GUIController:
         self._show_toast(f"Evolution source saved: {path}", is_error=False)
         return path
 
+    def _reset_run_after_load(self, mode: CheckpointLoadMode) -> None:
+        self.checkpoint_load_mode = mode
+        self.phase = "evaluation" if mode == "evaluate" else "training"
+        if self.phase == "evaluation" and self.total_eval_episodes <= 0:
+            self.total_eval_episodes = 1
+        if self.phase == "training" and self.total_train_episodes <= 0:
+            self.total_train_episodes = 1
+        self.current_episode = 0
+        self.training_rewards.clear()
+        self.reward_history.clear()
+        self.last_decision = None
+        self.last_info = None
+        self.last_reward = 0.0
+        self.episode_reward = 0.0
+        self.episode_done = False
+        self.tick_timer = 0.0
+        self.step_requested = False
+        self.paused = True
+        self._start_episode()
+
     def _load_checkpoint_spec(
         self,
         checkpoint_spec: GUICheckpointSpec,
@@ -463,24 +498,7 @@ class GUIController:
             return False
         self._bind_runtime(runtime)
         self.loaded_checkpoint_spec = checkpoint_spec
-        self.checkpoint_load_mode = mode
-        self.phase = "evaluation" if mode == "evaluate" else "training"
-        if self.phase == "evaluation" and self.total_eval_episodes <= 0:
-            self.total_eval_episodes = 1
-        if self.phase == "training" and self.total_train_episodes <= 0:
-            self.total_train_episodes = 1
-        self.current_episode = 0
-        self.training_rewards.clear()
-        self.reward_history.clear()
-        self.last_decision = None
-        self.last_info = None
-        self.last_reward = 0.0
-        self.episode_reward = 0.0
-        self.episode_done = False
-        self.tick_timer = 0.0
-        self.step_requested = False
-        self.paused = True
-        self._start_episode()
+        self._reset_run_after_load(mode)
         self._show_toast(
             f"Loaded {checkpoint_spec.label}: {', '.join(loaded)}",
             is_error=False,
@@ -542,7 +560,16 @@ class GUIController:
             if not self.runtime.supports_current_metrics:
                 self._show_toast("Load is not supported for B0 legacy.", is_error=True)
                 return False
+            resolved_mode = mode or self.checkpoint_load_mode
+            if resolved_mode not in ("evaluate", "train"):
+                self._show_toast(
+                    f"Load error: unknown mode {resolved_mode!r}",
+                    is_error=True,
+                )
+                return False
             loaded = self.brain.load(path, modules=modules)
+            self.loaded_checkpoint_spec = None
+            self._reset_run_after_load(resolved_mode)
             self._show_toast(f"Loaded: {', '.join(loaded)}", is_error=False)
             return True
         except (

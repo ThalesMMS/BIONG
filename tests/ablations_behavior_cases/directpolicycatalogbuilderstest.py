@@ -79,7 +79,25 @@ class DirectPolicyCatalogBuildersTest(unittest.TestCase):
         )
         self.assertEqual(
             digest,
-            "c70d4341f8f784c4973920e36ee3fe534ae958c152d26a570d6ac7665912ce6e",
+            "3797752238383a1df1da9d622751daf64b8ef9acaebfb17f422527f3e78b5fee",
+        )
+
+    def test_phase_option_dynamics_variants_keep_phase_head_enabled(self) -> None:
+        configs = self._all_direct_policy_configs()
+        phase_option_dynamics = {
+            name: config
+            for name, config in configs.items()
+            if "phase_option_dynamics" in name
+        }
+
+        self.assertTrue(phase_option_dynamics)
+        self.assertEqual(
+            [
+                name
+                for name, config in phase_option_dynamics.items()
+                if not config.direct_policy_phase_head
+            ],
+            [],
         )
 
     def _all_direct_policy_configs(self) -> Dict[str, BrainAblationConfig]:

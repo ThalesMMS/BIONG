@@ -107,6 +107,54 @@ class ComputeArbitrationTest(unittest.TestCase):
         arb = self._get_arbitration()
         self.assertIsInstance(arb, ArbitrationDecision)
 
+    def test_fixed_arbitration_accepts_no_network(self) -> None:
+        module_results = self.brain._proposal_results(
+            self.obs,
+            store_cache=False,
+            training=False,
+        )
+        config = BrainAblationConfig(
+            name="fixed_without_network",
+            use_learned_arbitration=False,
+        )
+
+        arbitration = compute_arbitration(
+            self.obs,
+            module_results,
+            arbitration_network=None,
+            ablation_config=config,
+            arbitration_rng=self.brain.arbitration_rng,
+        )
+
+        self.assertFalse(arbitration.learned_adjustment)
+
+    def test_fixed_arbitration_without_cache_storage_preserves_cache(self) -> None:
+        module_results = self.brain._proposal_results(
+            self.obs,
+            store_cache=False,
+            training=False,
+        )
+        network = self.brain.arbitration_network
+        network.forward(
+            np.zeros(ArbitrationNetwork.INPUT_DIM, dtype=float),
+            store_cache=True,
+        )
+        cached = network.cache
+
+        compute_arbitration(
+            self.obs,
+            module_results,
+            arbitration_network=network,
+            ablation_config=BrainAblationConfig(
+                name="fixed_preserve_cache",
+                use_learned_arbitration=False,
+            ),
+            arbitration_rng=self.brain.arbitration_rng,
+            store_cache=False,
+        )
+
+        self.assertIs(network.cache, cached)
+
     def test_strategy_is_priority_gating(self) -> None:
         arb = self._get_arbitration()
         self.assertEqual(arb.strategy, "priority_gating")

@@ -527,10 +527,10 @@ class _BrainRuntimePart4Mixin:
         meta = meta if isinstance(meta, dict) else {}
         corridor_map = str(meta.get("map_template", "")) == "corridor_escape"
         hunger_arr = np.asarray(observation.get("hunger", np.zeros(1)), dtype=float).ravel()
-        sleep_arr = np.asarray(observation.get("sleep", np.zeros(2)), dtype=float).ravel()
+        sleep_obs = self._bound_observation("sleep_center", observation)
         hunger = float(hunger_arr[0]) if hunger_arr.size else 0.0
-        health = float(sleep_arr[0]) if sleep_arr.size else 1.0
-        sleep_debt = float(sleep_arr[1]) if sleep_arr.size > 1 else 0.0
+        health = self._b_series_float(sleep_obs, "health")
+        sleep_debt = self._b_series_float(sleep_obs, "sleep_debt")
         b25_decision = str(trace_payload.get("b25_decision", "preserve_b25"))
         confidence_vote = float(trace_payload.get("b25_confidence_vote", 0.0) or 0.0)
         doubt_pressure = float(trace_payload.get("b25_doubt_pressure", 0.0) or 0.0)
@@ -677,13 +677,12 @@ class _BrainRuntimePart4Mixin:
         meta = observation.get("meta")
         meta = meta if isinstance(meta, dict) else {}
         corridor_map = str(meta.get("map_template", "")) == "corridor_escape"
-        threat_arr = np.asarray(observation.get("threat", np.zeros(1)), dtype=float).ravel()
         hunger_arr = np.asarray(observation.get("hunger", np.zeros(1)), dtype=float).ravel()
-        sleep_arr = np.asarray(observation.get("sleep", np.zeros(2)), dtype=float).ravel()
-        threat = float(threat_arr[0]) if threat_arr.size else 0.0
+        sleep_obs = self._bound_observation("sleep_center", observation)
+        threat = float(trace_payload.get("b_current_threat_pressure", 0.0) or 0.0)
         hunger = float(hunger_arr[0]) if hunger_arr.size else 0.0
-        health = float(sleep_arr[0]) if sleep_arr.size else 1.0
-        sleep_debt = float(sleep_arr[1]) if sleep_arr.size > 1 else 0.0
+        health = self._b_series_float(sleep_obs, "health")
+        sleep_debt = self._b_series_float(sleep_obs, "sleep_debt")
         b26_decision = str(trace_payload.get("b26_decision", "preserve_b26"))
         prediction_error = float(trace_payload.get("b26_prediction_error", 0.0) or 0.0)
         setpoint_pressure = float(trace_payload.get("b26_setpoint_pressure", 0.0) or 0.0)
@@ -841,13 +840,12 @@ class _BrainRuntimePart4Mixin:
         meta = observation.get("meta")
         meta = meta if isinstance(meta, dict) else {}
         corridor_map = str(meta.get("map_template", "")) == "corridor_escape"
-        threat_arr = np.asarray(observation.get("threat", np.zeros(1)), dtype=float).ravel()
         hunger_arr = np.asarray(observation.get("hunger", np.zeros(1)), dtype=float).ravel()
-        sleep_arr = np.asarray(observation.get("sleep", np.zeros(2)), dtype=float).ravel()
-        threat = float(threat_arr[0]) if threat_arr.size else 0.0
+        sleep_obs = self._bound_observation("sleep_center", observation)
+        threat = float(trace_payload.get("b_current_threat_pressure", 0.0) or 0.0)
         hunger = float(hunger_arr[0]) if hunger_arr.size else 0.0
-        health = float(sleep_arr[0]) if sleep_arr.size else 1.0
-        sleep_debt = float(sleep_arr[1]) if sleep_arr.size > 1 else 0.0
+        health = self._b_series_float(sleep_obs, "health")
+        sleep_debt = self._b_series_float(sleep_obs, "sleep_debt")
         b27_decision = str(trace_payload.get("b27_decision", "preserve_b27"))
         arousal_level = float(trace_payload.get("b27_arousal_level", 0.0) or 0.0)
         gain_modulation = float(trace_payload.get("b27_gain_modulation", 0.0) or 0.0)
@@ -1008,13 +1006,12 @@ class _BrainRuntimePart4Mixin:
         meta = observation.get("meta")
         meta = meta if isinstance(meta, dict) else {}
         corridor_map = str(meta.get("map_template", "")) == "corridor_escape"
-        threat_arr = np.asarray(observation.get("threat", np.zeros(1)), dtype=float).ravel()
         hunger_arr = np.asarray(observation.get("hunger", np.zeros(1)), dtype=float).ravel()
-        sleep_arr = np.asarray(observation.get("sleep", np.zeros(2)), dtype=float).ravel()
-        threat = float(threat_arr[0]) if threat_arr.size else 0.0
+        sleep_obs = self._bound_observation("sleep_center", observation)
+        threat = float(trace_payload.get("b_current_threat_pressure", 0.0) or 0.0)
         hunger = float(hunger_arr[0]) if hunger_arr.size else 0.0
-        health = float(sleep_arr[0]) if sleep_arr.size else 1.0
-        sleep_debt = float(sleep_arr[1]) if sleep_arr.size > 1 else 0.0
+        health = self._b_series_float(sleep_obs, "health")
+        sleep_debt = self._b_series_float(sleep_obs, "sleep_debt")
         attention_gain = float(trace_payload.get("b28_attention_gain", 0.0) or 0.0)
         distractor = float(trace_payload.get("b28_distractor_pressure", 0.0) or 0.0)
         focus = float(trace_payload.get("b28_interoceptive_focus", 0.0) or 0.0)
@@ -1106,7 +1103,7 @@ class _BrainRuntimePart4Mixin:
         if "ga_candidate" in params:
             trace_payload["b29_genetic_candidate"] = int(params["ga_candidate"])
 
-        self._b29_salience_memory = float(corridor_salience)
+        self._b29_salience_memory = float(salience_memory)
         self._b29_salience_lock = max(0, int(salience_lock) - 1)
         self._b29_last_tick = int(tick)
         return (
@@ -1180,8 +1177,7 @@ class _BrainRuntimePart4Mixin:
         meta = observation.get("meta")
         meta = meta if isinstance(meta, dict) else {}
         corridor_map = str(meta.get("map_template", "")) == "corridor_escape"
-        threat_arr = np.asarray(observation.get("threat", np.zeros(1)), dtype=float).ravel()
-        threat = float(threat_arr[0]) if threat_arr.size else 0.0
+        threat = float(trace_payload.get("b_current_threat_pressure", 0.0) or 0.0)
         attention_gain = float(trace_payload.get("b28_attention_gain", 0.0) or 0.0)
         distractor = float(trace_payload.get("b28_distractor_pressure", 0.0) or 0.0)
         corridor_salience = float(trace_payload.get("b29_corridor_salience", 0.0) or 0.0)
@@ -1261,7 +1257,7 @@ class _BrainRuntimePart4Mixin:
         if "ga_candidate" in params:
             trace_payload["b30_genetic_candidate"] = int(params["ga_candidate"])
 
-        self._b30_gate_memory = float(go_signal)
+        self._b30_gate_memory = float(gate_memory)
         self._b30_gate_lock = max(0, int(gate_lock) - 1)
         self._b30_last_tick = int(tick)
         return (
@@ -1338,9 +1334,9 @@ class _BrainRuntimePart4Mixin:
         meta = meta if isinstance(meta, dict) else {}
         corridor_map = str(meta.get("map_template", "")) == "corridor_escape"
         hunger_arr = np.asarray(observation.get("hunger", np.zeros(1)), dtype=float).ravel()
-        sleep_arr = np.asarray(observation.get("sleep", np.zeros(2)), dtype=float).ravel()
+        sleep_obs = self._bound_observation("sleep_center", observation)
         hunger = float(hunger_arr[0]) if hunger_arr.size else 0.0
-        health = float(sleep_arr[0]) if sleep_arr.size else 1.0
+        health = self._b_series_float(sleep_obs, "health")
         go_signal = float(trace_payload.get("b30_go_signal", 0.0) or 0.0)
         no_go_signal = float(trace_payload.get("b30_no_go_signal", 0.0) or 0.0)
         action_gate = str(trace_payload.get("b30_action_gate", "go"))

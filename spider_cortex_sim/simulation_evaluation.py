@@ -159,9 +159,22 @@ class SimulationEvaluationMixin:
                 - `mean_reward_delta`: difference in `mean_reward` (scaffolded − self_sufficient),
                   rounded to 6 decimal places.
         """
-        scaffolded_summary = scaffolded if scaffolded is not None else self_sufficient
+        if (
+            scaffolded is None
+            or self_sufficient.get("status") == "not_evaluated"
+            or scaffolded.get("status") == "not_evaluated"
+        ):
+            return {
+                "basis": "scaffolded_minus_self_sufficient",
+                "status": "not_evaluated",
+                "scenario_success_rate_delta": None,
+                "episode_success_rate_delta": None,
+                "mean_reward_delta": None,
+            }
+        scaffolded_summary = scaffolded
         return {
             "basis": "scaffolded_minus_self_sufficient",
+            "status": "evaluated",
             "scenario_success_rate_delta": round(
                 float(scaffolded_summary.get("scenario_success_rate", 0.0))
                 - float(self_sufficient.get("scenario_success_rate", 0.0)),

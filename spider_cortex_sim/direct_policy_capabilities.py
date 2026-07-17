@@ -114,6 +114,7 @@ _DIRECT_POLICY_METADATA_FIELDS = (
     "direct_policy_local_spatial_inputs",
     "direct_policy_local_transition_inputs",
     "direct_policy_local_transition_rollout_inputs",
+    "direct_policy_local_geodesic_inputs",
     "direct_policy_transition_prediction_head",
     "direct_policy_transition_prediction_feedback",
     "direct_policy_transition_rollout_prediction_head",

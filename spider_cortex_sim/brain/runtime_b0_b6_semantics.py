@@ -299,12 +299,15 @@ class _BrainRuntimePart1Mixin:
                 semantic_action = "STAY"
                 reason = "b2_temporal_threat_low_health_hold"
         elif on_shelter and (
-            (current_threat >= 0.70 and hunger < 0.62 and health < 0.70)
+            (hunger >= 0.62 and predator_trace_pressure < 0.75)
+            or (current_threat >= 0.70 and hunger < 0.62 and health < 0.70)
             or predator_trace_pressure >= 0.75
             or (predator_memory_pressure >= 0.85 and hunger < 0.55)
         ):
-            if hunger >= 0.62 and not (
-                predator_trace_pressure >= 0.75 and hunger < 0.62
+            if (
+                hunger >= 0.62
+                and current_threat < 0.90
+                and predator_trace_pressure < 0.75
             ):
                 semantic_action = "MOVE_TO_FOOD"
                 reason = "b2_temporal_threat_safe_hunger_release"

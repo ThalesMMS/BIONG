@@ -19,6 +19,24 @@ class BehaviorTreeOraclePolicyTest(unittest.TestCase):
         self.world.reset(seed=7)
         self.oracle = BehaviorTreeOraclePolicy(self.world)
 
+    def test_initial_forage_keeps_episode_food_baseline_after_first_meal(self) -> None:
+        self.world.state.x, self.world.state.y = 8, 7
+        self.world.state.food_eaten = 1
+        self.world.state.hunger = 0.9
+        self.world.state.fatigue = 0.05
+        self.world.state.sleep_debt = 0.05
+
+        self.oracle._decide()
+
+        self.assertEqual(self.oracle.phase_food_start, 0)
+
+    def test_reset_captures_current_food_baseline(self) -> None:
+        self.world.state.food_eaten = 2
+
+        self.oracle.reset()
+
+        self.assertEqual(self.oracle.phase_food_start, 2)
+
     def test_rest_phase_stays_in_deep_shelter_when_recovery_is_pending(self) -> None:
         rest_target = self.oracle._best_rest_shelter_target()
         assert rest_target is not None
@@ -27,12 +45,14 @@ class BehaviorTreeOraclePolicyTest(unittest.TestCase):
         self.world.state.hunger = 0.18
         self.world.state.fatigue = 0.20
         self.world.state.sleep_debt = 0.20
-        self.world.state.sleep_events = 0
+        self.world.state.sleep_events = 4
+        self.oracle.phase_sleep_start = 1
 
         decision = self.oracle._decide()
 
         self.assertEqual(decision.phase, "REST")
         self.assertEqual(decision.action, "STAY")
+        self.assertEqual(self.oracle.phase_sleep_start, 4)
 
     def test_reactivate_phase_heads_toward_entrance_after_recovery(self) -> None:
         rest_target = self.oracle._best_rest_shelter_target()
@@ -47,6 +67,7 @@ class BehaviorTreeOraclePolicyTest(unittest.TestCase):
         decision = self.oracle._decide()
 
         self.assertEqual(decision.phase, "POST_REST_REACTIVATE")
+        self.assertEqual(self.oracle.phase_food_start, 3)
         self.assertIn(decision.action, {"MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT"})
 
     def test_reactivate_phase_starts_after_daytime_recovery_even_without_high_hunger(self) -> None:
@@ -203,6 +224,17 @@ class BehaviorTreeOraclePolicyTest(unittest.TestCase):
         self.assertEqual(decision.reason, "post_rest_elevated_food_approach")
         self.assertEqual(decision.target, (9, 6))
         self.assertEqual(decision.action, "MOVE_UP")
+
+    def test_elevated_food_approach_defers_when_right_of_target(self) -> None:
+        self.world.state.x, self.world.state.y = 10, 6
+        self.world.food_positions = [(9, 7)]
+        self.world.state.food_eaten = 3
+        self.oracle.current_phase = "LATE_FORAGE"
+        self.oracle.phase_food_start = 3
+
+        decision = self.oracle._post_rest_elevated_food_approach()
+
+        self.assertIsNone(decision)
 
     def test_return_phase_side_steps_up_when_lizard_blocks_corridor_left(self) -> None:
         self.world.state.x, self.world.state.y = 10, 7

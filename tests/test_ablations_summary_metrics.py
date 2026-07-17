@@ -145,6 +145,22 @@ class BuildSummaryBrainConfigTest(unittest.TestCase):
         self.assertEqual(summary["config"]["architecture_version"], SpiderBrain.ARCHITECTURE_VERSION)
         self.assertTrue(summary["config"]["architecture_fingerprint"])
 
+    def test_summary_marks_missing_self_sufficient_evaluation(self) -> None:
+        sim = SpiderSimulation(seed=7, max_steps=5)
+        evaluation = sim._build_summary([], [])["evaluation"]
+
+        self.assertEqual(evaluation["self_sufficient"]["status"], "not_evaluated")
+        self.assertFalse(
+            evaluation["self_sufficient"]["is_primary_benchmark"]
+        )
+        self.assertIsNone(
+            evaluation["primary_benchmark"]["scenario_success_rate"]
+        )
+        self.assertEqual(evaluation["competence_gap"]["status"], "not_evaluated")
+        self.assertIsNone(
+            evaluation["competence_gap"]["scenario_success_rate_delta"]
+        )
+
     def test_summary_includes_reward_audit(self) -> None:
         """
         Verifies that SpiderSimulation._build_summary includes a reward_audit section with expected keys and values.

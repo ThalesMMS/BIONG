@@ -118,7 +118,7 @@ def compute_predator_threat(
     )
     predator_smell_strength_now, _, _, _ = smell_gradient(
         world,
-        [world.lizard_pos()],
+        world.predator_positions() or [world.lizard_pos()],
         radius=world.predator_smell_range,
         apply_noise=False,
     )
@@ -200,7 +200,9 @@ def apply_progress_and_event_rewards(
 
     _, new_food_dist = world.nearest(world.food_positions)
     _, new_shelter_dist = world.nearest(world.shelter_deep_cells or world.shelter_cells)
-    new_predator_dist = world.manhattan(world.spider_pos(), world.lizard_pos())
+    _, new_predator_dist = world.nearest(
+        world.predator_positions() or [world.lizard_pos()]
+    )
     food_progress = float(prev_food_dist - new_food_dist)
     shelter_progress = float(prev_shelter_dist - new_shelter_dist)
     predator_distance_gain = float(new_predator_dist - prev_predator_dist)

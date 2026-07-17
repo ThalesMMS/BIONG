@@ -671,6 +671,32 @@ class BSeriesEvolutionGateTestPart4(BSeriesEvolutionGateTestHelpers, unittest.Te
             gate["failures"],
         )
 
+    def test_b63_corridor_gate_requires_freeze_release_signal(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b63_periaqueductal_escape_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b63_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                freeze_release=None,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn(
+            "corridor_b63_aggregate:freeze_release_episodes",
+            gate["failures"],
+        )
+
     def test_b63_corridor_gate_keeps_b62_base_as_diagnostic(self) -> None:
         gate_fn = getattr(
             b_series_evolution_module,

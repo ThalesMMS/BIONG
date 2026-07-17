@@ -14,6 +14,7 @@ Covers:
 - build_action_context_observation / build_motor_context_observation
 """
 
+import inspect
 import json
 import tempfile
 import unittest
@@ -201,6 +202,15 @@ class SpiderBrainMonolithicBasicsTest(MonolithicArchitectureFixtures, unittest.T
             brain.true_monolithic_policy,
             OwnedOptionControllerTrueMonolithicNetwork,
         )
+
+    def test_owned_option_direction_bias_has_single_staticmethod_descriptor(self) -> None:
+        descriptor = inspect.getattr_static(
+            OwnedOptionControllerTrueMonolithicNetwork,
+            "_add_direction_bias",
+        )
+
+        self.assertIsInstance(descriptor, staticmethod)
+        self.assertTrue(inspect.isfunction(descriptor.__func__))
 
     def test_owned_option_active_leaf_controls_final_logits(self) -> None:
         network = self._owned_option_network()
@@ -446,6 +456,11 @@ class SpiderBrainMonolithicBasicsTest(MonolithicArchitectureFixtures, unittest.T
         self.assertTrue(stats["handoff_option_teacher_active"])
         self.assertGreater(stats["handoff_teacher_loss"], 0.0)
         self.assertGreater(stats["handoff_option_teacher_loss"], 0.0)
+        self.assertFalse(stats["post_rest_sequence_distill_active"])
+        self.assertGreater(stats["handoff_teacher_grad_norm"], 0.0)
+        self.assertGreater(stats["handoff_option_teacher_grad_norm"], 0.0)
+        self.assertEqual(stats["continuation_margin_loss"], 0.0)
+        self.assertEqual(stats["continuation_margin_grad_norm"], 0.0)
 
     def test_true_monolithic_continuation_scenarios_boost_auxiliary_weights(self) -> None:
         config = resolve_ablation_configs(
@@ -598,6 +613,27 @@ class SpiderBrainMonolithicBasicsTest(MonolithicArchitectureFixtures, unittest.T
         self.assertEqual(stats["continuation_replay_passes_configured"], 6)
         self.assertEqual(stats["continuation_replay_passes_applied"], 6)
 
+    def test_post_rest_sequence_targets_omit_unmatched_heads(self) -> None:
+        brain = SpiderBrain(seed=132, config=self._true_monolithic_config())
+        step = brain.act_train(self._build_observation(), sample=False)
+
+        step.teacher_action_target_stage = None
+        step.teacher_option_target_stage = "option_post_rest_inside"
+        option_only = brain._post_rest_release_sequence_distillation_targets(step)
+        self.assertEqual(option_only["action"].size, 0)
+        self.assertEqual(option_only["phase"].size, 0)
+        self.assertGreater(option_only["option"].size, 0)
+        self.assertAlmostEqual(float(np.sum(option_only["option"])), 1.0)
+
+        step.teacher_action_target_stage = "handoff_release"
+        step.teacher_option_target_stage = None
+        action_only = brain._post_rest_release_sequence_distillation_targets(step)
+        self.assertGreater(action_only["action"].size, 0)
+        self.assertGreater(action_only["phase"].size, 0)
+        self.assertEqual(action_only["option"].size, 0)
+        self.assertAlmostEqual(float(np.sum(action_only["action"])), 1.0)
+        self.assertAlmostEqual(float(np.sum(action_only["phase"])), 1.0)
+
     def test_true_monolithic_continuation_replay_passes_apply_when_enabled(self) -> None:
         config = resolve_ablation_configs(
             ["true_monolithic_option_affordance_position_phase_teacher_option_replay_policy"],
@@ -623,18 +659,29 @@ class SpiderBrainMonolithicBasicsTest(MonolithicArchitectureFixtures, unittest.T
         step.teacher_action_target_stage = "handoff_release"
         step.teacher_option_target_idx = 0
         step.teacher_option_target_stage = "option_reactivate"
+        runtime_state_before = brain.snapshot_direct_policy_runtime_state()
         stats = brain.learn(
             step,
             reward=0.25,
             next_observation=self._build_observation(),
             done=False,
         )
+        runtime_state_after = brain.snapshot_direct_policy_runtime_state()
         self.assertEqual(stats["continuation_replay_passes_configured"], 2)
         self.assertEqual(stats["continuation_replay_passes_applied"], 2)
         self.assertEqual(stats["continuation_replay_lr_scale"], 0.5)
         self.assertGreater(stats["continuation_replay_total_loss"], 0.0)
         self.assertGreater(stats["continuation_replay_total_grad_norm"], 0.0)
         self.assertGreater(stats["phase_loss"], 0.0)
+        self.assertFalse(stats["post_rest_sequence_distill_active"])
+        self.assertGreater(stats["phase_grad_norm"], 0.0)
+        self.assertEqual(runtime_state_after.keys(), runtime_state_before.keys())
+        for key, before in runtime_state_before.items():
+            after = runtime_state_after[key]
+            if isinstance(before, np.ndarray):
+                np.testing.assert_array_equal(after, before, err_msg=key)
+            else:
+                self.assertEqual(after, before, msg=key)
 
     def test_true_monolithic_continuation_margin_loss_applies_when_enabled(self) -> None:
         config = resolve_ablation_configs(

@@ -46,7 +46,7 @@ class _SimulationEpisodeMetricsTraceMixin:
         slip_info = info.get("motor_slip", {})
         if not isinstance(slip_info, dict):
             slip_info = {}
-        components = info.get("motor_execution_components", {})
+        components = info.get("motor_execution_components")
         if not isinstance(components, dict):
             components = slip_info.get("components", {})
         if not isinstance(components, dict):

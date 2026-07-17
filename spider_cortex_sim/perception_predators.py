@@ -567,7 +567,11 @@ def compute_per_type_threats(
                 [position],
                 radius=max(1, int(profile["smell_range"])),
             )
-            proximity = _normalized_proximity(distance, int(profile["smell_range"]))
+            proximity = (
+                _normalized_proximity(distance, int(profile["smell_range"]))
+                if float(smell_strength) > 0.0
+                else 0.0
+            )
             confidence = max(float(smell_strength), 0.5 * float(visual_view.certainty))
             threat_value = float(np.clip(0.55 * confidence + 0.45 * proximity, 0.0, 1.0))
             threats["olfactory_predator_threat"] = max(
@@ -575,8 +579,13 @@ def compute_per_type_threats(
                 threat_value,
             )
         else:
-            proximity = _normalized_proximity(distance, int(profile["vision_range"]))
-            confidence = max(float(visual_view.certainty), float(visual_view.occluded))
+            proximity = (
+                _normalized_proximity(distance, int(profile["vision_range"]))
+                if float(visual_view.visible) > 0.0
+                or float(visual_view.occluded) > 0.0
+                else 0.0
+            )
+            confidence = float(visual_view.certainty)
             threat_value = float(np.clip(0.55 * confidence + 0.45 * proximity, 0.0, 1.0))
             threats["visual_predator_threat"] = max(
                 threats["visual_predator_threat"],

@@ -547,7 +547,7 @@ SENSORY_CORTEX_LOCAL_TASKS: tuple[LocalTask, ...] = (
             "fatigue": 0.6,
             "light": 0.0,
         },
-        expected_favored_actions=("MOVE_LEFT", "ORIENT_LEFT"),
+        expected_favored_actions=("MOVE_RIGHT", "ORIENT_RIGHT"),
         description="Under low light, simultaneous appetitive and threat smell should still preserve a coherent escape heading away from the predator cue.",
     ),
 )

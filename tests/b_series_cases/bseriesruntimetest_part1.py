@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from .shared import *
 
 
@@ -1361,6 +1363,44 @@ class BSeriesRuntimeTestPart1(unittest.TestCase):
         self.assertGreaterEqual(int(decision.b26_stability_lock), 1)
         self.assertGreater(float(decision.b26_control_vote), 0.0)
         self.assertIn(decision.bridge_primitive_action, ACTIONS)
+
+    def test_b26_allostatic_pressure_uses_named_sleep_fields(self) -> None:
+        brain = SpiderBrain(seed=52, module_dropout=0.0, config=_b0_config())
+        brain.set_direct_policy_event_clock(26)
+        observation = _brain_observation(
+            {"map_template": "corridor_escape"},
+            hunger={"hunger": 0.50},
+            sleep={
+                "fatigue": 0.0,
+                "hunger": 0.50,
+                "health": 1.0,
+                "sleep_debt": 0.0,
+            },
+        )
+        inherited = (
+            "MOVE_TO_FOOD",
+            B25_METACOGNITIVE_CONFIDENCE_SELECTION_SOURCE,
+            "preserve_b25",
+            0,
+            {
+                "b25_decision": "preserve_b25",
+                "b25_confidence_vote": 0.0,
+                "b25_doubt_pressure": 0.0,
+                "b25_control_gain": 0.0,
+            },
+        )
+
+        with patch.object(
+            brain,
+            "_b25_metacognitive_confidence_semantic_action",
+            return_value=inherited,
+        ):
+            *_, trace = brain._b26_allostatic_prediction_semantic_action(
+                observation,
+                learned_semantic_action="MOVE_TO_FOOD",
+            )
+
+        self.assertAlmostEqual(float(trace["b26_setpoint_pressure"]), 0.255937)
 
     def test_b27_arousal_gain_uses_b26_transfer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

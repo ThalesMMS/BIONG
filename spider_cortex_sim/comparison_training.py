@@ -173,6 +173,7 @@ def _compare_named_training_regimes(
     )
     scenario_names = list(names or SCENARIO_NAMES)
     run_count = max(1, int(budget.scenario_episodes))
+    regime_stride = max(1, run_count * len(scenario_names))
     seed_values = tuple(seeds) if seeds is not None else budget.behavior_seeds
     if not seed_values:
         raise ValueError(
@@ -258,7 +259,7 @@ def _compare_named_training_regimes(
                         episodes_per_scenario=run_count,
                         capture_trace=False,
                         debug_trace=False,
-                        base_index=600_000 + regime_index * 20_000,
+                        base_index=600_000 + regime_index * regime_stride,
                     )
                 )
             finally:
@@ -273,7 +274,7 @@ def _compare_named_training_regimes(
                         episodes_per_scenario=run_count,
                         capture_trace=False,
                         debug_trace=False,
-                        base_index=600_000 + regime_index * 20_000,
+                        base_index=600_000 + regime_index * regime_stride,
                     )
                 )
             finally:

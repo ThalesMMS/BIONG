@@ -264,22 +264,23 @@ class SimulationSummaryMixin:
             eval_reflex_scale=primary_eval_reflex_scale,
             competence_type=primary_competence_type,
         )
+        unmeasured_self_sufficient_evaluation = {
+            "status": "not_evaluated",
+            "competence_type": "self_sufficient",
+            "is_primary_benchmark": False,
+            "eval_reflex_scale": 0.0,
+            "scenario_success_rate": None,
+            "episode_success_rate": None,
+            "mean_reward": None,
+        }
         if primary_competence_type == "self_sufficient":
             self_sufficient_evaluation = primary_evaluation_summary
             scaffolded_evaluation = None
         elif primary_competence_type == "scaffolded":
-            self_sufficient_evaluation = self._label_evaluation_summary(
-                self._aggregate_group([]),
-                eval_reflex_scale=0.0,
-                competence_type="self_sufficient",
-            )
+            self_sufficient_evaluation = unmeasured_self_sufficient_evaluation
             scaffolded_evaluation = primary_evaluation_summary
         else:
-            self_sufficient_evaluation = self._label_evaluation_summary(
-                self._aggregate_group([]),
-                eval_reflex_scale=0.0,
-                competence_type="self_sufficient",
-            )
+            self_sufficient_evaluation = unmeasured_self_sufficient_evaluation
             scaffolded_evaluation = None
         training_regime_summary = deepcopy(self._latest_training_regime_summary)
         training_regime_summary["is_experiment_of_record"] = (

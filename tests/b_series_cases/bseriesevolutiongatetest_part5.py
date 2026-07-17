@@ -200,6 +200,33 @@ class BSeriesEvolutionGateTestPart5(BSeriesEvolutionGateTestHelpers, unittest.Te
             gate["failures"],
         )
 
+    def test_b78_corridor_gate_rejects_stats_predator_contacts(self) -> None:
+        gate_fn = getattr(
+            b_series_evolution_module,
+            "b78_vestibular_balance_corridor_gate_result",
+            None,
+        )
+        self.assertIsNotNone(gate_fn)
+        results = [
+            self._b78_corridor_result(
+                episode,
+                steps=14,
+                alive=False,
+                food_distance_delta=12.0,
+                contacts=1,
+            )
+            for episode in range(3)
+        ]
+
+        gate = gate_fn(results)
+
+        self.assertFalse(gate["passed"])
+        self.assertEqual(gate["aggregate"]["corridor_safety_episodes"], 0)
+        self.assertIn(
+            "corridor_b78_aggregate:corridor_safety_episodes",
+            gate["failures"],
+        )
+
     def test_b78_corridor_gate_keeps_b77_base_as_diagnostic(self) -> None:
         gate_fn = getattr(
             b_series_evolution_module,

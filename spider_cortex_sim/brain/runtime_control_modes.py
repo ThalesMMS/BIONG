@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 from .b_series_progression import find_b_series_semantic_progression_descriptor
 from .runtime_shared import *
 
@@ -128,7 +130,12 @@ class _BrainRuntimePart9Mixin:
         policy_mode: str,
         training: bool,
     ) -> BrainStep:
-        try:
+        parameters = inspect.signature(self.act).parameters
+        accepts_training = "training" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if accepts_training:
             return self.act(
                 observation,
                 bus,
@@ -136,15 +143,12 @@ class _BrainRuntimePart9Mixin:
                 policy_mode=policy_mode,
                 training=training,
             )
-        except TypeError as exc:
-            if "unexpected keyword argument 'training'" not in str(exc):
-                raise
-            return self.act(
-                observation,
-                bus,
-                sample=sample,
-                policy_mode=policy_mode,
-            )
+        return self.act(
+            observation,
+            bus,
+            sample=sample,
+            policy_mode=policy_mode,
+        )
 
     def act_exploration(
         self,

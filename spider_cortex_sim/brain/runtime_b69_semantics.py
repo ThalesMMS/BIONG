@@ -84,7 +84,7 @@ class _BrainRuntimePart8fMixin:
         shelter_dist = self._b_series_float(meta, "shelter_dist")
         near_shelter = (
             1.0
-            if shelter_dist <= 1.0 or shelter_role in {"at_shelter", "deep_shelter"}
+            if shelter_dist <= 1.0 or shelter_role in {"inside", "deep"}
             else 0.0
         )
         recent_pain = self._b_series_float(meta, "recent_pain")

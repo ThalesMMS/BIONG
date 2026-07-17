@@ -6,6 +6,7 @@ from spider_cortex_sim.direct_policy_capabilities import (
     DirectPolicyCapabilities,
     derive_direct_policy_capabilities,
 )
+from spider_cortex_sim.bus import MessageBus
 
 
 class DirectPolicyCapabilitiesTest(unittest.TestCase):
@@ -74,6 +75,7 @@ class DirectPolicyCapabilitiesTest(unittest.TestCase):
         metadata = capabilities.architecture_metadata()
         self.assertEqual(metadata["direct_policy_hidden_dims"], [32])
         self.assertTrue(metadata["direct_policy_local_affordance_inputs"])
+        self.assertTrue(metadata["direct_policy_local_geodesic_inputs"])
         self.assertTrue(metadata["direct_policy_transition_prediction_head"])
         self.assertTrue(metadata["direct_policy_handoff_teacher"])
         self.assertTrue(hasattr(config, "direct_policy_local_affordance_inputs"))
@@ -94,4 +96,19 @@ class DirectPolicyCapabilitiesTest(unittest.TestCase):
         self.assertEqual(
             brain._build_monolithic_observation(observation).shape[0],
             expected_input_dim,
+        )
+
+    def test_action_trace_metadata_includes_local_geodesic_inputs(self) -> None:
+        brain = SpiderBrain(
+            seed=132,
+            module_dropout=0.0,
+            config=self._full_local_config(),
+        )
+        bus = MessageBus()
+
+        brain.act_inference(_build_observation(), bus=bus, sample=False)
+
+        payload = bus.topic_messages("action.selection")[0].payload
+        self.assertTrue(
+            payload["architecture_metadata"]["direct_policy_local_geodesic_inputs"]
         )

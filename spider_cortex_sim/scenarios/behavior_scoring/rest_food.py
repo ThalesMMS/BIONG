@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from .common import *
 
-def _score_night_rest(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
+def _score_night_rest(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+    *,
+    initial_sleep_debt: float = NIGHT_REST_INITIAL_SLEEP_DEBT,
+) -> BehavioralEpisodeScore:
     """
     Score night-rest behavior based on deep-shelter occupancy, presence of deep sleep, and reduction in sleep debt.
     
@@ -12,7 +17,9 @@ def _score_night_rest(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -
         BehavioralEpisodeScore: Score with the three night-rest checks and the assembled behavior_metrics described above.
     """
     deep_night_rate = float(stats.night_role_distribution.get("deep", 0.0))
-    sleep_debt_reduction = float(max(0.0, NIGHT_REST_INITIAL_SLEEP_DEBT - stats.final_sleep_debt))
+    sleep_debt_reduction = float(
+        max(0.0, float(initial_sleep_debt) - stats.final_sleep_debt)
+    )
     deep_sleep_reached = _trace_any_sleep_phase(trace, "DEEP_SLEEP")
     left_shelter, shelter_exit_tick = _trace_shelter_exit(trace)
     predator_visible_ticks = (
@@ -66,6 +73,17 @@ def _score_night_rest(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -
         objective="Validate safe, reproducible rest in deep shelter during the night.",
         checks=checks,
         behavior_metrics=behavior_metrics,
+    )
+
+
+def _score_continuous_survival_bootstrap(
+    stats: EpisodeStats,
+    trace: Sequence[Dict[str, object]],
+) -> BehavioralEpisodeScore:
+    return _score_night_rest(
+        stats,
+        trace,
+        initial_sleep_debt=CONTINUOUS_SURVIVAL_BOOTSTRAP_INITIAL_SLEEP_DEBT,
     )
 
 def _score_open_field_foraging(stats: EpisodeStats, trace: Sequence[Dict[str, object]]) -> BehavioralEpisodeScore:
@@ -717,6 +735,7 @@ def _score_sleep_vs_exploration_conflict(
     )
 
 __all__ = [
+    "_score_continuous_survival_bootstrap",
     "_score_continuous_survival_canonical",
     "_score_continuous_survival_post_rest_continuation",
     "_score_continuous_survival_re_rest_after_return",

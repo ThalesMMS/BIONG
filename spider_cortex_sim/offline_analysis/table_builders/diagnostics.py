@@ -4,6 +4,10 @@ import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 
+from ..constants import (
+    REFLEX_DOMINANCE_WARNING_THRESHOLD,
+    REFLEX_OVERRIDE_WARNING_THRESHOLD,
+)
 from .common import (
     _coerce_float,
     _coerce_optional_float,
@@ -250,6 +254,7 @@ def build_diagnostics(
             warning_key: str,
             threshold_key: str,
             status_key: str,
+            default_warning_threshold: float,
         ) -> dict[str, object] | None:
             value = _coerce_optional_float(reflex_dependence.get(value_key))
             if value is None:
@@ -259,7 +264,7 @@ def build_diagnostics(
                 reflex_dependence.get(threshold_key)
             )
             if warning_threshold is None:
-                warning_threshold = _coerce_optional_float(raw_warning)
+                warning_threshold = default_warning_threshold
             status = str(reflex_dependence.get(status_key) or "")
             if not status:
                 status = "warning" if raw_warning is True else "ok"
@@ -276,12 +281,14 @@ def build_diagnostics(
             "override_warning",
             "override_warning_threshold",
             "override_status",
+            REFLEX_OVERRIDE_WARNING_THRESHOLD,
         )
         dominance = top_level_indicator(
             "dominance_rate",
             "dominance_warning",
             "dominance_warning_threshold",
             "dominance_status",
+            REFLEX_DOMINANCE_WARNING_THRESHOLD,
         )
         if override is None and isinstance(indicators, Mapping):
             legacy_override = indicators.get("override_rate", {})

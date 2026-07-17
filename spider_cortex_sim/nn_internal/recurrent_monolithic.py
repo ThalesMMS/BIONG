@@ -173,8 +173,12 @@ class RecurrentTrueMonolithicNetwork:
         return grad_inputs
 
     def value_only(self, x: Array) -> float:
-        _, value, _ = self.forward(x, store_cache=False)
-        return value
+        hidden_state = self.get_hidden_state()
+        try:
+            _, value, _ = self.forward(x, store_cache=False)
+            return value
+        finally:
+            self.set_hidden_state(hidden_state)
 
     def state_dict(self) -> dict[str, object]:
         state = {
@@ -649,8 +653,14 @@ class RecurrentEventAttentionTrueMonolithicNetwork:
         return grad_x
 
     def value_only(self, x: Array) -> float:
-        _, value = self.forward(x, store_cache=False)
-        return value
+        hidden_state = self.get_hidden_state()
+        attention_summary = dict(self.last_attention_summary)
+        try:
+            _, value = self.forward(x, store_cache=False)
+            return value
+        finally:
+            self.set_hidden_state(hidden_state)
+            self.last_attention_summary = attention_summary
 
     def state_dict(self) -> dict[str, object]:
         return {

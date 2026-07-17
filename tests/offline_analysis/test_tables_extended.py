@@ -281,6 +281,13 @@ class BuildCreditAssignmentTablesTest(unittest.TestCase):
         findings = [item["finding"] for item in result["interpretations"]]
         self.assertIn("Failure by local credit insufficiency", findings)
         self.assertIn("Counterfactual scaling across the ladder", findings)
+        local_failure = next(
+            item
+            for item in result["interpretations"]
+            if item["finding"] == "Failure by local credit insufficiency"
+        )
+        self.assertEqual(local_failure["evidence"], -0.2)
+        self.assertIn("trails broadcast by 0.20", local_failure["interpretation"])
 
     def test_build_credit_assignment_tables_uses_without_reflex_support_payloads(
         self,

@@ -7,6 +7,7 @@ DIRECT_LOCAL_BRANCHES_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_local_affordance_post_rest_probe_replayable_teacher_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,
@@ -44,6 +45,7 @@ DIRECT_LOCAL_BRANCHES_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_local_spatial_post_rest_probe_replayable_teacher_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,
@@ -82,6 +84,7 @@ DIRECT_LOCAL_BRANCHES_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_local_transition_post_rest_probe_replayable_teacher_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,
@@ -121,6 +124,7 @@ DIRECT_LOCAL_BRANCHES_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_local_transition_rollout_post_rest_probe_replayable_teacher_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,
@@ -161,6 +165,7 @@ DIRECT_LOCAL_BRANCHES_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_transition_prediction_feedback_post_rest_probe_replayable_teacher_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,
@@ -203,6 +208,7 @@ DIRECT_LOCAL_BRANCHES_DIAGNOSTIC_VARIANT_SPECS: tuple[DirectPolicyDiagnosticVari
     direct_policy_diagnostic_variant(
         'true_monolithic_option_affordance_position_phase_option_dynamics_separate_action_backbone_transition_rollout_prediction_feedback_post_rest_probe_replayable_teacher_distill_option_replay_policy',
         direct_policy_recurrent=True,
+        direct_policy_phase_head=True,
         direct_policy_event_attention=True,
         direct_policy_event_buffer_size=8,
         direct_policy_option_head=True,

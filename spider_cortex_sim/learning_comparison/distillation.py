@@ -182,7 +182,10 @@ def build_distillation_comparison_report(
             f"{baseline_success:.3f} to {best_summary['scenario_success_rate']:.3f} "
             f"against a teacher reference of {teacher_success:.3f}."
         )
-    elif best_summary["scenario_success_rate"] >= baseline_success * 0.5:
+    elif (
+        best_summary["scenario_success_rate"] > 0.0
+        and best_summary["scenario_success_rate"] >= baseline_success * 0.5
+    ):
         answer = "partially"
         rationale = (
             f"The modular student achieved non-zero scenario_success_rate "

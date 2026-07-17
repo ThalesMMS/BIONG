@@ -295,7 +295,7 @@ def capacity_profile_for_axis(
         ),
         scale_factor=(
             target.scale_factor
-            if axis_name == "all"
+            if axis_name in {"proposers", "all"}
             else base.scale_factor
         ),
     )

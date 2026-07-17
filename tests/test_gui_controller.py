@@ -126,6 +126,35 @@ class GUIControllerTest(unittest.TestCase):
         self.assertEqual(controller.phase, "training")
         self.assertEqual(seen_learn_calls, [True])
 
+    def test_legacy_load_fallback_honors_evaluate_mode(self) -> None:
+        controller = GUIController(
+            run_config=GUIRunConfig(width=5, height=5, food_count=1, max_steps=1, seed=7)
+        )
+        controller.configure_run(train_episodes=1, eval_episodes=0)
+        controller.training_rewards.append(3.0)
+        seen_learn_calls: list[bool] = []
+        controller.brain.learn = lambda *args, **kwargs: seen_learn_calls.append(True)
+
+        with (
+            patch(
+                "spider_cortex_sim.gui.controller.discover_gui_checkpoints",
+                return_value=[],
+            ),
+            patch.object(controller.brain, "load", return_value=["visual_cortex"]),
+        ):
+            loaded = controller.load_brain("legacy_brain", mode="evaluate")
+
+        self.assertTrue(loaded)
+        self.assertEqual(controller.checkpoint_load_mode, "evaluate")
+        self.assertEqual(controller.phase, "evaluation")
+        self.assertEqual(controller.current_episode, 0)
+        self.assertEqual(controller.training_rewards, [])
+        self.assertTrue(controller.paused)
+        self.assertGreaterEqual(controller.total_eval_episodes, 1)
+
+        controller._do_step()
+        self.assertEqual(seen_learn_calls, [])
+
     def test_load_selected_checkpoint_reports_incompatible_load_without_rebinding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -256,6 +285,44 @@ class GUIControllerTest(unittest.TestCase):
 
         self.assertEqual(seen_done, [True])
         self.assertTrue(controller.episode_done)
+
+    def test_zero_training_budget_starts_evaluation_without_learning(self) -> None:
+        sim = SpiderSimulation(width=5, height=5, food_count=1, max_steps=1, seed=3)
+        controller = GUIController(sim)
+        seen_learn_calls: list[bool] = []
+        sim.brain.learn = lambda *args, **kwargs: seen_learn_calls.append(True)
+
+        controller.configure_run(train_episodes=0, eval_episodes=3)
+        controller._do_step()
+
+        self.assertEqual(controller.phase, "evaluation")
+        self.assertEqual(controller.current_episode, 0)
+        self.assertEqual(seen_learn_calls, [])
+
+    def test_zero_evaluation_budget_finishes_after_last_training_episode(self) -> None:
+        sim = SpiderSimulation(width=5, height=5, food_count=1, max_steps=1, seed=3)
+        controller = GUIController(sim)
+        controller.configure_run(train_episodes=1, eval_episodes=0)
+        controller.episode_done = True
+
+        with patch.object(controller, "_start_episode", wraps=controller._start_episode) as start:
+            controller._advance_episode()
+
+        self.assertEqual(controller.phase, "done")
+        self.assertTrue(controller.paused)
+        start.assert_not_called()
+
+    def test_zero_training_and_evaluation_budgets_start_done(self) -> None:
+        sim = SpiderSimulation(width=5, height=5, food_count=1, max_steps=1, seed=3)
+        controller = GUIController(sim)
+
+        with patch.object(controller, "_start_episode", wraps=controller._start_episode) as start:
+            controller.configure_run(train_episodes=0, eval_episodes=0)
+
+        self.assertEqual(controller.phase, "done")
+        self.assertTrue(controller.paused)
+        self.assertIsNone(controller.observation)
+        start.assert_not_called()
 
     def test_model_switch_recreates_runtime_and_can_select_legacy_b0(self) -> None:
         run_config = GUIRunConfig(width=5, height=5, food_count=1, max_steps=2, seed=3)

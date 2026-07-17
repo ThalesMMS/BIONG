@@ -4,6 +4,27 @@ from .shared import *
 
 
 class BSeriesActionSpaceTest(unittest.TestCase):
+    def test_frozen_b_series_policy_reports_zero_gradient_norm(self) -> None:
+        sim = SpiderSimulation(
+            seed=17,
+            max_steps=2,
+            brain_config=_b0_config(),
+        )
+        observation = sim.world.reset(seed=17)
+        decision = sim.brain.act(observation, sample=False, training=True)
+        sim.brain.freeze_proposers()
+
+        stats = sim.brain.learn(
+            decision,
+            reward=10.0,
+            next_observation=observation,
+            done=True,
+        )
+
+        frozen_name = sim.brain.frozen_module_names()[0]
+        self.assertNotEqual(stats["td_error"], 0.0)
+        self.assertEqual(stats["module_gradient_norms"][frozen_name], 0.0)
+
     def test_current_world_still_exposes_only_nine_primitive_actions(self) -> None:
         self.assertEqual(len(ACTIONS), 9)
         self.assertEqual(tuple(ACTIONS), tuple(ACTION_TO_INDEX.keys()))

@@ -114,6 +114,27 @@ class ScoreFunctionCoreTest(ScoreFunctionTestBase):
         score = spec.score_episode(stats, trace)
         self.assertIn("deep_night_shelter", score.checks)
 
+    def test_continuous_survival_bootstrap_uses_its_sleep_debt_baseline(self) -> None:
+        spec = get_scenario("continuous_survival_bootstrap")
+        stats = _make_episode_stats(
+            scenario="continuous_survival_bootstrap",
+            night_role_distribution={
+                "outside": 0.0,
+                "entrance": 0.0,
+                "inside": 0.0,
+                "deep": 1.0,
+            },
+            final_sleep_debt=0.15,
+        )
+
+        score = spec.score_episode(
+            stats,
+            [{"state": {"sleep_phase": "DEEP_SLEEP"}}],
+        )
+
+        self.assertAlmostEqual(score.behavior_metrics["sleep_debt_reduction"], 0.05)
+        self.assertFalse(score.checks["sleep_debt_reduced"].passed)
+
     def test_night_rest_emits_trace_diagnostics_and_failure_mode(self) -> None:
         spec = get_scenario("night_rest")
         stats = _make_episode_stats(

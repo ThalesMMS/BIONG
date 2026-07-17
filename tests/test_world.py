@@ -153,6 +153,40 @@ class SpiderWorldCoreTest(SpiderWorldTestBase):
 
         self.assertGreaterEqual(world.manhattan(cell, world.spider_pos()), 5)
 
+    def test_random_spawn_cell_fallback_rejects_existing_food(self) -> None:
+        world = SpiderWorld(seed=38, lizard_move_interval=999999)
+        world.reset(seed=38)
+        occupied = next(
+            cell
+            for cell in world.map_template.food_spawn_cells
+            if cell != world.spider_pos()
+        )
+        world.food_positions = [occupied]
+
+        with patch.object(
+            world,
+            "is_walkable",
+            side_effect=lambda cell: cell == occupied,
+        ), self.assertRaises(ValueError):
+            world._random_spawn_cell([], avoid_lizard=False)
+
+    def test_respawn_food_removes_only_consumed_occurrence(self) -> None:
+        world = SpiderWorld(seed=39, lizard_move_interval=999999)
+        world.reset(seed=39)
+        eaten = (4, 4)
+        other = (5, 5)
+        replacement = (6, 6)
+        world.food_positions = [eaten, eaten, other]
+
+        with patch.object(
+            world,
+            "_random_food_cell",
+            return_value=replacement,
+        ):
+            world.respawn_food(eaten)
+
+        self.assertEqual(world.food_positions, [eaten, other, replacement])
+
     def test_reset_initializes_heading_toward_nearest_entrance(self) -> None:
         world = SpiderWorld(seed=71, lizard_move_interval=999999)
         obs = world.reset(seed=71)

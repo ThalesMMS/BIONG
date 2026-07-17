@@ -27,6 +27,7 @@ from spider_cortex_sim.offline_analysis.extractors import (
     extract_shaping_audit,
     extract_training_eval_series,
     extract_unified_ladder_report,
+    _variant_with_minimal_reflex_support,
 )
 from spider_cortex_sim.offline_analysis.ingestion import load_summary, normalize_behavior_rows
 from spider_cortex_sim.offline_analysis.report import build_report_data, write_report
@@ -372,6 +373,52 @@ class OfflineAnalysisLadderAndAblationTest(OfflineAnalysisToleranceFixtures, uni
             item for item in diagnostics if item["label"] == "Best ablation variant"
         )
         self.assertEqual(best["value"], "no_module_reflexes (0.80)")
+
+    def test_minimal_reflex_variant_requires_replacement_summary(self) -> None:
+        original = {
+            "summary": {
+                "scenario_success_rate": 0.9,
+                "eval_reflex_scale": 1.0,
+            },
+            "suite": {"with_reflex": {"success_rate": 0.9}},
+            "without_reflex_support": {
+                "suite": {"without_reflex": {"success_rate": 0.2}}
+            },
+        }
+
+        normalized = _variant_with_minimal_reflex_support(original)
+
+        self.assertEqual(normalized["summary"]["scenario_success_rate"], 0.9)
+        self.assertEqual(normalized["summary"]["eval_reflex_scale"], 1.0)
+        self.assertEqual(normalized["suite"], original["suite"])
+        self.assertNotIn("primary_evaluation", normalized)
+
+    def test_extract_ablations_prefers_declared_reference_variant(self) -> None:
+        summary = {
+            "behavior_evaluation": {
+                "ablations": {
+                    "reference_variant": "three_center_modular",
+                    "variants": {
+                        "modular_full": {
+                            "summary": {"scenario_success_rate": 0.8},
+                        },
+                        "three_center_modular": {
+                            "summary": {"scenario_success_rate": 0.4},
+                        },
+                    },
+                }
+            }
+        }
+
+        ablations = extract_ablations(summary, [])
+
+        self.assertEqual(ablations["reference_variant"], "three_center_modular")
+        self.assertEqual(
+            ablations["deltas_vs_reference"]["modular_full"]["summary"][
+                "scenario_success_rate_delta"
+            ],
+            0.4,
+        )
 
     def test_build_report_data_surfaces_no_reflex_primary_benchmark(self) -> None:
         summary = {

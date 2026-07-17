@@ -25,7 +25,7 @@ class _BrainRuntimePart10Mixin:
             bus (MessageBus | None): Optional message bus for publishing per-module proposal diagnostics and final selection/execution diagnostics; pass None to disable publishing.
             sample (bool): If True, sample the executed action from the final policy distribution; if False, select the greedy argmax action.
             policy_mode (str): Execution mode, either "normal" to apply learned action-center and motor-cortex corrections, or "reflex_only" to select directly from post-reflex modular proposals. "reflex_only" requires a modular architecture with reflexes enabled.
-            training (bool | None): If provided, forces training mode on/off for internal network cache and learned-arbitration behavior; if None, training mode is inferred from `sample` or an internal override.
+            training (bool | None): If provided, forces training mode on/off for internal network cache and learned-arbitration behavior; if None, training mode is inferred from `sample`.
         
         Returns:
             BrainStep: Decision container populated with per-module ModuleResult entries, action-center and motor-cortex logits/policies, combined logits with and without reflexes, the final policy and value estimate, selected intent and action indices, override flags, controller input vectors, the active `policy_mode`, and the computed `arbitration_decision`.
@@ -46,11 +46,7 @@ class _BrainRuntimePart10Mixin:
                 "policy_mode='reflex_only' requires reflexes to be enabled."
             )
 
-        runtime_training = getattr(self, "_act_training_override", None)
-        if training is None:
-            training_mode = bool(sample if runtime_training is None else runtime_training)
-        else:
-            training_mode = bool(training)
+        training_mode = bool(sample if training is None else training)
         store_cache = training_mode and policy_mode == "normal"
         proposal_sum = np.zeros(self.action_dim, dtype=float)
         action_center_input = np.zeros(0, dtype=float)
@@ -345,13 +341,15 @@ class _BrainRuntimePart10Mixin:
                     if hidden_before is not None
                     else np.zeros_like(hidden_after, dtype=float)
                 )
+                hidden_reset_event = bool(self._direct_policy_hidden_reset_pending)
+                self._direct_policy_hidden_reset_pending = False
                 direct_policy_trace_payload = {
                     "recurrent_hidden_norm": round(float(np.linalg.norm(hidden_after)), 6),
                     "recurrent_hidden_delta_norm": round(
                         float(np.linalg.norm(hidden_after - hidden_before_array)),
                         6,
                     ),
-                    "hidden_reset_event": bool(self._direct_policy_hidden_reset_pending),
+                    "hidden_reset_event": hidden_reset_event,
                     "architecture_metadata": {
                         "direct_policy_recurrent": bool(self.config.direct_policy_recurrent),
                         "direct_policy_hidden_dims": list(self.config.direct_policy_hidden_dims),
@@ -411,6 +409,13 @@ class _BrainRuntimePart10Mixin:
                             getattr(
                                 self.config,
                                 "direct_policy_local_transition_rollout_inputs",
+                                False,
+                            )
+                        ),
+                        "direct_policy_local_geodesic_inputs": bool(
+                            getattr(
+                                self.config,
+                                "direct_policy_local_geodesic_inputs",
                                 False,
                             )
                         ),
@@ -1343,7 +1348,6 @@ class _BrainRuntimePart10Mixin:
                         **direct_policy_trace_payload,
                     },
                 )
-                self._direct_policy_hidden_reset_pending = False
             else:
                 arbitration_payload = arbitration.to_payload() if arbitration is not None else {}
                 bus.publish(

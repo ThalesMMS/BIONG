@@ -11,6 +11,7 @@ from ...metrics import (
 )
 from ...continuous_survival import build_continuous_survival_evaluation
 from ..specs import (
+    CONTINUOUS_SURVIVAL_BOOTSTRAP_INITIAL_SLEEP_DEBT,
     NIGHT_REST_INITIAL_SLEEP_DEBT,
     FOOD_DEPRIVATION_INITIAL_HUNGER,
     SLEEP_VS_EXPLORATION_INITIAL_SLEEP_DEBT,

@@ -435,7 +435,8 @@ def _variant_with_minimal_reflex_support(
     
     Parameters:
         payload (Mapping[str, object]): An ablation variant payload, optionally containing a
-            `without_reflex_support` mapping with alternative `config`, `summary`,
+        `without_reflex_support` mapping with a replacement `summary` and optional
+        alternative `config`,
             `suite`, or `legacy_scenarios` entries.
     
     Returns:
@@ -448,6 +449,8 @@ def _variant_with_minimal_reflex_support(
     result = dict(payload)
     without_reflex = payload.get("without_reflex_support")
     if not isinstance(without_reflex, Mapping):
+        return result
+    if not isinstance(without_reflex.get("summary"), Mapping):
         return result
     for key in (
         "config",

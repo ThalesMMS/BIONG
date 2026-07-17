@@ -45,12 +45,11 @@ def _module_local_sufficiency_summary(
     def add_rows(module_mapping: Mapping[str, object], mode: str) -> None:
         for module_name, runs in sorted(module_mapping.items()):
             run_list = runs if isinstance(runs, list) else []
+            valid_runs = [run for run in run_list if isinstance(run, Mapping)]
             seeds: list[int] = []
             minimal_levels: list[int] = []
-            canonical_v4_pass = True
-            for run in run_list:
-                if not isinstance(run, Mapping):
-                    continue
+            canonical_v4_pass = bool(valid_runs)
+            for run in valid_runs:
                 seeds.append(int(_coerce_float(run.get("seed"), 0.0)))
                 report = _mapping_or_empty(run.get("report"))
                 minimal_level = report.get("minimal_sufficient_level")
@@ -73,7 +72,7 @@ def _module_local_sufficiency_summary(
                     "seed_count": len(seeds),
                     "seeds": ", ".join(str(seed) for seed in sorted(seeds)),
                     "minimal_sufficient_level": (
-                        min(minimal_levels) if minimal_levels else None
+                        max(minimal_levels) if minimal_levels else None
                     ),
                     "canonical_v4_pass": canonical_v4_pass,
                     "partial_variant_coverage": str(module_name) in partial_variant_coverage,

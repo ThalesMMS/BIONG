@@ -28,11 +28,8 @@ def b41_executive_workspace_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b41_decision"))
             for item in trace
@@ -159,11 +156,8 @@ def b42_error_monitor_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b42_decision"))
             for item in trace
@@ -290,11 +284,8 @@ def b43_adaptive_precision_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b43_decision"))
             for item in trace
@@ -421,11 +412,8 @@ def b44_thalamic_relay_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b44_decision"))
             for item in trace
@@ -552,11 +540,8 @@ def b45_reticular_inhibition_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b45_decision"))
             for item in trace
@@ -683,11 +668,8 @@ def b46_corticothalamic_feedback_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b46_decision"))
             for item in trace
@@ -813,11 +795,8 @@ def b47_oscillatory_synchrony_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b47_decision"))
             for item in trace
@@ -931,11 +910,8 @@ def b48_cerebellar_timing_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b48_decision"))
             for item in trace
@@ -1049,11 +1025,8 @@ def b49_striatal_action_gate_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b49_decision"))
             for item in trace
@@ -1168,11 +1141,8 @@ def b50_habit_chunking_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b50_decision"))
             for item in trace

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from spider_cortex_sim.agent import SpiderBrain
 from spider_cortex_sim.checkpointing import (
     CheckpointPenaltyMode,
     CheckpointSelectionConfig,
@@ -176,10 +177,19 @@ class FileSha256Test(unittest.TestCase):
 class CheckpointPreloadFingerprintTest(unittest.TestCase):
     """Tests for checkpoint_preload_fingerprint()."""
 
+    def test_shipped_default_checkpoint_loads_with_current_architecture(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "spider_brain"
+        brain = SpiderBrain(seed=7, module_dropout=0.05)
+
+        loaded = brain.load(root)
+
+        self.assertEqual(set(loaded), set(brain.count_parameters()))
+
     def test_none_load_brain_returns_null_payload(self) -> None:
         result = checkpoint_preload_fingerprint(None)
         self.assertIsNone(result["load_brain"])
         self.assertIsNone(result["metadata_sha256"])
+        self.assertIsNone(result["artifact_sha256"])
         self.assertIsNone(result["load_modules"])
         self.assertIsNone(result["module_sha256"])
 
@@ -190,6 +200,7 @@ class CheckpointPreloadFingerprintTest(unittest.TestCase):
         try:
             result = checkpoint_preload_fingerprint(path)
             self.assertEqual(result["load_brain"], str(path))
+            self.assertIsNone(result["metadata_sha256"])
             self.assertIsNotNone(result["artifact_sha256"])
             self.assertIsNone(result["module_sha256"])
         finally:
@@ -236,7 +247,7 @@ class CheckpointPreloadFingerprintTest(unittest.TestCase):
             self.assertIsNotNone(result["metadata_sha256"])
             self.assertIn("visual_cortex", result["module_sha256"])
             self.assertIn("sensory_cortex", result["module_sha256"])
-            self.assertIsNone(result.get("artifact_sha256"))
+            self.assertIsNone(result["artifact_sha256"])
 
     def test_directory_path_with_specified_modules_only_hashes_those(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

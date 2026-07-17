@@ -9,6 +9,7 @@ from spider_cortex_sim.offline_analysis.tables import (
     compare_capacity_totals,
     build_diagnostics,
     build_effect_size_tables,
+    build_reward_profile_ladder_tables,
 )
 from spider_cortex_sim.offline_analysis.ingestion import normalize_behavior_rows
 
@@ -20,6 +21,35 @@ from .conftest import (
 )
 
 class OfflineAnalysisUncertaintyTablesTest(unittest.TestCase):
+    def test_reward_profile_ladder_preserves_missing_success_rates(self) -> None:
+        tables = build_reward_profile_ladder_tables(
+            ladder_profile_comparison={
+                "available": True,
+                "profiles": {
+                    "classic": {
+                        "variants": {
+                            "incomplete": {"summary": {}},
+                            "zero": {
+                                "summary": {
+                                    "scenario_success_rate": 0.0,
+                                    "episode_success_rate": 0.0,
+                                }
+                            },
+                        }
+                    }
+                },
+            }
+        )
+        rows = {
+            row["variant"]: row
+            for row in tables["rows"]["ladder_by_profile"]
+        }
+
+        self.assertIsNone(rows["incomplete"]["scenario_success_rate"])
+        self.assertIsNone(rows["incomplete"]["episode_success_rate"])
+        self.assertEqual(rows["zero"]["scenario_success_rate"], 0.0)
+        self.assertEqual(rows["zero"]["episode_success_rate"], 0.0)
+
     def test_compare_capacity_totals_reports_match_status(self) -> None:
         result = compare_capacity_totals(
             {
@@ -165,6 +195,73 @@ class OfflineAnalysisUncertaintyTablesTest(unittest.TestCase):
             assert_uncertainty_fields(self, row)
         self.assertEqual(effect_rows[0]["cohens_d"], 4.0)
         self.assertEqual(effect_rows[0]["effect_magnitude"], "large")
+
+    def test_scalar_claim_effect_uses_single_companion_condition(self) -> None:
+        summary = {
+            "behavior_evaluation": {
+                "claim_tests": {
+                    "claims": {
+                        "noise_robustness": {
+                            "status": "passed",
+                            "passed": True,
+                            "primary_metric": "scenario_success_rate",
+                            "effect_size": 0.2,
+                            "effect_size_uncertainty": {
+                                "off_diagonal": uncertainty_payload(
+                                    0.2,
+                                    0.1,
+                                    0.3,
+                                    [0.1, 0.3],
+                                )
+                            },
+                            "cohens_d": {"off_diagonal": 0.8},
+                            "effect_magnitude": {"off_diagonal": "large"},
+                        }
+                    }
+                }
+            }
+        }
+
+        claim_rows = build_claim_test_tables(summary)["claim_results"]["rows"]
+        effect_row = next(row for row in claim_rows if row["role"] == "effect_size")
+        aggregate_rows = build_effect_size_tables(summary)["effect_sizes"]["rows"]
+
+        self.assertEqual(effect_row["condition"], "off_diagonal")
+        self.assertEqual(effect_row["cohens_d"], 0.8)
+        self.assertEqual(effect_row["effect_magnitude"], "large")
+        self.assertEqual(effect_row["ci_lower"], 0.1)
+        self.assertTrue(
+            any(
+                row["domain"] == "claim_test"
+                and row["comparison"] == "off_diagonal"
+                for row in aggregate_rows
+            )
+        )
+
+    def test_scalar_claim_effect_ignores_top_level_uncertainty_keys(self) -> None:
+        summary = {
+            "behavior_evaluation": {
+                "claim_tests": {
+                    "claims": {
+                        "noise_robustness": {
+                            "status": "passed",
+                            "passed": True,
+                            "effect_size": 0.2,
+                            "effect_size_uncertainty": {"mean": 0.2},
+                        }
+                    }
+                }
+            }
+        }
+
+        effect_row = next(
+            row
+            for row in build_claim_test_tables(summary)["claim_results"]["rows"]
+            if row["role"] == "effect_size"
+        )
+
+        self.assertEqual(effect_row["condition"], "effect_size")
+
     def test_build_claim_test_tables_uses_metric_specific_reference_uncertainty(self) -> None:
         summary = build_uncertainty_summary()
         claim = summary["behavior_evaluation"]["claim_tests"]["claims"][
@@ -244,6 +341,34 @@ class OfflineAnalysisUncertaintyTablesTest(unittest.TestCase):
         self.assertEqual(ladder_row["n_seeds"], 2)
         self.assertEqual(ladder_row["effect_size_n_seeds"], 2)
         self.assertEqual(ladder_row["delta_n_seeds"], 2)
+
+    def test_effect_size_tables_do_not_fabricate_missing_metric_deltas(self) -> None:
+        summary = {
+            "behavior_evaluation": {
+                "ablations": {
+                    "reference_variant": "modular_full",
+                    "variants": {
+                        "modular_full": {
+                            "summary": {"scenario_success_rate": 0.5},
+                        },
+                        "true_monolithic_policy": {"summary": {}},
+                        "monolithic_policy": {
+                            "summary": {"scenario_success_rate": 0.72},
+                        },
+                    },
+                }
+            }
+        }
+
+        rows = build_effect_size_tables(summary)["effect_sizes"]["rows"]
+
+        self.assertFalse(
+            any(
+                row["baseline"] == "true_monolithic_policy"
+                and row["comparison"] == "monolithic_policy"
+                for row in rows
+            )
+        )
 
     def test_build_effect_size_tables_preserves_ladder_rows_from_behavior_rows(self) -> None:
         rows = normalize_behavior_rows(

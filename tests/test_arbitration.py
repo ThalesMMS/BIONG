@@ -108,6 +108,12 @@ class ArbitrationModuleFunctionSignatureTest(unittest.TestCase):
         self.assertIsNone(brain.arbitration_network.cache)
         self.assertNotEqual(float(brain.arbitration_network.W1[0, 0]), 0.0)
 
+    def test_warm_start_skips_missing_fixed_formula_network(self) -> None:
+        warm_start_arbitration_network(
+            None,
+            ablation_config=BrainAblationConfig(use_learned_arbitration=False),
+        )
+
     def test_compute_and_gating_accept_explicit_context(self) -> None:
         brain = SpiderBrain(seed=19, module_dropout=0.0)
         obs = _blank_obs()

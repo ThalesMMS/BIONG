@@ -81,11 +81,8 @@ def b61_amygdala_safety_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b61_decision"))
             for item in trace
@@ -213,11 +210,8 @@ def b62_defensive_mode_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b62_decision"))
             for item in trace
@@ -351,11 +345,8 @@ def b63_periaqueductal_escape_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b63_decision"))
             for item in trace
@@ -442,6 +433,7 @@ def b63_periaqueductal_escape_corridor_gate_result(
         "escape_phase_episodes": escape_phase_episodes >= 2,
         "escape_pressure_episodes": escape_pressure_episodes >= 2,
         "shelter_vector_episodes": shelter_vector_episodes >= 2,
+        "freeze_release_episodes": freeze_release_episodes >= 2,
         "lock_or_safe_episodes": lock_or_safe_episodes >= 2,
     }
     failures.extend(
@@ -487,11 +479,8 @@ def b64_vagal_recovery_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b64_decision"))
             for item in trace
@@ -609,11 +598,8 @@ def b65_enteric_assimilation_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b65_decision"))
             for item in trace
@@ -732,11 +718,8 @@ def b66_immune_malaise_corridor_gate_result(
     for result in results:
         episode = int(result["evaluation_episode"])
         trace = result["trace"]
-        metrics = result.get("metrics", {})
         primitive_ok, primitive_violations = trace_uses_only_primitive_actions(trace)
-        predator_contacts = int(
-            metrics.get("predator_contacts", result.get("predator_contacts", 0)) or 0
-        )
+        predator_contacts = result_predator_contacts(result)
         decisions = [
             str(item.get("b66_decision"))
             for item in trace
